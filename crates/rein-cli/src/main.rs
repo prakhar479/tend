@@ -78,6 +78,17 @@ enum Cmd {
         #[arg(long)]
         session: Option<PathBuf>,
     },
+    /// Note that rein got something wrong: an action (a-N), an output (o-N), an entry
+    /// number, or `session`. `rein review` lists the notes.
+    Flag {
+        target: String,
+        #[arg(required = true, num_args = 1..)]
+        note: Vec<String>,
+        #[arg(long)]
+        session: Option<PathBuf>,
+    },
+    /// List flags across all sessions, with what each one points at.
+    Review,
     /// Reverse an action (Phase 3).
     Undo { id: String },
     /// Run look mode over an existing Claude Code transcript, or over all of them.
@@ -157,6 +168,48 @@ fn main() {
     }
 }
 
+/// Every flag, grouped by session, with the flagged entry and how to look closer.
+fn review(sessions: &[PathBuf]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let (mut flags, mut with) = (0, 0);
+    for dir in sessions {
+        let list = store::read_flags(dir);
+        if list.is_empty() {
+            continue;
+        }
+        flags += list.len();
+        with += 1;
+        let entries = store::read_entries(dir).unwrap_or_default();
+        let label = dir
+            .file_name()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+        let _ = writeln!(out, "Session {label}");
+        for f in &list {
+            let what = match report::find_target(&entries, &f.target) {
+                Some(e) => report::describe_entry(e),
+                None => format!("{} (whole session)", f.target),
+            };
+            let _ = writeln!(out, "  - {}", short(&what));
+            let _ = writeln!(out, "    note: {}", f.note);
+            let look = if f.target.starts_with("o-") {
+                format!("rein show {} --session {}", f.target, dir.display())
+            } else if f.target == "session" {
+                format!("rein report --session {}", dir.display())
+            } else {
+                format!("rein why {} --session {}", f.target, dir.display())
+            };
+            let _ = writeln!(out, "    look: {look}");
+        }
+    }
+    format!("{flags} flags in {with} sessions\n{out}")
+}
+
+fn short(s: &str) -> String {
+    rein_core::text::truncate_chars(s, 200)
+}
+
 fn run(cli: Cli) -> Result<i32> {
     match cli.cmd {
         Cmd::Claude { mode, args } => launcher::run_claude(mode.into(), args),
@@ -192,6 +245,11 @@ fn run(cli: Cli) -> Result<i32> {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
             print!("{}", report::render(&label, &entries));
+            let flags = store::read_flags(&dir);
+            println!("Flags: {}", flags.len());
+            for f in &flags {
+                println!("  - {}: {}", f.target, f.note);
+            }
             Ok(0)
         }
         Cmd::Show { id, session } => {
@@ -200,6 +258,31 @@ fn run(cli: Cli) -> Result<i32> {
             let hash = report::find_output_blob(&entries, &id)
                 .ok_or_else(|| anyhow::anyhow!("no output {id} in {}", dir.display()))?;
             print!("{}", store::read_blob(&dir, &hash)?);
+            Ok(0)
+        }
+        Cmd::Flag {
+            target,
+            note,
+            session,
+        } => {
+            let dir = paths::resolve_session(session)?;
+            if target != "session" {
+                let entries = store::read_entries(&dir)?;
+                if report::find_target(&entries, &target).is_none() {
+                    bail!("no entry `{target}` in {}", dir.display());
+                }
+            }
+            let flag = store::Flag {
+                ts_ms: paths::now_ms(),
+                target: target.clone(),
+                note: note.join(" "),
+            };
+            store::append_flag(&dir, &flag)?;
+            println!("Flagged {target}. `rein review` lists all flags.");
+            Ok(0)
+        }
+        Cmd::Review => {
+            print!("{}", review(&paths::list_sessions()));
             Ok(0)
         }
         Cmd::Why { id, session } => {

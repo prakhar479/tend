@@ -124,6 +124,33 @@ fn check_format(first_line: &str, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A user's note on a session, an action, an output, or an entry (`rein flag`). Flags
+/// are the review queue for Phase 1: what rein got wrong. They live next to the ledger,
+/// not in it, so the controller stays the only writer of the ledger.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Flag {
+    pub ts_ms: u64,
+    /// `a-N`, `o-N`, an entry number, or `session`.
+    pub target: String,
+    pub note: String,
+}
+
+pub fn append_flag(dir: &Path, flag: &Flag) -> Result<()> {
+    let mut line = serde_json::to_string(flag)?;
+    line.push('\n');
+    append_file(&dir.join("flags.jsonl"))?.write_all(line.as_bytes())?;
+    Ok(())
+}
+
+/// Flags of a session, oldest first. A missing file means no flags.
+pub fn read_flags(dir: &Path) -> Vec<Flag> {
+    fs::read_to_string(dir.join("flags.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
 pub fn read_blob(dir: &Path, hash: &str) -> Result<String> {
     let p = dir.join("blobs").join(hash);
     fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))

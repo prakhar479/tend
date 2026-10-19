@@ -131,8 +131,10 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
 - [ ] **R1.6** Group large search output by file.
 
 **R2. Learn from real use**
-- [ ] **R2.1** `rein flag <id> "note"` and `rein review`.
-- [ ] **R2.2** `retro --all` prints coverage and output share by class.
+- [x] **R2.1** `rein flag <id> "note"` and `rein review`.
+  Done: `rein flag <a-N|o-N|seq|session> <note>` writes `<session>/flags.jsonl` (not the ledger); `rein review` lists all flags with the entry and a `look:` command; `rein report` shows the session's flags.
+- [x] **R2.2** `retro --all` prints coverage and output share by class.
+  Done: report and `retro --all` show output share by kind, test runs wrapped, and Edit/Write edits vs Bash writes. Also: new `view` kind, never shaped (it used to be shaped in optimize mode); retro counted repeated transcript lines twice (fixed). Owner's data: view 44% / search 26% / test 11%; 93% of test runs wrappable; the guard sees 9% of edits (101 vs 1009 Bash writes).
 - [ ] **R2.3** Guard and loop precision in `rein report`.
 - [ ] **R2.4** Review 20 real sessions in look mode (N16).
 

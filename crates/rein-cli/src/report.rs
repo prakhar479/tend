@@ -525,16 +525,23 @@ fn describe(e: &Entry) -> String {
 }
 
 /// Cause chain for an action (a-N), output (o-N), or ledger entry number.
+/// The entry an id names: an action (a-N), an output (o-N), or an entry number.
+pub fn find_target<'a>(entries: &'a [Entry], id: &str) -> Option<&'a Entry> {
+    entries.iter().find(|e| match &e.body {
+        Body::Action { id: a, .. } => a == id,
+        Body::Output { id: o, .. } => o == id,
+        _ => id.parse::<u64>().ok() == Some(e.seq),
+    })
+}
+
+/// One line for an entry: what it is and why it exists.
+pub fn describe_entry(e: &Entry) -> String {
+    describe(e)
+}
+
 pub fn why(entries: &[Entry], id: &str) -> Result<String> {
     let by_seq: HashMap<u64, &Entry> = entries.iter().map(|e| (e.seq, e)).collect();
-    let target = entries
-        .iter()
-        .find(|e| match &e.body {
-            Body::Action { id: a, .. } => a == id,
-            Body::Output { id: o, .. } => o == id,
-            _ => id.parse::<u64>().ok() == Some(e.seq),
-        })
-        .ok_or_else(|| anyhow!("no entry `{id}`"))?;
+    let target = find_target(entries, id).ok_or_else(|| anyhow!("no entry `{id}`"))?;
     let mut out = String::new();
     let mut stack = vec![(target, 0usize)];
     let mut seen = HashSet::new();

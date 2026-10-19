@@ -511,3 +511,44 @@ fn control_requests_need_the_session_token() {
     assert!(rein(&["allow"], &session).contains("No edit was blocked"));
     assert!(rein(&["mode", "look"], &session).contains("mode: look"));
 }
+
+/// R2.1: flag what rein got wrong; review lists it with what it points at.
+#[test]
+fn flags_and_review() {
+    let (_dir, session) = run_session("flags", "look");
+    let out = rein(
+        &["flag", "a-1", "this", "summary", "hid", "the", "failure"],
+        &session,
+    );
+    assert!(out.contains("Flagged a-1"), "{out}");
+    rein(&["flag", "session", "loop", "missed"], &session);
+    let bad = Command::new(bin())
+        .args(["flag", "a-99", "x", "--session"])
+        .arg(&session)
+        .output()
+        .unwrap();
+    assert!(!bad.status.success(), "unknown targets are refused");
+
+    let report = rein(&["report"], &session);
+    assert!(report.contains("Flags: 2"), "{report}");
+    assert!(
+        report.contains("a-1: this summary hid the failure"),
+        "{report}"
+    );
+
+    let home = session.parent().unwrap().parent().unwrap();
+    let review = Command::new(bin())
+        .arg("review")
+        .env("REIN_HOME", home)
+        .output()
+        .unwrap();
+    let review = String::from_utf8(review.stdout).unwrap();
+    assert!(review.starts_with("2 flags in 1 sessions"), "{review}");
+    assert!(review.contains("action a-1 (shape"), "{review}");
+    assert!(
+        review.contains("note: this summary hid the failure"),
+        "{review}"
+    );
+    assert!(review.contains("look: rein why a-1 --session"), "{review}");
+    assert!(review.contains("look: rein report --session"), "{review}");
+}

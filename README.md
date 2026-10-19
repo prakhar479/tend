@@ -29,6 +29,8 @@ rein mode optimize                   # change mode of the live session
 rein retro ~/.claude/projects/<project>/<session>.jsonl   # report on a past session
 rein retro --all                     # every past session, ranked
 rein allow                           # lift one test-guard block (run it yourself: `! rein allow`)
+rein flag a-2 "summary hid the error" # note that rein got something wrong (a-N, o-N, or session)
+rein review                          # all flags across sessions, with what they point at
 rein sessions                        # list; --prune <days> removes old ones
 ```
 
