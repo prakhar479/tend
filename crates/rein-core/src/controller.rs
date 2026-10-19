@@ -736,26 +736,22 @@ impl Controller {
         if info.kind != OutputKind::Test || info.show_target.is_some() || tool_use_id.is_empty() {
             return;
         }
-        // `rein run` is a subprocess: it would lose shell state changes (cd, export,
-        // source), and it cannot follow groups, subshells, or multi-line scripts (R0.5).
-        let line = shell::parse(&command);
+        // `rein run` is a subprocess. Claude Code keeps only the working directory between
+        // Bash calls (environment, aliases, and options do not persist), so only cd/pushd/
+        // popd would be lost; `source venv/bin/activate && …` is safe to wrap (R1.1).
+        // `bash -c` runs here-docs, subshells, and multi-line scripts as the agent's shell
+        // would. The parser splits every line and `{ …; }` group, so a cd anywhere is
+        // found (R0.5); one inside `( … )` or a here-doc body also refuses (conservative).
+        // A leading `cd DIR &&` stays outside the wrapper (see shell::leading_cd).
+        let (prefix, _) = shell::leading_cd(&command);
+        let line = shell::parse(&command[prefix..]);
         let changes_state = line.segments.iter().any(|seg| {
             matches!(
                 seg.first().map(String::as_str),
-                Some(
-                    "cd" | "pushd"
-                        | "popd"
-                        | "export"
-                        | "unset"
-                        | "alias"
-                        | "set"
-                        | "shopt"
-                        | "source"
-                        | "."
-                )
+                Some("cd" | "pushd" | "popd")
             )
         });
-        if line.complex || changes_state {
+        if changes_state {
             return;
         }
         let reason = if rewrite_ok {
@@ -1388,11 +1384,33 @@ mod tests {
                 ..
             }
         )));
+        // R1.1: a leading cd stays in the agent's shell, so the rest can be wrapped;
+        // a cd after the test would be lost.
         assert!(
-            !c.handle(requested("b", "cd api && pytest", true), 1)
+            c.handle(requested("b", "cd api && pytest", true), 1)
                 .response
                 .wrap
         );
+        assert!(
+            !c.handle(requested("b1", "pytest && cd api", true), 1)
+                .response
+                .wrap
+        );
+        // R1.1: state that does not outlive the call is fine to wrap.
+        for (id, cmd) in [
+            (
+                "w1",
+                "source .venv/bin/activate && python -m pytest -q 2>&1 | tail -20",
+            ),
+            ("w2", "export CI=1 && pytest"),
+            ("w3", "set -e; CI=1 pytest -x"),
+            (
+                "w4",
+                "cd /home/u/app && source .venv/bin/activate && pytest -q",
+            ),
+        ] {
+            assert!(c.handle(requested(id, cmd, true), 1).response.wrap, "{cmd}");
+        }
         // R0.5: newline and group forms of a state change are caught too.
         for (id, cmd) in [
             ("b2", "cd api\npytest"),

@@ -112,28 +112,59 @@ pub fn extract_output(v: &Value) -> String {
     }
 }
 
-/// The program behind a test command is a real executable. `rein run` uses plain bash,
-/// so a runner that exists only as a function or alias in the agent's shell snapshot
-/// would fail there (R0.4). No runner: nothing to check.
+/// Every program in a test command is a bash builtin or a real executable. `rein run`
+/// uses plain bash, so a name that exists only as a function or alias in the agent's
+/// shell snapshot (`conda activate`, a custom `t`) would fail there (R0.4). A
+/// `source X/bin/activate` adds X/bin to the PATH searched for later programs (R1.1).
 fn runner_is_executable(command: &str, cwd: &str) -> bool {
+    use rein_core::perception::shell;
     use std::os::unix::fs::PermissionsExt;
-    let Some((_, seg)) = rein_core::perception::runner_segment(command) else {
+    if rein_core::perception::runner_segment(command).is_none() {
         return true;
-    };
-    let Some(program) = seg
-        .iter()
-        .find(|w| !rein_core::perception::shell::is_assignment(w))
-    else {
-        return false;
-    };
+    }
+    const BUILTINS: [&str; 20] = [
+        "source", ".", "export", "set", "unset", "echo", "printf", "true", "false", "test", "[",
+        ":", "exit", "exec", "command", "type", "shopt", "ulimit", "umask", "wait",
+    ];
     let executable = |p: &Path| {
         std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     };
-    if program.contains('/') {
-        return executable(&resolve(cwd, program));
+    let mut path: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    // Relative names resolve against the directory the leading `cd`s end in.
+    let (prefix, dirs) = shell::leading_cd(command);
+    let cwd = dirs
+        .iter()
+        .fold(PathBuf::from(cwd), |at, d| at.join(d))
+        .display()
+        .to_string();
+    let cwd = cwd.as_str();
+    for seg in shell::parse(&command[prefix..]).segments {
+        let Some(program) = seg.iter().find(|w| !shell::is_assignment(w)) else {
+            continue;
+        };
+        if matches!(program.as_str(), "source" | ".") {
+            if let Some(script) = seg.iter().skip_while(|w| *w != program).nth(1) {
+                if let Some(bin) = resolve(cwd, script).parent() {
+                    path.insert(0, bin.to_path_buf());
+                }
+            }
+            continue;
+        }
+        if BUILTINS.contains(&program.as_str()) {
+            continue;
+        }
+        let found = if program.contains('/') {
+            executable(&resolve(cwd, program))
+        } else {
+            path.iter().any(|d| executable(&d.join(program)))
+        };
+        if !found {
+            return false;
+        }
     }
-    std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|d| executable(&d.join(program))))
+    true
 }
 
 /// (path, old text, new text) for an edit tool call.
@@ -288,10 +319,16 @@ impl Connector for ClaudeCode {
                     // The daemon is the rein binary; its absolute path does not depend on
                     // the PATH in the agent's shell snapshot (R0.4).
                     let exe = std::env::current_exe().unwrap_or_else(|_| "rein".into());
-                    input["command"] = json!(crate::run::wrapped_command(
-                        &exe,
-                        s(payload, "tool_use_id"),
-                        &command
+                    // A leading `cd DIR &&` runs in the agent's shell, so it persists.
+                    let (prefix, _) = rein_core::perception::shell::leading_cd(&command);
+                    input["command"] = json!(format!(
+                        "{}{}",
+                        &command[..prefix],
+                        crate::run::wrapped_command(
+                            &exe,
+                            s(payload, "tool_use_id"),
+                            &command[prefix..]
+                        )
                     ));
                     // No permissionDecision: Claude Code still checks the new command.
                     h["updatedInput"] = input;
@@ -351,6 +388,7 @@ pub fn settings(exe: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn fixture(name: &str) -> Value {
         let path = format!(
@@ -571,6 +609,55 @@ mod tests {
                 "{cmd}"
             );
         }
+        // R1.1: a runner inside an activated venv is found through the activate script.
+        let venv = std::env::temp_dir().join(format!("rein-venv-{}", std::process::id()));
+        std::fs::create_dir_all(venv.join(".venv/bin")).unwrap();
+        std::fs::write(venv.join(".venv/bin/activate"), "").unwrap();
+        let runner = venv.join(".venv/bin/py.test");
+        std::fs::write(&runner, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+        q["cwd"] = json!(venv.display().to_string());
+        q["tool_input"]["command"] =
+            json!("source .venv/bin/activate && py.test -q 2>&1 | tail -5");
+        let evs = c.map("PreToolUse", &q);
+        assert!(matches!(
+            &evs[0],
+            Event::ToolRequested {
+                rewrite_ok: true,
+                ..
+            }
+        ));
+        // The same from the parent dir, after a leading cd.
+        q["cwd"] = json!(venv.parent().unwrap().display().to_string());
+        let name = venv.file_name().unwrap().to_string_lossy().to_string();
+        let cmd = format!("cd {name} && source .venv/bin/activate && py.test -q");
+        q["tool_input"]["command"] = json!(cmd);
+        let evs = c.map("PreToolUse", &q);
+        assert!(matches!(
+            &evs[0],
+            Event::ToolRequested {
+                rewrite_ok: true,
+                ..
+            }
+        ));
+        let r = Response {
+            wrap: true,
+            ..Default::default()
+        };
+        let out = c.encode("PreToolUse", &q, &r).unwrap();
+        let new = out["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            new.starts_with(&format!("cd {name} && '")),
+            "the cd stays outside: {new}"
+        );
+        assert!(
+            new.ends_with("--sh 'source .venv/bin/activate && py.test -q'"),
+            "{new}"
+        );
+        let _ = std::fs::remove_dir_all(&venv);
+
         let r = Response {
             wrap: true,
             ..Default::default()

@@ -18,6 +18,8 @@ pub fn parse(cmd: &str) -> CommandLine {
     let mut word = String::new();
     let mut in_word = false;
     let mut chars = cmd.trim().chars().peekable();
+    // Here-doc delimiters seen on the current line; their bodies are data, not commands.
+    let mut heredocs: Vec<String> = Vec::new();
     let end_word = |words: &mut Vec<String>, word: &mut String, in_word: &mut bool| {
         if *in_word {
             words.push(std::mem::take(word));
@@ -83,6 +85,24 @@ pub fn parse(cmd: &str) -> CommandLine {
                 line.complex = true;
                 end_word(&mut words, &mut word, &mut in_word);
                 end_segment(&mut line, &mut words);
+                // Skip each pending here-doc body up to its delimiter line.
+                for delim in std::mem::take(&mut heredocs) {
+                    let mut body_line = String::new();
+                    for n in chars.by_ref() {
+                        if n != '\n' {
+                            body_line.push(n);
+                        } else if body_line.trim() == delim {
+                            break;
+                        } else {
+                            body_line.clear();
+                        }
+                    }
+                }
+            }
+            // Redirections: `2>&1`, `>&2`, `&>file`, `&>>file` are part of a word.
+            '&' if word.ends_with('>') || chars.peek() == Some(&'>') => {
+                in_word = true;
+                word.push(c);
             }
             ';' | '|' | '&' => {
                 // `&&`, `||`, `|&`, `;;`: one separator.
@@ -107,8 +127,32 @@ pub fn parse(cmd: &str) -> CommandLine {
             '<' if chars.peek() == Some(&'<') => {
                 line.complex = true;
                 end_word(&mut words, &mut word, &mut in_word);
-                words.push("<<".into());
                 chars.next();
+                if chars.peek() == Some(&'<') {
+                    // `<<<word`: a here-string, no body.
+                    chars.next();
+                    continue;
+                }
+                if chars.peek() == Some(&'-') {
+                    chars.next();
+                }
+                while chars.peek() == Some(&' ') {
+                    chars.next();
+                }
+                // The delimiter, possibly quoted: <<EOF, <<'EOF', <<"EOF".
+                let mut delim = String::new();
+                while let Some(&n) = chars.peek() {
+                    if n.is_whitespace() || matches!(n, ';' | '&' | '|' | '<' | '>' | ')') {
+                        break;
+                    }
+                    if n != '\'' && n != '"' {
+                        delim.push(n);
+                    }
+                    chars.next();
+                }
+                if !delim.is_empty() {
+                    heredocs.push(delim);
+                }
             }
             _ => {
                 in_word = true;
@@ -164,6 +208,26 @@ pub fn program_words(segment: &[String]) -> &[String] {
     }
 }
 
+/// A leading `cd DIR && ` (one or more) of a command line: its length in bytes and the
+/// directories, in order. A wrapper keeps this prefix in the agent's shell, so the
+/// directory change persists, and wraps only the rest (R1.1). Simple words and quoted
+/// words only; anything else gives (0, []).
+pub fn leading_cd(cmd: &str) -> (usize, Vec<String>) {
+    let mut end = 0;
+    let mut dirs = Vec::new();
+    loop {
+        let rest = &cmd[end..];
+        let Some(c) =
+            re!(r#"^\s*cd\s+('[^']*'|"[^"\\$`]*"|[^\s'"$`;&|()<>]+)\s*&&\s*"#).captures(rest)
+        else {
+            return (end, dirs);
+        };
+        let dir = c[1].trim_matches(|q| q == '\'' || q == '"').to_string();
+        dirs.push(dir);
+        end += c[0].len();
+    }
+}
+
 /// The last path component of a program word: `/usr/bin/pytest` → `pytest`.
 pub fn program_name(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
@@ -197,6 +261,15 @@ mod tests {
             ]
         );
         assert!(!parse("cargo test 2>&1 | tail").complex);
+        assert_eq!(
+            segs("pytest -q 2>&1 | tail -5"),
+            vec![vec!["pytest", "-q", "2>&1"], vec!["tail", "-5"]]
+        );
+        assert_eq!(
+            segs("make &>log && echo ok"),
+            vec![vec!["make", "&>log"], vec!["echo", "ok"]]
+        );
+        assert_eq!(segs("serve & pytest"), vec![vec!["serve"], vec!["pytest"]]);
         assert_eq!(segs("false # pytest -v"), vec![vec!["false"]]);
         assert_eq!(segs("echo a#b"), vec![vec!["echo", "a#b"]]);
     }
@@ -213,6 +286,34 @@ mod tests {
         ] {
             assert!(parse(cmd).complex, "{cmd}");
         }
+    }
+
+    #[test]
+    fn skips_here_doc_bodies() {
+        let cmd = "python3 - <<'EOF'\nimport os\nprint(os.getcwd())\ncd = 1\nEOF\npytest -q";
+        let line = parse(cmd);
+        assert_eq!(
+            line.segments,
+            vec![
+                vec!["python3".to_string(), "-".to_string()],
+                vec!["pytest".to_string(), "-q".to_string()]
+            ]
+        );
+        assert!(line.complex);
+        assert_eq!(segs("cat <<<hello"), vec![vec!["cat", "hello"]]);
+    }
+
+    #[test]
+    fn finds_a_leading_cd() {
+        let cmd = "cd /home/u/app && cd 'my dir' && pytest -q && cd x";
+        let (n, dirs) = leading_cd(cmd);
+        assert_eq!(&cmd[n..], "pytest -q && cd x");
+        assert_eq!(dirs, vec!["/home/u/app", "my dir"]);
+        assert_eq!(leading_cd("pytest && cd x").0, 0);
+        assert_eq!(
+            leading_cd("cd $(git rev-parse --show-toplevel) && pytest").0,
+            0
+        );
     }
 
     #[test]
