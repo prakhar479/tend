@@ -29,6 +29,6 @@ pub mod shape;
 pub mod text;
 
 pub use capability::Capabilities;
-pub use controller::{Blob, Config, Controller, Decision, Permission, Response};
+pub use controller::{prepare, Blob, Config, Controller, Decision, Permission, Prepared, Response};
 pub use event::{Event, Mode};
 pub use record::{ActionKind, Body, Entry, SteerTrigger, LEDGER_FORMAT};

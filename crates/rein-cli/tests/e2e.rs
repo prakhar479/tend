@@ -392,3 +392,61 @@ extern "C" {
     #[link_name = "kill"]
     fn libc_kill(pid: i32, sig: i32) -> i32;
 }
+
+/// R0.3 (D4): a large filter must not stall pings or hooks from parallel tool calls.
+#[test]
+fn large_filter_does_not_block_pings_or_hooks() {
+    let dir = tmp("busy");
+    let session = dir.join("session");
+    let (_daemon, sock) = start_daemon(&session, "optimize");
+    let mut pre: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("post_tool_use_bash.json")).unwrap())
+            .unwrap();
+    pre["hook_event_name"] = "PreToolUse".into();
+    pre["permission_mode"] = "auto".into();
+    pre["tool_input"]["command"] = "pytest -v".into();
+    pre.as_object_mut().unwrap().remove("tool_response");
+    assert!(hook(&sock, "PreToolUse", &pre).contains("updatedInput"));
+
+    // ~8 MiB of failing pytest output, reported by rein run.
+    let big = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/outputs/pytest_fail.txt"),
+    )
+    .unwrap()
+    .repeat(300);
+    let filter = {
+        let sock = sock.clone();
+        thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            let mut s = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+            let req =
+                serde_json::json!({ "type": "filter", "tool_use_id": "toolu_01", "output": big });
+            writeln!(s, "{req}").unwrap();
+            let mut line = String::new();
+            BufReader::new(s).read_line(&mut line).unwrap();
+            line
+        })
+    };
+    thread::sleep(Duration::from_millis(100));
+    let mut slowest = Duration::ZERO;
+    let mut ls = pre.clone();
+    ls["tool_input"]["command"] = "ls".into();
+    ls["tool_use_id"] = "toolu_02".into();
+    while !filter.is_finished() {
+        let t = std::time::Instant::now();
+        hook(&sock, "PreToolUse", &ls);
+        slowest = slowest.max(t.elapsed());
+        thread::sleep(Duration::from_millis(20));
+    }
+    let reply = filter.join().unwrap();
+    assert!(
+        reply.contains("rein show o-1"),
+        "{}",
+        &reply[..reply.len().min(200)]
+    );
+    // A hook call spawns the shim process; allow for that, but not for the filter.
+    assert!(
+        slowest < Duration::from_millis(250),
+        "hook waited {slowest:?}"
+    );
+}

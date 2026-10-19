@@ -79,11 +79,66 @@ fn watch_parent(pid: i32, sock: &Path) {
     }
 }
 
+fn reply_to(mut stream: UnixStream, reply: &Reply) -> Result<()> {
+    let mut line = serde_json::to_string(reply)?;
+    line.push('\n');
+    stream.write_all(line.as_bytes())?;
+    Ok(())
+}
+
 fn serve(stream: UnixStream, state: &Mutex<State>, sock: &Path) -> Result<()> {
     let mut line = String::new();
     BufReader::new(stream.try_clone()?).read_line(&mut line)?;
     let req: Request = serde_json::from_str(&line).context("bad request")?;
     let mut shutdown = false;
+
+    // Requests that must not wait behind other work (R0.3).
+    let req = match req {
+        // Liveness: answer without the lock, so a busy daemon is never taken for dead.
+        Request::Ping => {
+            return reply_to(
+                stream,
+                &Reply {
+                    output: None,
+                    message: Some("pong".into()),
+                },
+            );
+        }
+        // The heavy part of a filter (hash, failures, summary) runs outside the lock,
+        // so hooks from parallel tool calls are not delayed by a large output.
+        Request::Filter {
+            tool_use_id,
+            output,
+        } => {
+            let plan = {
+                let st = state.lock().unwrap_or_else(|e| e.into_inner());
+                st.controller
+                    .filter_level(&tool_use_id)
+                    .map(|level| (level, st.controller.config().clone()))
+            };
+            let message = match plan {
+                None => None,
+                Some((level, cfg)) => {
+                    let prepared = rein_core::prepare(&output, level, &cfg);
+                    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+                    let st = &mut *st;
+                    let (d, text) =
+                        st.controller
+                            .filter_prepared(&tool_use_id, output, prepared, now_ms());
+                    st.store.persist(&d)?;
+                    text
+                }
+            };
+            return reply_to(
+                stream,
+                &Reply {
+                    output: None,
+                    message,
+                },
+            );
+        }
+        other => other,
+    };
 
     let reply = {
         let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -111,17 +166,6 @@ fn serve(stream: UnixStream, state: &Mutex<State>, sock: &Path) -> Result<()> {
                     message: Some(format!("mode: {mode:?}").to_lowercase()),
                 }
             }
-            Request::Filter {
-                tool_use_id,
-                output,
-            } => {
-                let (d, text) = st.controller.filter(&tool_use_id, output, now_ms());
-                st.store.persist(&d)?;
-                Reply {
-                    output: None,
-                    message: text,
-                }
-            }
             Request::Allow { action } => {
                 let message = match st.controller.allow(action.as_deref(), now_ms()) {
                     Ok(d) => {
@@ -135,10 +179,7 @@ fn serve(stream: UnixStream, state: &Mutex<State>, sock: &Path) -> Result<()> {
                     message: Some(message),
                 }
             }
-            Request::Ping => Reply {
-                output: None,
-                message: Some("pong".into()),
-            },
+            Request::Ping | Request::Filter { .. } => unreachable!("answered above"),
             Request::Shutdown => {
                 shutdown = true;
                 Reply {
@@ -149,8 +190,7 @@ fn serve(stream: UnixStream, state: &Mutex<State>, sock: &Path) -> Result<()> {
         }
     };
 
-    let mut out = stream;
-    writeln!(out, "{}", serde_json::to_string(&reply)?)?;
+    reply_to(stream.try_clone()?, &reply)?;
     if shutdown {
         let _ = fs::remove_file(sock);
         std::process::exit(0);

@@ -14,10 +14,10 @@ use crate::capability::Capabilities;
 use crate::event::{Event, Mode};
 use crate::guard::{is_test_path, GuardDecision};
 use crate::loops::{LoopDetector, LoopSignal};
-use crate::perception::{classify, extract_failures, OutputKind};
+use crate::perception::{classify, extract_failures, Failure, OutputKind};
 use crate::record::{ActionKind, Body, Entry, SteerTrigger, LEDGER_FORMAT};
 use crate::session::{Change, SessionModel};
-use crate::shape::shape;
+use crate::shape::{shape, Shaped};
 use crate::text::{estimate_tokens, sha256_hex};
 
 /// Initial values. Tune them in Phase 2 with real sessions.
@@ -148,6 +148,36 @@ pub struct Controller {
     /// Active clock for loop time: wall time with idle gaps capped.
     last_ms: Option<u64>,
     active_ms: u64,
+}
+
+/// The costly, pure part of handling an output: hash, failures, and summary.
+#[derive(Debug, Clone)]
+pub struct Prepared {
+    hash: String,
+    lines: usize,
+    tokens: usize,
+    failures: Vec<Failure>,
+    /// The summary at `level`, if the output is large enough and the summary pays off.
+    shaped: Option<Shaped>,
+    level: u8,
+}
+
+/// Prepare an output for `observe`. Pure, so the daemon can run it without its lock.
+pub fn prepare(output: &str, level: u8, cfg: &Config) -> Prepared {
+    let tokens = estimate_tokens(output);
+    let shaped = if tokens >= cfg.shape_threshold_tokens {
+        shape(output, level, cfg.max_summary_ratio)
+    } else {
+        None
+    };
+    Prepared {
+        hash: sha256_hex(output),
+        lines: output.lines().count(),
+        tokens,
+        failures: extract_failures(output),
+        shaped,
+        level,
+    }
 }
 
 /// Whether `observe` may put a summary in place.
@@ -375,7 +405,8 @@ impl Controller {
             self.caps.replace_output
         };
         let mode = Replace::Now(supported);
-        if let Some(text) = self.observe(d, now, ev, &command, info.kind, output, hash, mode) {
+        let p = prepare(&output, self.session.shape_level(info.kind), &self.cfg);
+        if let Some(text) = self.observe(d, now, ev, &command, info.kind, output, p, mode) {
             d.response.replace_output = Some(text);
         }
     }
@@ -391,7 +422,7 @@ impl Controller {
         command: &str,
         kind: OutputKind,
         output: String,
-        hash: String,
+        p: Prepared,
         can_replace: Replace,
     ) -> Option<String> {
         // Re-running the same command right after a summary, with no edit in between,
@@ -408,25 +439,24 @@ impl Controller {
         self.next_output += 1;
         self.outputs.insert(output_id.clone(), kind);
         d.blobs.push(Blob {
-            hash: hash.clone(),
-            content: output.clone(),
+            hash: p.hash.clone(),
+            content: output,
         });
-        let tokens = estimate_tokens(&output);
         let out = self.push(
             d,
             now,
             vec![cause],
             Body::Output {
                 id: output_id.clone(),
-                blob: hash,
+                blob: p.hash,
                 output_kind: kind,
-                lines: output.lines().count(),
-                tokens,
+                lines: p.lines,
+                tokens: p.tokens,
             },
         );
 
         // Loops. All failures that reach the threshold in one run share one steer.
-        let failures = extract_failures(&output);
+        let failures = p.failures;
         let mut looped: Vec<(String, String, u64, u64)> = Vec::new();
         let active = self.active_ms;
         for obs in self.loops.on_run(command, &failures, active) {
@@ -486,12 +516,9 @@ impl Controller {
             self.steer(d, now, out, trigger, text, reason);
         }
 
-        // Shaping.
-        if tokens < self.cfg.shape_threshold_tokens {
-            return None;
-        }
-        let level = self.session.shape_level(kind);
-        let s = shape(&output, level, self.cfg.max_summary_ratio)?;
+        // Shaping (computed by `prepare`, possibly outside the daemon's lock).
+        let level = p.level;
+        let s = p.shaped?;
         let text = format!(
             "{}\n[rein: {} lines → {} · full output: rein show {}]",
             s.text, s.from_lines, s.to_lines, output_id
@@ -599,6 +626,32 @@ impl Controller {
         output: String,
         now_ms: u64,
     ) -> (Decision, Option<String>) {
+        let Some(level) = self.filter_level(tool_use_id) else {
+            return (Decision::default(), None);
+        };
+        let p = prepare(&output, level, &self.cfg);
+        self.filter_prepared(tool_use_id, output, p, now_ms)
+    }
+
+    /// The shape level for a pending `rein run` report, or None if there is nothing to
+    /// filter. With `prepare`, the daemon does the heavy work without holding its lock.
+    pub fn filter_level(&self, tool_use_id: &str) -> Option<u8> {
+        let w = self.wrapped.get(tool_use_id).filter(|w| !w.filtered)?;
+        Some(self.session.shape_level(classify(&w.command).kind))
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
+    /// `filter` with the output already prepared.
+    pub fn filter_prepared(
+        &mut self,
+        tool_use_id: &str,
+        output: String,
+        p: Prepared,
+        now_ms: u64,
+    ) -> (Decision, Option<String>) {
         self.tick(now_ms);
         let mut d = Decision::default();
         let Some(w) = self.wrapped.get_mut(tool_use_id) else {
@@ -610,7 +663,6 @@ impl Controller {
         w.filtered = true;
         let (command, cause) = (w.command.clone(), w.action_seq);
         let kind = classify(&command).kind;
-        let hash = sha256_hex(&output);
         let text = self.observe(
             &mut d,
             now_ms,
@@ -618,7 +670,7 @@ impl Controller {
             &command,
             kind,
             output,
-            hash,
+            p,
             Replace::Deferred,
         );
         if let Some(w) = self.wrapped.get_mut(tool_use_id) {
