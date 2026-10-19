@@ -179,6 +179,7 @@ fn concurrent_hooks_keep_the_ledger_ordered_and_whole() {
         .arg(&session)
         .args(["--mode", "optimize"])
         .env("REIN_CAPTURE", "1")
+        .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
@@ -237,13 +238,25 @@ fn concurrent_hooks_keep_the_ledger_ordered_and_whole() {
     assert_eq!(last, Some(ledger.lines().count() as u64 - 1), "no gaps");
 }
 
-/// Start a daemon for a session dir. Returns the child and its socket.
-fn start_daemon(session: &Path, mode: &str) -> (std::process::Child, PathBuf) {
+/// A daemon that is killed when the test ends, even on a panic. Its output is detached:
+/// a daemon left holding the test's stdout makes cargo wait forever.
+struct Daemon(std::process::Child);
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Start a daemon for a session dir. Returns the guard and its socket.
+fn start_daemon(session: &Path, mode: &str) -> (Daemon, PathBuf) {
     fs::create_dir_all(session).unwrap();
     let child = Command::new(bin())
         .args(["daemon", "--session-dir"])
         .arg(session)
         .args(["--mode", mode])
+        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
@@ -254,7 +267,7 @@ fn start_daemon(session: &Path, mode: &str) -> (std::process::Child, PathBuf) {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    (child, sock)
+    (Daemon(child), sock)
 }
 
 fn hook(sock: &Path, event: &str, payload: &serde_json::Value) -> String {
@@ -280,7 +293,7 @@ fn hook(sock: &Path, event: &str, payload: &serde_json::Value) -> String {
 fn failing_test_run_is_summarized_through_rein_run() {
     let dir = tmp("wrap");
     let session = dir.join("session");
-    let (mut daemon, sock) = start_daemon(&session, "optimize");
+    let (daemon, sock) = start_daemon(&session, "optimize");
 
     let pytest_out =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/outputs/pytest_fail.txt");
@@ -299,8 +312,10 @@ fn failing_test_run_is_summarized_through_rein_run() {
         .as_str()
         .expect("updatedInput")
         .to_string();
+    // R0.4: the absolute rein binary, not whatever `rein` the agent's PATH finds.
+    let exe = fs::canonicalize(bin()).unwrap();
     assert!(
-        wrapped.starts_with("rein run --id 'toolu_01' --sh "),
+        wrapped.starts_with(&format!("'{}' run --id 'toolu_01' --sh ", exe.display())),
         "{wrapped}"
     );
 
@@ -329,8 +344,7 @@ fn failing_test_run_is_summarized_through_rein_run() {
     post["tool_input"]["command"] = wrapped.into();
     post["error"] = format!("Exit code 1\n{shown}").into();
     assert_eq!(hook(&sock, "PostToolUseFailure", &post), "");
-    let _ = daemon.kill();
-    let _ = daemon.wait();
+    drop(daemon);
 
     let report = rein(&["report"], &session);
     assert!(report.contains("Wrapped test runs: 1"), "{report}");
@@ -342,4 +356,39 @@ fn failing_test_run_is_summarized_through_rein_run() {
         fs::read_to_string(&pytest_out).unwrap(),
         "rein show gives the full original"
     );
+}
+
+/// R0.1 (D2): a stop (Claude Code's Bash timeout, Esc) prints what the command produced
+/// so far and leaves no process behind.
+#[test]
+fn stopped_rein_run_prints_partial_output_and_leaves_no_orphans() {
+    let marker = format!("sleep 37.{}", std::process::id());
+    let child = Command::new(bin())
+        .args(["run", "--id", "t", "--sh"])
+        .arg(format!("echo started; {marker}; echo never"))
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    // SAFETY: signals the child we spawned.
+    unsafe { libc_kill(child.id() as i32, 15) };
+    let out = child.wait_with_output().unwrap();
+    let shown = String::from_utf8_lossy(&out.stdout);
+    assert!(shown.starts_with("started\n"), "{shown}");
+    assert_eq!(out.status.code(), Some(128 + 15));
+    thread::sleep(Duration::from_millis(200));
+    let left = Command::new("pgrep")
+        .args(["-f", &marker])
+        .output()
+        .unwrap();
+    assert!(
+        left.stdout.is_empty(),
+        "orphan: {}",
+        String::from_utf8_lossy(&left.stdout)
+    );
+}
+
+extern "C" {
+    #[link_name = "kill"]
+    fn libc_kill(pid: i32, sig: i32) -> i32;
 }

@@ -258,7 +258,11 @@ impl Connector for ClaudeCode {
                 if r.wrap {
                     let mut input = payload.get("tool_input").cloned().unwrap_or(json!({}));
                     let command = s(&input, "command").to_string();
+                    // The daemon is the rein binary; its absolute path does not depend on
+                    // the PATH in the agent's shell snapshot (R0.4).
+                    let exe = std::env::current_exe().unwrap_or_else(|_| "rein".into());
                     input["command"] = json!(crate::run::wrapped_command(
+                        &exe,
                         s(payload, "tool_use_id"),
                         &command
                     ));
@@ -528,7 +532,7 @@ mod tests {
         let original = p["tool_input"]["command"].as_str().unwrap();
         assert_eq!(
             h["updatedInput"]["command"],
-            format!("rein run --id 'toolu_01' --sh '{original}'")
+            crate::run::wrapped_command(&std::env::current_exe().unwrap(), "toolu_01", original)
         );
         assert_eq!(
             h["updatedInput"]["run_in_background"], true,
