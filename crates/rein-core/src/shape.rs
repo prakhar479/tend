@@ -53,6 +53,11 @@ fn is_pass(l: &str) -> bool {
     re!(r"(\bPASSED\b|\.\.\. ok$|^\s*(✓|√|✔)\s|^ok\s+\S|--- PASS|^\s*PASS\s)").is_match(l)
 }
 
+/// Claude Code's mark where it cut long output: `... [16523 characters truncated] ...`.
+fn is_cut_marker(l: &str) -> bool {
+    re!(r"^\.\.\. \[\d+ characters truncated\] \.\.\.$").is_match(l.trim())
+}
+
 fn is_important(l: &str) -> bool {
     re!(r"(?i)(error|fail|panic|assert|exception|traceback|expected|✕|×|^\s*●\s|^\s*E\s{2,}|^\s{2,}[-+]\s{2,}\S)").is_match(l)
 }
@@ -66,8 +71,9 @@ pub fn shape(output: &str, level: u8, max_ratio: f32) -> Option<Shaped> {
     let mut keep = vec![false; n];
 
     // Head and tail give context (command banner, final summary). Passing lines never count.
+    // A truncation marker from the agent always stays: the output was already incomplete.
     for (i, k) in keep.iter_mut().enumerate() {
-        if (i < p.head || i + p.tail >= n) && !is_pass(&lines[i]) {
+        if ((i < p.head || i + p.tail >= n) && !is_pass(&lines[i])) || is_cut_marker(&lines[i]) {
             *k = true;
         }
     }
@@ -373,6 +379,18 @@ mod tests {
             .join("\n");
         let s = shape(&raw, 2, 1.0).expect("summary");
         assert!(!s.text.contains("repeated"), "{}", s.text);
+    }
+
+    /// Claude Code cut this output in the middle. The summary must say so.
+    #[test]
+    fn keeps_claude_code_truncation_marker() {
+        let raw = include_str!("../../../fixtures/outputs/pytest_cut_by_claude.txt");
+        let s = shape(raw, 3, 1.0).expect("summary");
+        assert!(
+            s.text.contains("... [16523 characters truncated] ..."),
+            "{}",
+            s.text
+        );
     }
 
     #[test]

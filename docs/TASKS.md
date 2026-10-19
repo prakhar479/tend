@@ -84,7 +84,8 @@ Consolidated 2026-10-19 from the Phase 0/1 results. Owner decisions are marked *
 - [ ] **N11. Retro and live agree.** Same tool-call counting in retro and live reports.
 - [ ] **N12. Capture script.** `scripts/capture-fixtures` turns a session's `hooks.jsonl` into sanitized fixtures.
 - [ ] **N13. Real pytest and cargo fixtures.** Replace the synthetic ones.
-- [ ] **N14. Edge cases.** Claude Code's mid-output cut; persisted preview with no newline in 2000 bytes; the 1 MiB size boundary.
+- [x] **N14. Edge cases.** Claude Code's mid-output cut; persisted preview with no newline in 2000 bytes; the 1 MiB size boundary.
+  Note: captured live. No newline: the preview is exactly 2000 bytes. 1048576 bytes shows as `1MB` (no trailing `.0`; fixed). Summaries now always keep Claude Code's `... [N characters truncated] ...` marker.
 - [ ] **N15. macOS.** Latency, Ctrl-C, socket fallback. Needs a Mac.
 - [ ] **N16. Real-session review (Phase 1 exit).** ~20 sessions in look mode; owners confirm the reports.
 

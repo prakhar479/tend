@@ -1,0 +1,137 @@
+Exit code 1
+/home/dev/.local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:247: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.3.2, pluggy-1.5.0 -- /usr/bin/python3
+cachedir: .pytest_cache
+metadata: {'Python': '3.12.3', 'Platform': 'Linux-5.15.153.1-microsoft-standard-WSL2-x86_64-with-glibc2.39', 'Packages': {'pytest': '8.3.2', 'pluggy': '1.5.0'}, 'Plugins': {'metadata': '3.1.1', 'asyncio': '1.3.0', 'anyio': '4.12.1', 'xdist': '3.6.1', 'html': '4.1.1'}}
+rootdir: /home/dev/shop
+configfile: pyproject.toml
+testpaths: tests
+plugins: metadata-3.1.1, asyncio-1.3.0, anyio-4.12.1, xdist-3.6.1, html-4.1.1
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 302 items
+
+tests/test_api.py::test_get_order FAILED                                 [  0%]
+tests/test_api.py::test_create_order FAILED                              [  0%]
+tests/test_cart.py::test_case[0] PASSED                                  [  0%]
+tests/test_cart.py::test_case[1] PASSED                                  [  1%]
+tests/test_cart.py::test_case[2] PASSED                                  [  1%]
+tests/test_cart.py::test_case[3] PASSED                                  [  1%]
+tests/test_cart.py::test_case[4] PASSED                                  [  2%]
+tests/test_cart.py::test_case[5] PASSED                                  [  2%]
+tests/test_cart.py::test_case[6] PASSED                                  [  2%]
+tests/test_cart.py::test_case[7] PASSED                                  [  3%]
+tests/test_cart.py::test_case[8] PASSED                                  [  3%]
+tests/test_cart.py::test_case[9] PASSED                                  [  3%]
+tests/test_cart.py::test_case[10] PASSED                                 [  4%]
+tests/test_cart.py::test_case[11] PASSED                                 [  4%]
+tests/test_cart.py::test_case[12] PASSED                                 [  4%]
+tests/test_cart.py::test_case[13] PASSED                                 [  5%]
+tests/test_cart.py::test_case[14] PASSED                                 [  5%]
+tests/test_cart.py::test_case[15] PASSED                                 [  5%]
+tests/test_cart.py::test_case[16] PASSED                                 [  6%]
+tests/test_cart.py::test_case[17] PASSED                                 [  6%]
+tests/test_cart.py::test_case[18] PASSED                                 [  6%]
+tests/test_cart.py::test_case[19] PASSED                                 [  7%]
+tests/test_cart.py::test_case[20] PASSED                                 [  7%]
+tests/test_cart.py::test_case[21] PASSED                                 [  7%]
+tests/test_cart.py::test_case[22] PASSED                                 [  8%]
+tests/test_cart.py::test_case[23] PASSED                                 [  8%]
+tests/test_cart.py::test_case[24] PASSED                                 [  8%]
+tests/test_cart.py::test_case[25] PASSED                                 [  9%]
+tests/test_cart.py::test_case[26] PASSED                                 [  9%]
+tests/test_cart.py::test_case[27] PASSED                                 [  9%]
+tests/test_cart.py::test_case[28] PASSED                                 [ 10%]
+tests/test_cart.py::test_case[29] PASSED                                 [ 10%]
+tests/test_cart.py::test_case[30] PASSED                                 [ 10%]
+tests/test_cart.py::test_case[31] PASSED                                 [ 11%]
+tests/test_cart.py::test_case[32] PASSED                                 [ 11%]
+tests/test_cart.py::test_case[33] PASSED                                 [ 11%]
+tests/test_cart.py::test_case[34] PASSED                                 [ 12%]
+tests/test_cart.py::test_case[35] PASSED                                 [ 12%]
+tests/test_cart.py::test_case[36] PASSED                                 [ 12%]
+tests/test_cart.py::test_case[37] PASSED                                 [ 13%]
+tests/test_cart.py::test_case[38] PASSED                                 [ 13%]
+tests/test_cart.py::test_case[39] PASSED                                 [ 13%]
+tests/test_cart.py::test_case[40] PASSED                                 [ 14%]
+tests/test_cart.py::test_case[41] PASSED                     
+
+... [16523 characters truncated] ...
+
+t_case[8] PASSED                                 [ 83%]
+tests/test_users.py::test_case[9] PASSED                                 [ 83%]
+tests/test_users.py::test_case[10] PASSED                                [ 83%]
+tests/test_users.py::test_case[11] PASSED                                [ 84%]
+tests/test_users.py::test_case[12] PASSED                                [ 84%]
+tests/test_users.py::test_case[13] PASSED                                [ 84%]
+tests/test_users.py::test_case[14] PASSED                                [ 85%]
+tests/test_users.py::test_case[15] PASSED                                [ 85%]
+tests/test_users.py::test_case[16] PASSED                                [ 85%]
+tests/test_users.py::test_case[17] PASSED                                [ 86%]
+tests/test_users.py::test_case[18] PASSED                                [ 86%]
+tests/test_users.py::test_case[19] PASSED                                [ 86%]
+tests/test_users.py::test_case[20] PASSED                                [ 87%]
+tests/test_users.py::test_case[21] PASSED                                [ 87%]
+tests/test_users.py::test_case[22] PASSED                                [ 87%]
+tests/test_users.py::test_case[23] PASSED                                [ 88%]
+tests/test_users.py::test_case[24] PASSED                                [ 88%]
+tests/test_users.py::test_case[25] PASSED                                [ 88%]
+tests/test_users.py::test_case[26] PASSED                                [ 89%]
+tests/test_users.py::test_case[27] PASSED                                [ 89%]
+tests/test_users.py::test_case[28] PASSED                                [ 89%]
+tests/test_users.py::test_case[29] PASSED                                [ 90%]
+tests/test_users.py::test_case[30] PASSED                                [ 90%]
+tests/test_users.py::test_case[31] PASSED                                [ 90%]
+tests/test_users.py::test_case[32] PASSED                                [ 91%]
+tests/test_users.py::test_case[33] PASSED                                [ 91%]
+tests/test_users.py::test_case[34] PASSED                                [ 91%]
+tests/test_users.py::test_case[35] PASSED                                [ 92%]
+tests/test_users.py::test_case[36] PASSED                                [ 92%]
+tests/test_users.py::test_case[37] PASSED                                [ 92%]
+tests/test_users.py::test_case[38] PASSED                                [ 93%]
+tests/test_users.py::test_case[39] PASSED                                [ 93%]
+tests/test_users.py::test_case[40] PASSED                                [ 93%]
+tests/test_users.py::test_case[41] PASSED                                [ 94%]
+tests/test_users.py::test_case[42] PASSED                                [ 94%]
+tests/test_users.py::test_case[43] PASSED                                [ 94%]
+tests/test_users.py::test_case[44] PASSED                                [ 95%]
+tests/test_users.py::test_case[45] PASSED                                [ 95%]
+tests/test_users.py::test_case[46] PASSED                                [ 95%]
+tests/test_users.py::test_case[47] PASSED                                [ 96%]
+tests/test_users.py::test_case[48] PASSED                                [ 96%]
+tests/test_users.py::test_case[49] PASSED                                [ 96%]
+tests/test_users.py::test_case[50] PASSED                                [ 97%]
+tests/test_users.py::test_case[51] PASSED                                [ 97%]
+tests/test_users.py::test_case[52] PASSED                                [ 97%]
+tests/test_users.py::test_case[53] PASSED                                [ 98%]
+tests/test_users.py::test_case[54] PASSED                                [ 98%]
+tests/test_users.py::test_case[55] PASSED                                [ 98%]
+tests/test_users.py::test_case[56] PASSED                                [ 99%]
+tests/test_users.py::test_case[57] PASSED                                [ 99%]
+tests/test_users.py::test_case[58] PASSED                                [ 99%]
+tests/test_users.py::test_case[59] PASSED                                [100%]
+
+=================================== FAILURES ===================================
+________________________________ test_get_order ________________________________
+
+    def test_get_order():
+        resp = get_order(42)
+>       assert resp["status_code"] == 200
+E       assert 500 == 200
+
+tests/test_api.py:11: AssertionError
+______________________________ test_create_order _______________________________
+
+    def test_create_order():
+        resp = create_order("A-1", 2)
+>       assert resp["json"]["total"] == 19.98
+E       KeyError: 'total'
+
+tests/test_api.py:17: KeyError
+=========================== short test summary info ============================
+FAILED tests/test_api.py::test_get_order - assert 500 == 200
+FAILED tests/test_api.py::test_create_order - KeyError: 'total'
+======================== 2 failed, 300 passed in 0.27s =========================

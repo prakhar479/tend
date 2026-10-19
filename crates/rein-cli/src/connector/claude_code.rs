@@ -36,7 +36,8 @@ const PERSISTED_PREVIEW_BYTES: usize = 2000;
 
 /// The `<persisted-output>` message the agent sees in place of a large Bash output.
 /// Captured in S1: the preview is the first 2000 bytes of stdout, cut back to the last
-/// newline. The size uses base-1024 KB, or MB from 1 MiB (1988895 bytes shows as "1.9MB").
+/// newline (no newline: exactly 2000 bytes). The size uses base-1024 KB, or MB from 1 MiB:
+/// 1988895 bytes shows as "1.9MB", 1048576 bytes as "1MB".
 fn persisted_output(stdout: &str, path: &str, size: u64) -> String {
     let mut end = stdout.len().min(PERSISTED_PREVIEW_BYTES);
     while !stdout.is_char_boundary(end) {
@@ -48,11 +49,16 @@ fn persisted_output(stdout: &str, path: &str, size: u64) -> String {
     } else {
         cut
     };
+    // One decimal, without a trailing ".0": 106.3KB, 1.9MB, 1MB (N14).
+    let one = |v: f64| {
+        let t = format!("{v:.1}");
+        t.strip_suffix(".0").map(str::to_string).unwrap_or(t)
+    };
     let kb = size as f64 / 1024.0;
     let size = if kb >= 1024.0 {
-        format!("{:.1}MB", kb / 1024.0)
+        format!("{}MB", one(kb / 1024.0))
     } else {
-        format!("{kb:.1}KB")
+        format!("{}KB", one(kb))
     };
     format!(
         "<persisted-output>\nOutput too large ({size}). Full output saved to: {path}\n\nPreview (first 2KB):\n{preview}\n...\n</persisted-output>"
@@ -378,6 +384,33 @@ mod tests {
     fn persisted_size_switches_to_mb() {
         let out = persisted_output("1\n2\n", "/p", 1_988_895);
         assert!(out.contains("Output too large (1.9MB)"), "{out}");
+    }
+
+    /// Captured N14: 40000 `x` and exactly 1 MiB of `a`, both with no newline.
+    #[test]
+    fn persisted_edge_cases() {
+        for (name, size, preview_len) in [
+            (
+                "post_tool_use_bash_persisted_no_newline.json",
+                "39.1KB",
+                2000,
+            ),
+            ("post_tool_use_bash_persisted_1mib.json", "1MB", 2000),
+        ] {
+            let mut c = ClaudeCode { started: true };
+            let evs = c.map("PostToolUse", &fixture(name));
+            let (out, _) = completed(&evs);
+            assert!(
+                out.contains(&format!("Output too large ({size})")),
+                "{name}: {out}"
+            );
+            let preview = out
+                .split("Preview (first 2KB):\n")
+                .nth(1)
+                .and_then(|p| p.strip_suffix("\n...\n</persisted-output>"))
+                .unwrap();
+            assert_eq!(preview.len(), preview_len, "{name}");
+        }
     }
 
     #[test]
