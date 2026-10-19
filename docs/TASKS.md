@@ -169,6 +169,17 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
 - [x] **C4** Corrected the R2.3 figures above.
 - [ ] **C5** Add a git remote so CI runs (owner decision).
 
+## Improvements I (from `docs/improvements-2026-10-19.md`)
+
+Review after the checkpoint: about 60 findings, most of them confirmed. Batches in the order of §12 there:
+
+- [ ] **I1. Rule 1:** F1 hook parse errors exit 2 · F2 launcher fails closed · F3 SIGTERM orphans claude · F7 dead daemon unnoticed · F9 socket read timeout · T2 fail-open tests.
+- [ ] **I2. Guard:** G1 comments and strings · G2 inline and other test files · G3 skip forms · G4 deleted tests, early return, swallowed asserts · G5 always-pass variants · G6 + T1 table tests.
+- [ ] **I3. Loops and classification:** L1 errors in passing runs · L2 tee as an edit · L3 key collisions · L4 tail variants · L5 and L6 signatures · S1 build regex · S2 traceback tails · S3 comment newline · T4 property tests.
+- [ ] **I4. Resources and UX:** F4 big Writes · F5 `tend run` streaming · R1 session cleanup · U1–U9.
+- [ ] **I5. Tests and CI:** T3, T5–T9, X1.
+- [ ] **I6. Later:** F6, F8 + P1, R3, R4, L7, U10, U11, simplifications.
+
 ## Phase 2 — Optimize + Codex (not started)
 
 - [ ] Tune `Config` defaults from Phase 1 data.
