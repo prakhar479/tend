@@ -53,6 +53,14 @@ pub enum Event {
         path: String,
         after_hash: Option<String>,
     },
+    /// A file a shell command changed, seen after the command ran (R1.4). The connector
+    /// compares the file with a snapshot from before the call. A missing file is "".
+    FileChanged {
+        tool_use_id: String,
+        path: String,
+        old_text: String,
+        new_text: String,
+    },
     PromptSubmitted {
         chars: usize,
     },

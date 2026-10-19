@@ -552,3 +552,55 @@ fn flags_and_review() {
     assert!(review.contains("look: rein why a-1 --session"), "{review}");
     assert!(review.contains("look: rein report --session"), "{review}");
 }
+
+/// R1.4: a Bash command that removes asserts from a test file gets a warning after it runs.
+#[test]
+fn bash_write_that_weakens_a_test_is_warned() {
+    let dir = tmp("bashwrite");
+    let session = dir.join("session");
+    let (_daemon, sock) = start_daemon(&session, "optimize");
+    let repo = dir.join("repo");
+    fs::create_dir_all(repo.join("tests")).unwrap();
+    let test = repo.join("tests/test_api.py");
+    fs::write(
+        &test,
+        "def test_a():\n    assert 1 == 1\n    assert 2 == 2\n",
+    )
+    .unwrap();
+
+    let command = "sed -i '/assert 2/d' tests/test_api.py";
+    let mut pre: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("post_tool_use_bash.json")).unwrap())
+            .unwrap();
+    pre["hook_event_name"] = "PreToolUse".into();
+    pre["cwd"] = repo.display().to_string().into();
+    pre["tool_input"]["command"] = command.into();
+    pre.as_object_mut().unwrap().remove("tool_response");
+    assert_eq!(
+        hook(&sock, "PreToolUse", &pre),
+        "",
+        "nothing to say before the run"
+    );
+
+    let ran = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    assert!(ran.success());
+
+    let mut post = pre.clone();
+    post["hook_event_name"] = "PostToolUse".into();
+    post["tool_response"] =
+        serde_json::json!({ "stdout": "", "stderr": "", "interrupted": false, "isImage": false });
+    let out: serde_json::Value = serde_json::from_str(&hook(&sock, "PostToolUse", &post)).unwrap();
+    let context = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("a warning in context");
+    assert!(context.contains("tests/test_api.py"), "{context}");
+    assert!(context.contains("assertions removed (2 → 1)"), "{context}");
+
+    let report = rein(&["report"], &session);
+    assert!(report.contains("Test guard: 1"), "{report}");
+}

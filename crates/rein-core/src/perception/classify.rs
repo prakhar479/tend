@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::shell;
+use crate::guard::is_test_path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -197,43 +198,87 @@ pub fn command_key(cmd: &str) -> String {
 /// Bash, so loop detection counts these as edits (R1.3). A heuristic: it errs toward
 /// "writes".
 pub fn writes_files(cmd: &str) -> bool {
-    let line = shell::parse(cmd);
-    let segment_writes = line.segments.iter().any(|seg| {
-        let w = shell::program_words(seg);
-        let Some(first) = w.first() else {
+    shell::parse(cmd)
+        .segments
+        .iter()
+        .any(|seg| segment_writes(seg))
+        || script_writes(cmd)
+}
+
+/// A simple command that writes files: a redirection to a file, or a writing program.
+fn segment_writes(seg: &[String]) -> bool {
+    let w = shell::program_words(seg);
+    let Some(first) = w.first() else {
+        return false;
+    };
+    let first = shell::program_name(first);
+    let has = |flag: &str| w.iter().skip(1).any(|x| x == flag || x.starts_with(flag));
+    // `>file`, `>> file`, `1>file`, `&>file`: a redirection to a real file.
+    let redirect = seg.iter().enumerate().any(|(k, x)| {
+        let t = x.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
+        if !t.starts_with('>') {
             return false;
+        }
+        let rest = t.trim_start_matches('>');
+        let target = if rest.is_empty() {
+            seg.get(k + 1).map(String::as_str).unwrap_or("")
+        } else {
+            rest
         };
-        let first = shell::program_name(first);
-        let has = |flag: &str| w.iter().skip(1).any(|x| x == flag || x.starts_with(flag));
-        // `>file`, `>> file`, `1>file`, `&>file`: a redirection to a real file.
-        let redirect = seg.iter().enumerate().any(|(k, x)| {
-            let t = x.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
-            if !t.starts_with('>') {
-                return false;
-            }
-            let rest = t.trim_start_matches('>');
-            let target = if rest.is_empty() {
-                seg.get(k + 1).map(String::as_str).unwrap_or("")
-            } else {
-                rest
-            };
-            !target.is_empty() && !target.starts_with('&') && !target.starts_with("/dev/")
-        });
-        redirect
-            || matches!(
-                first,
-                "tee" | "cp" | "mv" | "rm" | "patch" | "truncate" | "touch"
-            )
-            || (matches!(first, "sed" | "perl" | "ruby") && has("-i"))
-            || (first == "git"
-                && matches!(
-                    w.get(1).map(String::as_str),
-                    Some("apply" | "checkout" | "restore" | "stash")
-                ))
+        !target.is_empty() && !target.starts_with('&') && !target.starts_with("/dev/")
     });
-    let script_writes = cmd.contains("<<")
-        && (cmd.contains("open(") || cmd.contains(".write(") || cmd.contains("write_text("));
-    segment_writes || script_writes
+    redirect
+        || matches!(
+            first,
+            "tee" | "cp" | "mv" | "rm" | "patch" | "truncate" | "touch"
+        )
+        || (matches!(first, "sed" | "perl" | "ruby") && has("-i"))
+        || (first == "git"
+            && matches!(
+                w.get(1).map(String::as_str),
+                Some("apply" | "checkout" | "restore" | "stash")
+            ))
+}
+
+/// A here-doc script that writes files (`python3 - <<EOF … open(p, "w") … EOF`).
+fn script_writes(cmd: &str) -> bool {
+    cmd.contains("<<")
+        && (cmd.contains("open(") || cmd.contains(".write(") || cmd.contains("write_text("))
+}
+
+/// Most files one command can name for the Bash-write guard.
+const MAX_WRITE_TARGETS: usize = 32;
+
+/// Test files a shell command may write, as the command names them (R1.4): the words
+/// of each writing command, and quoted strings in a writing script. A caller snapshots
+/// them before the run and compares after, so listing too many costs a read, never a
+/// false flag. A `*` may stand in the last path component; the caller expands it.
+pub fn test_write_targets(cmd: &str) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut consider = |w: &str| {
+        let w = w.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&' || c == '>');
+        let (dir, _) = w.rsplit_once('/').unwrap_or(("", w));
+        if is_test_path(w)
+            && !w.ends_with('/')
+            && !w.contains(['$', '`', '?', '[', '{', '~'])
+            && !dir.contains('*')
+        {
+            out.insert(w.to_string());
+        }
+    };
+    for seg in shell::parse(cmd)
+        .segments
+        .iter()
+        .filter(|s| segment_writes(s))
+    {
+        seg.iter().skip(1).for_each(|w| consider(w));
+    }
+    if script_writes(cmd) {
+        for c in re!(r#"['"]([^'"\s]+)['"]"#).captures_iter(cmd) {
+            consider(&c[1]);
+        }
+    }
+    out.into_iter().take(MAX_WRITE_TARGETS).collect()
 }
 
 /// The first simple command that runs a test runner, and its words.
@@ -247,6 +292,19 @@ pub fn runner_segment(cmd: &str) -> Option<(TestRunner, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_write_targets_fixture() {
+        let text = include_str!("../../../../fixtures/commands/bash_writes.txt");
+        let mut cases = 0;
+        for case in text.split("\n== expect:").skip(1) {
+            let (expect, cmd) = case.split_once('\n').unwrap();
+            let want: Vec<&str> = expect.split_whitespace().collect();
+            assert_eq!(test_write_targets(cmd.trim_end()), want, "{cmd}");
+            cases += 1;
+        }
+        assert_eq!(cases, 11);
+    }
 
     #[test]
     fn kinds() {

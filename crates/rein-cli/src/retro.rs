@@ -223,6 +223,7 @@ pub fn run_all(root: &Path, top: usize) -> Result<String> {
             sum(|r| r.totals.wrapped),
             sum(|r| r.totals.tool_edits),
             sum(|r| r.totals.bash_writes),
+            sum(|r| r.totals.bash_test_writes),
         )
     );
 

@@ -3,6 +3,7 @@
 //! Payload and output shapes were captured in Phase 0 (docs/TASKS.md S1–S3) with
 //! Claude Code 2.1.303. Re-capture from <session>/hooks.jsonl when Claude Code changes.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rein_core::text::sha256_hex;
@@ -20,6 +21,74 @@ pub const HOOKED_TOOLS: [&str; 4] = ["Bash", "Edit", "MultiEdit", "Write"];
 #[derive(Default)]
 pub struct ClaudeCode {
     started: bool,
+    /// Test files a Bash call may write, as they were before it ran (R1.4).
+    snapshots: BTreeMap<String, Vec<(PathBuf, Option<String>)>>,
+}
+
+/// Largest file the Bash-write guard snapshots. Test files are far smaller.
+const MAX_SNAPSHOT_BYTES: u64 = 1 << 20;
+/// Most files one Bash call snapshots.
+const MAX_SNAPSHOT_FILES: usize = 32;
+/// Bash calls whose snapshots wait for a result. A call that never reports (interrupted)
+/// is dropped at the end of the turn; this bounds the rest.
+const MAX_PENDING_SNAPSHOTS: usize = 64;
+
+/// A file's text: None if it does not exist. Err if it cannot be compared (a directory,
+/// too large, not UTF-8), so the guard skips it.
+fn read_text(path: &Path) -> Result<Option<String>, ()> {
+    match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Ok(m) if m.is_file() && m.len() <= MAX_SNAPSHOT_BYTES => {
+            std::fs::read_to_string(path).map(Some).map_err(|_| ())
+        }
+        _ => Err(()),
+    }
+}
+
+/// The files a target names: itself, or the matches of a `*` in its last component.
+fn expand(base: &Path, target: &str) -> Vec<PathBuf> {
+    let path = base.join(target);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let Some((prefix, suffix)) = name.split_once('*') else {
+        return vec![path];
+    };
+    if suffix.contains('*') {
+        return vec![];
+    }
+    let dir = path.parent().unwrap_or(base);
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let n = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            n.len() >= prefix.len() + suffix.len() && n.starts_with(prefix) && n.ends_with(suffix)
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Snapshot the test files a Bash command may write (R1.4). Relative paths start where
+/// the command runs: the hook's cwd, then any leading `cd DIR &&`.
+fn snapshot(command: &str, cwd: &str) -> Vec<(PathBuf, Option<String>)> {
+    let targets = rein_core::perception::test_write_targets(command);
+    if targets.is_empty() {
+        return vec![];
+    }
+    let (_, dirs) = rein_core::perception::shell::leading_cd(command);
+    let base = dirs.iter().fold(resolve(cwd, ""), |b, d| b.join(d));
+    let mut files: Vec<(PathBuf, Option<String>)> = Vec::new();
+    for path in targets.iter().flat_map(|t| expand(&base, t)) {
+        if files.len() >= MAX_SNAPSHOT_FILES || files.iter().any(|(p, _)| *p == path) {
+            continue;
+        }
+        if let Ok(text) = read_text(&path) {
+            files.push((path, text));
+        }
+    }
+    files
 }
 
 fn s<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -255,6 +324,12 @@ impl Connector for ClaudeCode {
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
                     let command = s(&input, "command");
+                    if tool == "Bash" && self.snapshots.len() < MAX_PENDING_SNAPSHOTS {
+                        let files = snapshot(command, &cwd);
+                        if !files.is_empty() {
+                            self.snapshots.insert(tool_use_id.clone(), files);
+                        }
+                    }
                     let rewrite_ok = matches!(mode, "auto" | "bypassPermissions")
                         && !background
                         && runner_is_executable(command, &cwd);
@@ -285,6 +360,19 @@ impl Connector for ClaudeCode {
                         });
                     }
                 }
+                for (path, before) in self.snapshots.remove(&tool_use_id).unwrap_or_default() {
+                    let Ok(after) = read_text(&path) else {
+                        continue;
+                    };
+                    if after != before {
+                        evs.push(Event::FileChanged {
+                            tool_use_id: tool_use_id.clone(),
+                            path: path.display().to_string(),
+                            old_text: before.unwrap_or_default(),
+                            new_text: after.unwrap_or_default(),
+                        });
+                    }
+                }
                 evs.push(Event::ToolCompleted {
                     tool_use_id,
                     tool,
@@ -296,7 +384,11 @@ impl Connector for ClaudeCode {
             "UserPromptSubmit" => evs.push(Event::PromptSubmitted {
                 chars: s(p, "prompt").chars().count(),
             }),
-            "Stop" => evs.push(Event::TurnEnded),
+            "Stop" => {
+                // A call with no result by now never reports (interrupted, or denied).
+                self.snapshots.clear();
+                evs.push(Event::TurnEnded);
+            }
             "PreCompact" => evs.push(Event::Compacted {
                 trigger: s(p, "trigger").to_string(),
             }),
@@ -433,14 +525,20 @@ mod tests {
 
     #[test]
     fn bash_stderr_is_merged_into_stdout() {
-        let mut c = ClaudeCode { started: true };
+        let mut c = ClaudeCode {
+            started: true,
+            ..Default::default()
+        };
         let evs = c.map("PostToolUse", &fixture("post_tool_use_bash_stderr.json"));
         assert_eq!(completed(&evs), ("out-line\nerr-line", false));
     }
 
     #[test]
     fn persisted_bash_output_is_the_preview() {
-        let mut c = ClaudeCode { started: true };
+        let mut c = ClaudeCode {
+            started: true,
+            ..Default::default()
+        };
         let p = fixture("post_tool_use_bash_persisted.json");
         let evs = c.map("PostToolUse", &p);
         let (output, _) = completed(&evs);
@@ -471,7 +569,10 @@ mod tests {
             ),
             ("post_tool_use_bash_persisted_1mib.json", "1MB", 2000),
         ] {
-            let mut c = ClaudeCode { started: true };
+            let mut c = ClaudeCode {
+                started: true,
+                ..Default::default()
+            };
             let evs = c.map("PostToolUse", &fixture(name));
             let (out, _) = completed(&evs);
             assert!(
@@ -489,7 +590,10 @@ mod tests {
 
     #[test]
     fn maps_bash_failures() {
-        let mut c = ClaudeCode { started: true };
+        let mut c = ClaudeCode {
+            started: true,
+            ..Default::default()
+        };
         let evs = c.map(
             "PostToolUseFailure",
             &fixture("post_tool_use_failure_bash.json"),
@@ -507,9 +611,63 @@ mod tests {
         assert_eq!(completed(&evs), ("Exit code 3\nout-line\nerr-line", true));
     }
 
+    /// R1.4: test files a Bash command names are compared before and after it runs.
+    #[test]
+    fn bash_writes_to_test_files_become_file_changes() {
+        let dir = std::env::temp_dir().join(format!("rein-bashw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("shop/tests")).unwrap();
+        let test = dir.join("shop/tests/test_a.py");
+        std::fs::write(&test, "assert a\nassert b\n").unwrap();
+        std::fs::write(dir.join("shop/tests/test_b.py"), "assert c\n").unwrap();
+
+        let mut c = ClaudeCode::default();
+        let mut pre = fixture("post_tool_use_bash.json");
+        pre["hook_event_name"] = json!("PreToolUse");
+        pre.as_object_mut().unwrap().remove("tool_response");
+        pre["cwd"] = json!(dir.display().to_string());
+        pre["tool_input"]["command"] = json!("cd shop && sed -i '/assert b/d' tests/*.py");
+        c.map("PreToolUse", &pre);
+        std::fs::write(&test, "assert a\n").unwrap();
+
+        let mut post = fixture("post_tool_use_bash.json");
+        post["cwd"] = pre["cwd"].clone();
+        post["tool_input"] = pre["tool_input"].clone();
+        let evs = c.map("PostToolUse", &post);
+        let changed: Vec<_> = evs
+            .iter()
+            .filter_map(|e| match e {
+                Event::FileChanged {
+                    path,
+                    old_text,
+                    new_text,
+                    ..
+                } => Some((path.clone(), old_text.as_str(), new_text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            changed,
+            [(
+                test.display().to_string(),
+                "assert a\nassert b\n",
+                "assert a\n"
+            )],
+            "test_b.py did not change"
+        );
+        assert!(matches!(evs.last(), Some(Event::ToolCompleted { .. })));
+        // The snapshot is used once.
+        let evs = c.map("PostToolUse", &post);
+        assert!(!evs.iter().any(|e| matches!(e, Event::FileChanged { .. })));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn maps_edit_and_write() {
-        let mut c = ClaudeCode { started: true };
+        let mut c = ClaudeCode {
+            started: true,
+            ..Default::default()
+        };
         let evs = c.map("PreToolUse", &fixture("pre_tool_use_edit_test.json"));
         match &evs[0] {
             Event::EditProposed {
@@ -569,7 +727,10 @@ mod tests {
 
     #[test]
     fn wraps_test_commands_only_where_no_prompt_can_appear() {
-        let mut c = ClaudeCode { started: true };
+        let mut c = ClaudeCode {
+            started: true,
+            ..Default::default()
+        };
         let mut p = fixture("post_tool_use_bash.json");
         p["hook_event_name"] = json!("PreToolUse");
         p.as_object_mut().unwrap().remove("tool_response");

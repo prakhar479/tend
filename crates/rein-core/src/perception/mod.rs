@@ -5,6 +5,7 @@ pub mod shell;
 pub mod signature;
 
 pub use classify::{
-    classify, command_key, runner_segment, writes_files, CommandInfo, OutputKind, TestRunner,
+    classify, command_key, runner_segment, test_write_targets, writes_files, CommandInfo,
+    OutputKind, TestRunner,
 };
 pub use signature::{extract_failures, normalize_message, signature_of, Failure};

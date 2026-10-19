@@ -328,6 +328,7 @@ impl Controller {
             _ if is_bash => self.on_bash(&mut d, event, now_ms),
             Event::EditProposed { .. } => self.on_edit_proposed(&mut d, event, now_ms),
             Event::FileEdited { .. } => self.on_file_edited(&mut d, event, now_ms),
+            Event::FileChanged { .. } => self.on_file_changed(&mut d, event, now_ms),
             Event::SessionStarted {
                 agent,
                 cwd,
@@ -833,30 +834,8 @@ impl Controller {
             content: new_text.clone(),
         });
         let ev = self.push(d, now, vec![], Body::Event { event: stored });
-        if !is_test_path(&path) {
-            return;
-        }
-
-        let q = Question::TestWeakened {
-            path: &path,
-            old: &old_text,
-            new: &new_text,
-        };
-        let (answer, source) = self.broker.ask(&q);
-        let (name, version) = (q.name(), q.version());
-        let j = self.push(
-            d,
-            now,
-            vec![ev],
-            Body::Judgment {
-                question: name.into(),
-                version,
-                subject: path.clone(),
-                answer: answer.clone(),
-                source,
-            },
-        );
-        let Answer::Weakened { reasons } = answer else {
+        let Some((j, reasons)) = self.judge_test_edit(d, now, ev, &path, &old_text, &new_text)
+        else {
             return;
         };
 
@@ -903,6 +882,92 @@ impl Controller {
                 GuardDecision::Deny => d.response.permission = Some(Permission::Deny(message)),
                 GuardDecision::Warn => d.response.add_context.push(message),
             }
+        }
+    }
+
+    /// Ask whether an edit to a test file weakens it. Returns the judgment's seq and the
+    /// reasons when it does. Files that are not tests are not judged.
+    fn judge_test_edit(
+        &mut self,
+        d: &mut Decision,
+        now: u64,
+        cause: u64,
+        path: &str,
+        old: &str,
+        new: &str,
+    ) -> Option<(u64, Vec<String>)> {
+        if !is_test_path(path) {
+            return None;
+        }
+        let q = Question::TestWeakened { path, old, new };
+        let (answer, source) = self.broker.ask(&q);
+        let (name, version) = (q.name(), q.version());
+        let j = self.push(
+            d,
+            now,
+            vec![cause],
+            Body::Judgment {
+                question: name.into(),
+                version,
+                subject: path.to_string(),
+                answer: answer.clone(),
+                source,
+            },
+        );
+        match answer {
+            Answer::Weakened { reasons } => Some((j, reasons)),
+            _ => None,
+        }
+    }
+
+    /// A shell command changed a test file (R1.4). The change already happened, so the
+    /// guard can only warn: the agent hears it in context, and look mode records it.
+    fn on_file_changed(&mut self, d: &mut Decision, event: Event, now: u64) {
+        let Event::FileChanged {
+            tool_use_id,
+            path,
+            old_text,
+            new_text,
+        } = event
+        else {
+            return;
+        };
+        let (old_hash, new_hash) = (sha256_hex(&old_text), sha256_hex(&new_text));
+        let stored = Event::FileChanged {
+            tool_use_id,
+            path: path.clone(),
+            old_text: format!("<blob:{old_hash}>"),
+            new_text: format!("<blob:{new_hash}>"),
+        };
+        let ev = self.push(d, now, vec![], Body::Event { event: stored });
+        d.blobs.push(Blob {
+            hash: old_hash,
+            content: old_text.clone(),
+        });
+        d.blobs.push(Blob {
+            hash: new_hash.clone(),
+            content: new_text.clone(),
+        });
+        // Edit, revert, edit through the shell is a cycle too.
+        if let Some(LoopSignal::Cycle { path }) = self.loops.on_edit(&path, &new_hash) {
+            let text = format!("rein: {path} is back to an earlier version (edit, revert, edit).");
+            let reason = format!("Content hash of {path} repeated an earlier state.");
+            self.steer(d, now, ev, SteerTrigger::Cycle { path }, text, reason);
+        }
+        let Some((j, reasons)) = self.judge_test_edit(d, now, ev, &path, &old_text, &new_text)
+        else {
+            return;
+        };
+        let message = format!(
+            "rein: the last command changed {path} and may have weakened tests: {}. If that was not intended, restore the file.",
+            reasons.join("; ")
+        );
+        let action = ActionKind::Guard {
+            path,
+            decision: GuardDecision::Warn,
+        };
+        if self.act(d, now, j, action, message.clone()) {
+            d.response.add_context.push(message);
         }
     }
 
@@ -1296,6 +1361,77 @@ mod tests {
             old_text: "assert a == 1\nassert b == 2\n".into(),
             new_text: "assert a == 1\n".into(),
         }
+    }
+
+    fn bash_changed(path: &str, old: &str, new: &str) -> Event {
+        Event::FileChanged {
+            tool_use_id: "t1".into(),
+            path: path.into(),
+            old_text: old.into(),
+            new_text: new.into(),
+        }
+    }
+
+    /// R1.4: a Bash write already happened, so the guard warns in context.
+    #[test]
+    fn guard_warns_after_a_bash_write_weakens_a_test() {
+        let mut c = ctl(Mode::Optimize);
+        let d = c.handle(
+            bash_changed("/r/tests/test_api.py", "assert a\nassert b\n", "assert a\n"),
+            0,
+        );
+        assert!(d.response.permission.is_none());
+        let [m] = &d.response.add_context[..] else {
+            panic!("{:?}", d.response)
+        };
+        assert!(
+            m.contains("the last command changed /r/tests/test_api.py"),
+            "{m}"
+        );
+        assert!(m.contains("assertions removed (2 → 1)"), "{m}");
+        assert!(d.entries.iter().any(|e| matches!(
+            &e.body,
+            Body::Action {
+                action: ActionKind::Guard {
+                    decision: GuardDecision::Warn,
+                    ..
+                },
+                applied: true,
+                ..
+            }
+        )));
+        // The ledger keeps blob references, not the file text.
+        assert!(
+            d.entries.iter().any(|e| matches!(&e.body, Body::Event { event: Event::FileChanged { old_text, .. } } if old_text.starts_with("<blob:")))
+        );
+
+        // Look mode records the same action and changes nothing.
+        let mut c = ctl(Mode::Look);
+        let d = c.handle(
+            bash_changed("/r/tests/test_api.py", "assert a\nassert b\n", "assert a\n"),
+            0,
+        );
+        assert!(d.response.is_empty());
+        assert!(d.entries.iter().any(|e| matches!(
+            &e.body,
+            Body::Action {
+                action: ActionKind::Guard { .. },
+                applied: false,
+                ..
+            }
+        )));
+
+        // A new test file, or a change outside tests, is not flagged.
+        let d = c.handle(bash_changed("/r/tests/test_new.py", "", "assert a\n"), 1);
+        assert!(!d
+            .entries
+            .iter()
+            .any(|e| matches!(e.body, Body::Action { .. })));
+        let d = c.handle(bash_changed("/r/src/app.py", "assert a\n", ""), 2);
+        assert!(!d
+            .entries
+            .iter()
+            .any(|e| matches!(e.body, Body::Judgment { .. })));
     }
 
     #[test]

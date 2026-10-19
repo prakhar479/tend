@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
-use rein_core::perception::{classify, writes_files, OutputKind};
+use rein_core::perception::{classify, test_write_targets, writes_files, OutputKind};
 use rein_core::record::SteerTrigger;
 use rein_core::text::truncate_chars;
 use rein_core::{ActionKind, Body, Config, Entry, Event};
@@ -124,8 +124,10 @@ pub struct Totals {
     pub wrapped: u64,
     /// Edits through Edit/Write (the test guard sees these).
     pub tool_edits: u64,
-    /// Bash calls that write files (`sed -i`, heredocs): the guard does not see these.
+    /// Bash calls that write files (`sed -i`, heredocs).
     pub bash_writes: u64,
+    /// Bash writes that name a test file: the guard compares these before and after (R1.4).
+    pub bash_test_writes: u64,
 }
 
 pub fn totals(entries: &[Entry]) -> Totals {
@@ -175,6 +177,7 @@ pub fn totals(entries: &[Entry]) -> Totals {
             } if tool == "Bash" => {
                 let cmd = input.get("command").and_then(Value::as_str).unwrap_or("");
                 t.bash_writes += u64::from(writes_files(cmd));
+                t.bash_test_writes += u64::from(!test_write_targets(cmd).is_empty());
             }
             _ => {}
         }
@@ -189,6 +192,7 @@ pub fn coverage(
     wrapped: u64,
     tool_edits: u64,
     bash_writes: u64,
+    bash_test_writes: u64,
 ) -> String {
     let mut out = String::new();
     if by_kind.values().any(|n| *n > 0) {
@@ -204,7 +208,7 @@ pub fn coverage(
     if tool_edits + bash_writes > 0 {
         let _ = writeln!(
             out,
-            "Edits: {tool_edits} through Edit/Write (the test guard sees these) · {bash_writes} Bash writes (it does not)"
+            "Edits: {tool_edits} through Edit/Write (guarded before they run) · {bash_writes} Bash writes, {bash_test_writes} naming a test file (guarded after they run)"
         );
     }
     out
@@ -428,7 +432,8 @@ pub fn render(label: &str, entries: &[Entry]) -> String {
             t.test_runs,
             t.wrapped,
             t.tool_edits,
-            t.bash_writes
+            t.bash_writes,
+            t.bash_test_writes
         )
     );
     let _ = writeln!(out, "Re-opens: {reopens}");

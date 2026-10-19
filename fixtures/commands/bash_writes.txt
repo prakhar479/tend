@@ -1,0 +1,37 @@
+# Bash commands that write test files, from real sessions (paths shortened).
+# Each case: a line `== expect: <targets, space-separated>` (empty = none), then the command.
+== expect: tests/test_api.py
+cd shop && cat > tests/test_api.py <<'EOF2'
+def get_order(oid):
+    return {"status_code": 500, "json": {"id": oid}}
+
+def test_order():
+    assert get_order(1)["status_code"] in (200, 500)
+EOF2
+== expect: crates/rein-cli/tests/e2e.rs
+python3 -I - <<'EOF2'
+p="crates/rein-cli/tests/e2e.rs"; s=open(p).read()
+a='''    assert!(report.contains("Test guard: 1"), "{report}");'''
+assert a in s; s=s.replace(a,'',1)
+open(p,"w").write(s)
+EOF2
+== expect: tests/test_api.py
+cp ../test_api.bak tests/test_api.py && cat > ../prompt.txt <<'EOF2'
+Run the tests.
+EOF2
+== expect: tests/test_cart.py tests/test_users.py
+sed -i 's/assert total == 3/assert total >= 0/' tests/test_cart.py tests/test_users.py
+== expect: tests/*.py
+sed -i '/assert/d' tests/*.py
+== expect: web/cart.spec.ts
+echo "it.skip('a', f)" >> web/cart.spec.ts
+== expect: pkg/orders_test.go
+rm -f pkg/orders_test.go
+== expect: tests/test_api.py
+git checkout -- tests/test_api.py
+== expect:
+sed -i 's/x/y/' src/app.py && python -m pytest tests/test_app.py
+== expect:
+cat tests/test_api.py | head -20
+== expect:
+grep -rn assert tests/ > /tmp/asserts.txt

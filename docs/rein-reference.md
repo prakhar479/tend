@@ -364,6 +364,8 @@ Failures at the start of a session are normal. They do not count.
 
 A user override changes strictness for the session.
 
+**Edits through Bash** (`sed -i`, `cat > file <<EOF`, a Python here-doc). Rein sees these only after they run. Before a Bash call, the connector snapshots the test files the command names. After the call, it compares them with the snapshot. A weakening change gets a warning in context in optimize mode, and a log entry in look mode. A command that names no file (`python fix.py`, `cd $DIR && …`) is not seen.
+
 ### 10.7 Snapshots and undo
 
 - Write snapshots as private git refs: `refs/rein/<session>/<n>`.
