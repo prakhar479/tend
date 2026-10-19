@@ -1,179 +1,179 @@
    Compiling shop v0.1.0 (/home/dev/shop)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.10s
-     Running unittests src/lib.rs (target/debug/deps/shop-1a2b3c4d5e6f7a8b)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.79s
+     Running unittests src/lib.rs (target/debug/deps/shop-507999230d6984fa)
 
 running 150 tests
-test catalog::tests::case_000 ... ok
 test cart::tests::case_001 ... ok
-test users::tests::case_002 ... ok
-test search::tests::case_003 ... ok
-test pricing::tests::case_004 ... ok
-test catalog::tests::case_005 ... ok
 test cart::tests::case_006 ... ok
-test users::tests::case_007 ... ok
-test search::tests::case_008 ... ok
-test pricing::tests::case_009 ... ok
-test catalog::tests::case_010 ... ok
 test cart::tests::case_011 ... ok
-test users::tests::case_012 ... ok
-test search::tests::case_013 ... ok
-test pricing::tests::case_014 ... ok
-test catalog::tests::case_015 ... ok
 test cart::tests::case_016 ... ok
-test users::tests::case_017 ... ok
-test search::tests::case_018 ... ok
-test pricing::tests::case_019 ... ok
-test catalog::tests::case_020 ... ok
 test cart::tests::case_021 ... ok
-test users::tests::case_022 ... ok
-test search::tests::case_023 ... ok
-test pricing::tests::case_024 ... ok
-test catalog::tests::case_025 ... ok
 test cart::tests::case_026 ... ok
-test users::tests::case_027 ... ok
-test search::tests::case_028 ... ok
-test pricing::tests::case_029 ... ok
-test catalog::tests::case_030 ... ok
-test cart::tests::case_031 ... ok
-test users::tests::case_032 ... ok
-test search::tests::case_033 ... ok
-test pricing::tests::case_034 ... ok
-test catalog::tests::case_035 ... ok
 test cart::tests::case_036 ... ok
-test users::tests::case_037 ... ok
-test search::tests::case_038 ... ok
-test pricing::tests::case_039 ... ok
-test catalog::tests::case_040 ... ok
 test cart::tests::case_041 ... ok
-test users::tests::case_042 ... ok
-test search::tests::case_043 ... ok
-test pricing::tests::case_044 ... ok
-test catalog::tests::case_045 ... ok
 test cart::tests::case_046 ... ok
-test users::tests::case_047 ... ok
-test search::tests::case_048 ... ok
-test pricing::tests::case_049 ... ok
-test catalog::tests::case_050 ... ok
 test cart::tests::case_051 ... ok
-test users::tests::case_052 ... ok
-test search::tests::case_053 ... ok
-test pricing::tests::case_054 ... ok
-test catalog::tests::case_055 ... ok
 test cart::tests::case_056 ... ok
-test users::tests::case_057 ... ok
-test search::tests::case_058 ... ok
-test pricing::tests::case_059 ... ok
-test catalog::tests::case_060 ... ok
 test cart::tests::case_061 ... ok
-test users::tests::case_062 ... ok
-test search::tests::case_063 ... ok
-test pricing::tests::case_064 ... ok
-test catalog::tests::case_065 ... ok
 test cart::tests::case_066 ... ok
-test users::tests::case_067 ... ok
-test search::tests::case_068 ... ok
-test pricing::tests::case_069 ... ok
-test catalog::tests::case_070 ... ok
 test cart::tests::case_071 ... ok
-test users::tests::case_072 ... ok
-test search::tests::case_073 ... ok
-test pricing::tests::case_074 ... ok
-test catalog::tests::case_075 ... ok
 test cart::tests::case_076 ... ok
-test users::tests::case_077 ... ok
-test search::tests::case_078 ... ok
-test pricing::tests::case_079 ... ok
-test catalog::tests::case_080 ... ok
+test cart::tests::case_031 ... ok
 test cart::tests::case_081 ... ok
-test users::tests::case_082 ... ok
-test search::tests::case_083 ... ok
-test pricing::tests::case_084 ... ok
-test catalog::tests::case_085 ... ok
 test cart::tests::case_086 ... ok
-test users::tests::case_087 ... ok
-test search::tests::case_088 ... ok
-test pricing::tests::case_089 ... ok
-test catalog::tests::case_090 ... ok
 test cart::tests::case_091 ... ok
-test users::tests::case_092 ... ok
-test search::tests::case_093 ... ok
-test pricing::tests::case_094 ... ok
-test catalog::tests::case_095 ... ok
 test cart::tests::case_096 ... ok
-test users::tests::case_097 ... ok
-test search::tests::case_098 ... ok
-test pricing::tests::case_099 ... ok
-test catalog::tests::case_100 ... ok
 test cart::tests::case_101 ... ok
-test users::tests::case_102 ... ok
-test search::tests::case_103 ... ok
-test pricing::tests::case_104 ... ok
-test catalog::tests::case_105 ... ok
 test cart::tests::case_106 ... ok
-test users::tests::case_107 ... ok
-test search::tests::case_108 ... ok
-test pricing::tests::case_109 ... ok
-test catalog::tests::case_110 ... ok
 test cart::tests::case_111 ... ok
-test users::tests::case_112 ... ok
-test search::tests::case_113 ... ok
-test pricing::tests::case_114 ... ok
-test catalog::tests::case_115 ... ok
 test cart::tests::case_116 ... ok
-test users::tests::case_117 ... ok
-test search::tests::case_118 ... ok
-test pricing::tests::case_119 ... ok
-test catalog::tests::case_120 ... ok
 test cart::tests::case_121 ... ok
-test users::tests::case_122 ... ok
-test search::tests::case_123 ... ok
-test pricing::tests::case_124 ... ok
-test catalog::tests::case_125 ... ok
 test cart::tests::case_126 ... ok
-test users::tests::case_127 ... ok
-test search::tests::case_128 ... ok
-test pricing::tests::case_129 ... ok
-test catalog::tests::case_130 ... ok
 test cart::tests::case_131 ... ok
-test users::tests::case_132 ... ok
-test search::tests::case_133 ... ok
-test pricing::tests::case_134 ... ok
-test catalog::tests::case_135 ... ok
 test cart::tests::case_136 ... ok
-test users::tests::case_137 ... ok
-test search::tests::case_138 ... ok
-test pricing::tests::case_139 ... ok
-test catalog::tests::case_140 ... ok
 test cart::tests::case_141 ... ok
-test users::tests::case_142 ... ok
-test search::tests::case_143 ... ok
-test pricing::tests::case_144 ... ok
-test catalog::tests::case_145 ... ok
 test cart::tests::case_146 ... ok
-test users::tests::case_147 ... ok
-test orders::tests::total_includes_tax ... FAILED
+test catalog::tests::case_000 ... ok
+test catalog::tests::case_005 ... ok
+test catalog::tests::case_010 ... ok
+test catalog::tests::case_015 ... ok
+test catalog::tests::case_020 ... ok
+test catalog::tests::case_025 ... ok
+test catalog::tests::case_030 ... ok
+test catalog::tests::case_035 ... ok
+test catalog::tests::case_040 ... ok
+test catalog::tests::case_045 ... ok
+test catalog::tests::case_050 ... ok
+test catalog::tests::case_055 ... ok
+test catalog::tests::case_060 ... ok
+test catalog::tests::case_065 ... ok
+test catalog::tests::case_070 ... ok
+test catalog::tests::case_075 ... ok
+test catalog::tests::case_080 ... ok
+test catalog::tests::case_085 ... ok
+test catalog::tests::case_090 ... ok
+test catalog::tests::case_095 ... ok
+test catalog::tests::case_100 ... ok
+test catalog::tests::case_105 ... ok
+test catalog::tests::case_110 ... ok
+test catalog::tests::case_115 ... ok
+test catalog::tests::case_120 ... ok
+test catalog::tests::case_125 ... ok
+test catalog::tests::case_130 ... ok
+test catalog::tests::case_135 ... ok
+test catalog::tests::case_140 ... ok
+test catalog::tests::case_145 ... ok
 test orders::tests::rejects_zero_qty ... FAILED
+test orders::tests::total_includes_tax ... FAILED
+test pricing::tests::case_009 ... ok
+test pricing::tests::case_014 ... ok
+test pricing::tests::case_019 ... ok
+test pricing::tests::case_029 ... ok
+test pricing::tests::case_034 ... ok
+test pricing::tests::case_039 ... ok
+test pricing::tests::case_044 ... ok
+test pricing::tests::case_049 ... ok
+test pricing::tests::case_054 ... ok
+test pricing::tests::case_059 ... ok
+test pricing::tests::case_064 ... ok
+test pricing::tests::case_069 ... ok
+test pricing::tests::case_074 ... ok
+test pricing::tests::case_079 ... ok
+test pricing::tests::case_084 ... ok
+test pricing::tests::case_089 ... ok
+test pricing::tests::case_094 ... ok
+test pricing::tests::case_099 ... ok
+test pricing::tests::case_104 ... ok
+test pricing::tests::case_109 ... ok
+test pricing::tests::case_114 ... ok
+test pricing::tests::case_119 ... ok
+test pricing::tests::case_124 ... ok
+test pricing::tests::case_129 ... ok
+test pricing::tests::case_134 ... ok
+test pricing::tests::case_139 ... ok
+test pricing::tests::case_144 ... ok
+test search::tests::case_003 ... ok
+test search::tests::case_008 ... ok
+test search::tests::case_013 ... ok
+test search::tests::case_018 ... ok
+test search::tests::case_023 ... ok
+test search::tests::case_028 ... ok
+test search::tests::case_033 ... ok
+test search::tests::case_038 ... ok
+test search::tests::case_043 ... ok
+test search::tests::case_048 ... ok
+test search::tests::case_053 ... ok
+test search::tests::case_058 ... ok
+test search::tests::case_063 ... ok
+test search::tests::case_068 ... ok
+test search::tests::case_073 ... ok
+test search::tests::case_078 ... ok
+test search::tests::case_083 ... ok
+test search::tests::case_088 ... ok
+test search::tests::case_093 ... ok
+test search::tests::case_098 ... ok
+test search::tests::case_103 ... ok
+test search::tests::case_108 ... ok
+test search::tests::case_113 ... ok
+test search::tests::case_118 ... ok
+test search::tests::case_123 ... ok
+test search::tests::case_128 ... ok
+test search::tests::case_133 ... ok
+test search::tests::case_138 ... ok
+test search::tests::case_143 ... ok
+test users::tests::case_002 ... ok
+test users::tests::case_007 ... ok
+test users::tests::case_012 ... ok
+test users::tests::case_017 ... ok
+test users::tests::case_022 ... ok
+test users::tests::case_027 ... ok
+test users::tests::case_032 ... ok
+test users::tests::case_037 ... ok
+test pricing::tests::case_004 ... ok
+test pricing::tests::case_024 ... ok
+test users::tests::case_042 ... ok
+test users::tests::case_047 ... ok
+test users::tests::case_052 ... ok
+test users::tests::case_057 ... ok
+test users::tests::case_062 ... ok
+test users::tests::case_067 ... ok
+test users::tests::case_072 ... ok
+test users::tests::case_087 ... ok
+test users::tests::case_077 ... ok
+test users::tests::case_092 ... ok
+test users::tests::case_082 ... ok
+test users::tests::case_097 ... ok
+test users::tests::case_102 ... ok
+test users::tests::case_107 ... ok
+test users::tests::case_112 ... ok
+test users::tests::case_117 ... ok
+test users::tests::case_122 ... ok
+test users::tests::case_127 ... ok
+test users::tests::case_132 ... ok
+test users::tests::case_137 ... ok
+test users::tests::case_142 ... ok
+test users::tests::case_147 ... ok
 
 failures:
 
+---- orders::tests::rejects_zero_qty stdout ----
+
+thread 'orders::tests::rejects_zero_qty' (16651) panicked at src/orders.rs:33:22:
+expected Err(InvalidQty), got Ok(Order { id: 7, qty: 0 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
 ---- orders::tests::total_includes_tax stdout ----
 
-thread 'orders::tests::total_includes_tax' panicked at src/orders.rs:88:9:
+thread 'orders::tests::total_includes_tax' (16652) panicked at src/orders.rs:26:9:
 assertion `left == right` failed
   left: 1998
  right: 2158
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-
----- orders::tests::rejects_zero_qty stdout ----
-
-thread 'orders::tests::rejects_zero_qty' panicked at src/orders.rs:102:5:
-expected Err(InvalidQty), got Ok(Order { id: 7, qty: 0 })
 
 
 failures:
     orders::tests::rejects_zero_qty
     orders::tests::total_includes_tax
 
-test result: FAILED. 148 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: FAILED. 148 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
 error: test failed, to rerun pass `--lib`

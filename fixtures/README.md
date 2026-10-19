@@ -2,8 +2,9 @@
 
 | Path | Content | Status |
 |---|---|---|
-| `outputs/pytest_fail.txt` | pytest -v: 300 passed, 2 failed | Synthetic |
-| `outputs/cargo_fail.txt` | cargo test: 148 passed, 2 failed | Synthetic |
+| `outputs/pytest_fail.txt` | pytest -v: 300 passed, 2 failed | Captured 2026-10-19 (pytest 8.3) |
+| `outputs/cargo_fail.txt` | cargo test: 148 passed, 2 failed (one `assert_eq!`, one `panic!`) | Captured 2026-10-19 (Rust 1.95) |
+| `outputs/pytest_cut_by_claude.txt` | A failing pytest run as Claude Code cut it (`... [N characters truncated] ...`) | Captured 2026-10-19 |
 | `outputs/go_test_fail.txt`, `go_test_v_fail.txt` | go test, plain and `-v`: 3 failures (one subtest, one panic) | Captured 2026-10-19 (go 1.22) |
 | `outputs/jest_fail.txt` | jest 29 `--verbose`: 3 failed, 30 passed | Captured 2026-10-19 |
 | `outputs/vitest_fail.txt` | vitest 2.1 `--reporter=verbose`: 3 failed, 30 passed | Captured 2026-10-19 |

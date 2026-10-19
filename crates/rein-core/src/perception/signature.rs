@@ -128,10 +128,21 @@ pub fn extract_failures(output: &str) -> Vec<Failure> {
 fn cargo_panics(lines: &[String]) -> HashMap<String, String> {
     let mut m = HashMap::new();
     for (i, l) in lines.iter().enumerate() {
-        if let Some(c) = re!(r"^thread '([^']+)' panicked at (.*)$").captures(l) {
+        // Newer Rust adds the thread id: `thread 'name' (16652) panicked at src/x.rs:1:2:`.
+        if let Some(c) = re!(r"^thread '([^']+)'(?: \(\d+\))? panicked at (.*)$").captures(l) {
             let rest = c[2].trim();
             let msg = if rest.ends_with(':') {
-                next_nonempty(lines, i).unwrap_or_default()
+                // assert_eq! puts the values on `left:`/`right:` lines; they tell failures apart.
+                let mut parts: Vec<String> = next_nonempty(lines, i).into_iter().collect();
+                parts.extend(
+                    lines
+                        .iter()
+                        .skip(i + 2)
+                        .take(2)
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| l.starts_with("left:") || l.starts_with("right:")),
+                );
+                parts.join("; ")
             } else {
                 rest.to_string()
             };
@@ -310,13 +321,29 @@ mod tests {
 
     #[test]
     fn cargo_failures_with_panic_messages() {
-        let f = extract_failures(CARGO);
-        assert_eq!(f.len(), 2);
+        // Real cargo 1.95 output: panic lines carry a thread id, `thread 'x' (16652) panicked`.
+        let found = extract_failures(CARGO);
+        let mut got = pairs(&found);
+        got.sort();
         assert_eq!(
-            f[0].test.as_deref(),
-            Some("orders::tests::total_includes_tax")
+            got,
+            vec![
+                (
+                    "orders::tests::rejects_zero_qty",
+                    "expected Err(InvalidQty), got Ok(Order { id: 7, qty: 0 })"
+                ),
+                (
+                    "orders::tests::total_includes_tax",
+                    "assertion `left == right` failed; left: 1998; right: 2158"
+                ),
+            ]
         );
-        assert_eq!(f[0].message, "assertion `left == right` failed");
+        // The older format without a thread id, and the message on the same line.
+        let old = "test a::b ... FAILED\nthread 'a::b' panicked at 'boom', src/x.rs:1:2\n";
+        assert_eq!(
+            pairs(&extract_failures(old)),
+            vec![("a::b", "'boom', src/x.rs:1:2")]
+        );
     }
 
     #[test]
