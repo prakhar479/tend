@@ -101,15 +101,23 @@ Consolidated 2026-10-19 from the Phase 0/1 results. Owner decisions are marked *
 
 Based on a code review, a study of the owner's transcripts, and a check of the Claude Code docs. Read the analysis for the evidence and the acceptance check of each item.
 
-**R0. Make optimize mode safe (before using it).** Look mode is not affected.
-- [ ] **R0.1** `rein run`: do not wait for background children; kill the process group and print partial output on a signal. (D1, D2: confirmed)
-- [ ] **R0.2** Record what the agent saw: a filter timeout must give `applied: false`; cap filter input. (D3: confirmed)
-- [ ] **R0.3** Daemon: Ping without the lock; "slow" is not "stale"; shape outside the lock. (D4: confirmed)
-- [ ] **R0.4** Wrapper: absolute binary path; skip shell functions and aliases. (D5)
-- [ ] **R0.5** Classifier: runners in command position only; refuse multi-line and `{ … }`. (D7)
-- [ ] **R0.6** Single-write ledger lines, blob temp+rename, locked Shutdown; shim ignores EPIPE. (D8, D12)
-- [ ] **R0.7** `ensure_private_dir` rejects symlinks; drop `wrapped` entries at Stop; cap maps. (D10, D11)
-- [ ] **R0.8** Agent-proof `allow`/`set_mode`/`shutdown` (token or peer check); fix the commit-message false positive. (D6)
+**R0. Make optimize mode safe (before using it).** Done 2026-10-19.
+- [x] **R0.1** `rein run`: do not wait for background children; kill the process group and print partial output on a signal. (D1, D2: confirmed)
+  Done: drain ≤100 ms after exit; own process group + Linux parent-death signal; partial output and exit 128+sig on a stop. Live: a 25 s background process no longer blocks; Esc leaves nothing running.
+- [x] **R0.2** Record what the agent saw: a filter timeout must give `applied: false`; cap filter input. (D3: confirmed)
+  Done: the shape is recorded at the tool result, applied only if the agent saw it; stopped calls settle at the turn end.
+- [x] **R0.3** Daemon: Ping without the lock; "slow" is not "stale"; shape outside the lock. (D4: confirmed)
+  Done: Ping without the lock; `rein_core::prepare` runs outside it; `is_live` = connect. A hook waited 946 ms before, < 250 ms now.
+- [x] **R0.4** Wrapper: absolute binary path; skip shell functions and aliases. (D5)
+  Done: absolute binary path; wrap only if the runner is a real executable.
+- [x] **R0.5** Classifier: runners in command position only; refuse multi-line and `{ … }`. (D7)
+  Done: `perception::shell` parser; runners in command position; complex commands are not wrapped.
+- [x] **R0.6** Single-write ledger lines, blob temp+rename, locked Shutdown; shim ignores EPIPE. (D8, D12)
+  Done.
+- [x] **R0.7** `ensure_private_dir` rejects symlinks; drop `wrapped` entries at Stop; cap maps. (D10, D11)
+  Done (wrapped entries dropped at each turn end since R0.2).
+- [x] **R0.8** Agent-proof `allow`/`set_mode`/`shutdown` (token or peer check); fix the commit-message false positive. (D6)
+  Done: `<session>/control.token` (0600). Raises the bar; the agent runs as the same user, so it is not a security boundary.
 
 **R1. Coverage gaps from the data**
 - [ ] **R1.1** Wrap behind `source …/activate &&` and env assignments (74% of test runs are refused today).
