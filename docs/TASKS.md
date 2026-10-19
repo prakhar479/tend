@@ -97,6 +97,44 @@ Consolidated 2026-10-19 from the Phase 0/1 results. Owner decisions are marked *
 - [ ] **N15. macOS.** Latency, Ctrl-C, socket fallback. Needs a Mac.
 - [ ] **N16. Real-session review (Phase 1 exit).** ~20 sessions in look mode; owners confirm the reports.
 
+## Roadmap R (from `docs/analysis-2026-10.md`)
+
+Based on a code review, a study of the owner's transcripts, and a check of the Claude Code docs. Read the analysis for the evidence and the acceptance check of each item.
+
+**R0. Make optimize mode safe (before using it).** Look mode is not affected.
+- [ ] **R0.1** `rein run`: do not wait for background children; kill the process group and print partial output on a signal. (D1, D2: confirmed)
+- [ ] **R0.2** Record what the agent saw: a filter timeout must give `applied: false`; cap filter input. (D3: confirmed)
+- [ ] **R0.3** Daemon: Ping without the lock; "slow" is not "stale"; shape outside the lock. (D4: confirmed)
+- [ ] **R0.4** Wrapper: absolute binary path; skip shell functions and aliases. (D5)
+- [ ] **R0.5** Classifier: runners in command position only; refuse multi-line and `{ … }`. (D7)
+- [ ] **R0.6** Single-write ledger lines, blob temp+rename, locked Shutdown; shim ignores EPIPE. (D8, D12)
+- [ ] **R0.7** `ensure_private_dir` rejects symlinks; drop `wrapped` entries at Stop; cap maps. (D10, D11)
+- [ ] **R0.8** Agent-proof `allow`/`set_mode`/`shutdown` (token or peer check); fix the commit-message false positive. (D6)
+
+**R1. Coverage gaps from the data**
+- [ ] **R1.1** Wrap behind `source …/activate &&` and env assignments (74% of test runs are refused today).
+- [ ] **R1.2** Failure from output text, not `is_error` (0.9% vs 34.7%).
+- [ ] **R1.3** Normalized command keys for loops and re-runs (exact repeats: 0).
+- [ ] **R1.4** Guard Bash writes to test files (`sed -i`, heredocs, Python): most edits bypass Edit/Write.
+- [ ] **R1.5** Faithful handling of large file views (51% of Bash output). Measure first.
+- [ ] **R1.6** Group large search output by file.
+
+**R2. Learn from real use**
+- [ ] **R2.1** `rein flag <id> "note"` and `rein review`.
+- [ ] **R2.2** `retro --all` prints coverage and output share by class.
+- [ ] **R2.3** Guard and loop precision in `rein report`.
+- [ ] **R2.4** Review 20 real sessions in look mode (N16).
+
+**R3. Platform and distribution**
+- [ ] **R3.1** Conformance tests per Claude Code version (`updatedInput` without a decision is undocumented).
+- [ ] **R3.2** `SessionEnd` hook: stop the daemon, print a one-line report.
+- [ ] **R3.3** Spike: ship as a Claude Code plugin instead of the launcher.
+- [ ] **R3.4** Spike: `http` hooks instead of the shim process.
+- [ ] **R3.5** `rein status` for the Claude Code statusline.
+- [ ] **R3.6** Report `systemMessage` not shown on PreToolUse `ask` (`/feedback`).
+
+**Owner decisions:** the name (collides with `pegasi-ai/reins`), positioning (loops and honesty first), the Bash-write guard (warn or snapshot and undo), and plugin distribution. See analysis §7.
+
 ## Phase 2 — Optimize + Codex (not started)
 
 - [ ] Tune `Config` defaults from Phase 1 data.

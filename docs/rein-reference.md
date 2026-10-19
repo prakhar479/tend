@@ -479,7 +479,7 @@ Replay alone cannot prove that reduction is safe. The A/B gate is mandatory.
 
 | Decision | Status |
 |---|---|
-| Name: rein, used as a prefix command | Decided (availability not verified) |
+| Name: winnow, used as a prefix command | Replaced 2026-10-19 by `rein` (winnow is taken on crates.io and GitHub). `rein` collides with `pegasi-ai/reins`, an agent-guard tool: open (see `docs/analysis-2026-10.md` §7) |
 | Open-source tool first; research as an option | Decided |
 | Clean core plus connectors; first: Claude Code, Codex | Decided |
 | Two modes: look, optimize | Decided |
