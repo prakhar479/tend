@@ -143,6 +143,9 @@ pub struct Controller {
     allowed: BTreeMap<EditKey, (String, u64)>,
     /// Bash calls wrapped by `rein run`, by tool use id.
     wrapped: BTreeMap<String, Wrapped>,
+    /// Command keys never to wrap again: a wrapped run of them got no tool result
+    /// (Claude Code's auto-mode classifier can deny a rewrite as a bypass).
+    no_wrap: std::collections::BTreeSet<String>,
     /// The last summary the agent saw, to spot an immediate re-run of its command.
     last_summary: Option<LastSummary>,
     /// Set by `observe` in deferred mode; `filter` moves it into the wrapped call.
@@ -250,6 +253,7 @@ impl Controller {
             last_blocked: None,
             allowed: BTreeMap::new(),
             wrapped: BTreeMap::new(),
+            no_wrap: std::collections::BTreeSet::new(),
             last_summary: None,
             deferred: None,
             last_ms: None,
@@ -622,6 +626,11 @@ impl Controller {
     /// seen. Drop every wrapped entry, so the map cannot grow (R0.7).
     fn end_turn(&mut self, d: &mut Decision, now: u64, ev: u64) {
         for (_, w) in std::mem::take(&mut self.wrapped) {
+            // No tool result: denied (auto mode may call a rewrite a bypass) or stopped.
+            // One strike: run this command unwrapped from now on.
+            if !w.filtered {
+                self.no_wrap.insert(command_key(&w.command));
+            }
             if let Some(p) = w.pending {
                 let reason = "No tool result arrived (the call was stopped), so the agent did not see this summary.";
                 self.record(
@@ -762,6 +771,14 @@ impl Controller {
             )
         });
         if changes_state {
+            return;
+        }
+        if self.no_wrap.contains(&command_key(&command)) {
+            let reason = "Not wrapped: a wrapped run of this command got no result before (denied or stopped).";
+            let action = ActionKind::Wrap {
+                tool_use_id: tool_use_id.clone(),
+            };
+            self.record(d, now, vec![cause], action, reason.into(), false, false);
             return;
         }
         let reason = if rewrite_ok {
@@ -1389,6 +1406,31 @@ mod tests {
             .entries
             .iter()
             .any(|e| matches!(e.body, Body::Adaptation { .. })));
+    }
+
+    /// Auto mode denied a wrapped call ([Auto-Mode Bypass]): no tool result, no filter.
+    /// The retry must run as the agent wrote it.
+    #[test]
+    fn denied_wrap_is_not_repeated() {
+        let mut c = ctl(Mode::Optimize);
+        assert!(
+            c.handle(requested("t1", "pytest -q tests/a.py", true), 0)
+                .response
+                .wrap
+        );
+        c.handle(Event::TurnEnded, 1);
+        let d = c.handle(requested("t2", "pytest -v tests/a.py | tail", true), 2);
+        assert!(!d.response.wrap, "same command key: not wrapped again");
+        assert!(d.entries.iter().any(|e| matches!(
+            &e.body,
+            Body::Action { applied: false, action: ActionKind::Wrap { .. }, reason, .. }
+                if reason.contains("got no result before")
+        )));
+        assert!(
+            c.handle(requested("t3", "pytest tests/b.py", true), 3)
+                .response
+                .wrap
+        );
     }
 
     /// R0.2/R0.7: a stopped call never gets a tool result; the turn end settles it.
