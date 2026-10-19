@@ -610,3 +610,42 @@ fn bash_write_that_weakens_a_test_is_warned() {
     let report = rein(&["report"], &session);
     assert!(report.contains("Test guard: 1"), "{report}");
 }
+
+/// R3.7: auto mode denies a wrapped call; rein says the agent may retry, and the retry
+/// is not wrapped.
+#[test]
+fn denied_wrapped_call_may_be_retried_unwrapped() {
+    let dir = tmp("denied");
+    let session = dir.join("session");
+    let (_daemon, sock) = start_daemon(&session, "optimize");
+    let fake = dir.join("bin/pytest");
+    fs::create_dir_all(fake.parent().unwrap()).unwrap();
+    fs::write(&fake, "#!/bin/sh\necho ok\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut pre: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("post_tool_use_bash.json")).unwrap())
+            .unwrap();
+    pre["hook_event_name"] = "PreToolUse".into();
+    pre["permission_mode"] = "auto".into();
+    pre["tool_input"]["command"] = format!("{} -q", fake.display()).into();
+    pre.as_object_mut().unwrap().remove("tool_response");
+    assert!(hook(&sock, "PreToolUse", &pre).contains("updatedInput"));
+
+    let mut denied: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("permission_denied_bash.json")).unwrap())
+            .unwrap();
+    denied["tool_use_id"] = pre["tool_use_id"].clone();
+    let out: serde_json::Value =
+        serde_json::from_str(&hook(&sock, "PermissionDenied", &denied)).unwrap();
+    assert_eq!(out["hookSpecificOutput"]["retry"], true);
+
+    pre["tool_use_id"] = "toolu_02".into();
+    assert_eq!(
+        hook(&sock, "PreToolUse", &pre),
+        "",
+        "the retry runs unwrapped"
+    );
+    let report = rein(&["report"], &session);
+    assert!(report.contains("denied by auto mode: 1 (100%)"), "{report}");
+}

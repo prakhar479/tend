@@ -91,6 +91,8 @@ pub struct Response {
     pub wrap: bool,
     pub add_context: Vec<String>,
     pub permission: Option<Permission>,
+    /// The agent may retry a denied call (R3.7).
+    pub retry: bool,
 }
 
 impl Response {
@@ -99,6 +101,7 @@ impl Response {
             && !self.wrap
             && self.add_context.is_empty()
             && self.permission.is_none()
+            && !self.retry
     }
 
     pub fn merge(&mut self, other: Response) {
@@ -106,6 +109,7 @@ impl Response {
             self.replace_output = other.replace_output;
         }
         self.wrap |= other.wrap;
+        self.retry |= other.retry;
         self.add_context.extend(other.add_context);
         if self.permission.is_none() {
             self.permission = other.permission;
@@ -329,6 +333,7 @@ impl Controller {
             Event::EditProposed { .. } => self.on_edit_proposed(&mut d, event, now_ms),
             Event::FileEdited { .. } => self.on_file_edited(&mut d, event, now_ms),
             Event::FileChanged { .. } => self.on_file_changed(&mut d, event, now_ms),
+            Event::ToolDenied { .. } => self.on_tool_denied(&mut d, event, now_ms),
             Event::SessionStarted {
                 agent,
                 cwd,
@@ -971,6 +976,35 @@ impl Controller {
         }
     }
 
+    /// Auto mode denied a call. If rein had wrapped it, the wrapper may be why: its
+    /// classifier sometimes calls `rein run` a bypass (R3.7). Stop wrapping the command,
+    /// and tell the agent it may retry; the retry runs unwrapped.
+    fn on_tool_denied(&mut self, d: &mut Decision, event: Event, now: u64) {
+        let Event::ToolDenied { tool_use_id, .. } = &event else {
+            return;
+        };
+        let tool_use_id = tool_use_id.clone();
+        let ev = self.push(d, now, vec![], Body::Event { event });
+        let Some(w) = self.wrapped.remove(&tool_use_id) else {
+            return;
+        };
+        self.no_wrap.insert(command_key(&w.command));
+        let reason = "Auto mode denied a call that rein had wrapped in `rein run`; the agent may retry it unwrapped.";
+        let action = ActionKind::Retry { tool_use_id };
+        let supported = self.supports(&action);
+        let applied = self.session.mode == Mode::Optimize && supported;
+        self.record(
+            d,
+            now,
+            vec![ev, w.action_seq],
+            action,
+            reason.into(),
+            applied,
+            !supported,
+        );
+        d.response.retry = applied;
+    }
+
     fn on_file_edited(&mut self, d: &mut Decision, event: Event, now: u64) {
         let (path, hash) = match &event {
             Event::FileEdited {
@@ -1012,6 +1046,7 @@ impl Controller {
         match action {
             ActionKind::BlockCommand { .. } => self.caps.deny,
             ActionKind::Wrap { .. } => self.caps.rewrite_input,
+            ActionKind::Retry { .. } => self.caps.retry_denied,
             ActionKind::Shape { .. } => self.caps.replace_output,
             ActionKind::Steer { .. } => self.caps.inject_context,
             ActionKind::Guard { decision, .. } => match decision {
@@ -1582,6 +1617,56 @@ mod tests {
                 .response
                 .wrap
         );
+    }
+
+    fn denied(id: &str) -> Event {
+        Event::ToolDenied {
+            tool_use_id: id.into(),
+            tool: "Bash".into(),
+            reason: "[Auto-Mode Bypass] wraps the command".into(),
+        }
+    }
+
+    /// R3.7: auto mode denied a wrapped call. The agent may retry, and the retry runs
+    /// unwrapped at once (not only after the turn ends).
+    #[test]
+    fn denied_wrapped_call_is_retried_unwrapped() {
+        let mut c = ctl(Mode::Optimize);
+        assert!(
+            c.handle(requested("t1", "pytest -q", true), 0)
+                .response
+                .wrap
+        );
+        let d = c.handle(denied("t1"), 1);
+        assert!(d.response.retry);
+        let retry = d.entries.iter().find(|e| {
+            matches!(
+                &e.body,
+                Body::Action {
+                    action: ActionKind::Retry { .. },
+                    applied: true,
+                    ..
+                }
+            )
+        });
+        assert_eq!(
+            retry.map(|e| e.causes.len()),
+            Some(2),
+            "the denial and the wrap"
+        );
+        assert!(
+            !c.handle(requested("t2", "pytest -q", true), 2)
+                .response
+                .wrap
+        );
+
+        // A denial of a call rein did not change is only recorded.
+        let d = c.handle(denied("t9"), 3);
+        assert!(d.response.is_empty());
+        assert!(!d
+            .entries
+            .iter()
+            .any(|e| matches!(e.body, Body::Action { .. })));
     }
 
     /// R0.2/R0.7: a stopped call never gets a tool result; the turn end settles it.

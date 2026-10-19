@@ -61,6 +61,12 @@ pub enum Event {
         old_text: String,
         new_text: String,
     },
+    /// A tool call that auto mode denied before it ran (R3.7).
+    ToolDenied {
+        tool_use_id: String,
+        tool: String,
+        reason: String,
+    },
     PromptSubmitted {
         chars: usize,
     },

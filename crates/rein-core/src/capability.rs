@@ -14,6 +14,9 @@ pub struct Capabilities {
     pub inject_context: bool,
     pub continue_turn: bool,
     pub block_compaction: bool,
+    /// Tell the agent it may retry a call that auto mode denied (Claude Code:
+    /// PermissionDenied `retry`, in the 2.1.303 hook docs). [Verify] live (R3.7).
+    pub retry_denied: bool,
     /// Largest hook message the agent passes to the model, if it has a limit.
     pub hook_output_limit_tokens: Option<usize>,
 }
@@ -33,6 +36,7 @@ impl Capabilities {
         inject_context: true,
         continue_turn: true,
         block_compaction: true,
+        retry_denied: true,
         hook_output_limit_tokens: None,
     };
 
@@ -48,6 +52,7 @@ impl Capabilities {
         inject_context: true,
         continue_turn: true,
         block_compaction: true,
+        retry_denied: false,
         hook_output_limit_tokens: Some(2500),
     };
 
@@ -61,6 +66,7 @@ impl Capabilities {
         inject_context: false,
         continue_turn: false,
         block_compaction: false,
+        retry_denied: false,
         hook_output_limit_tokens: None,
     };
 }

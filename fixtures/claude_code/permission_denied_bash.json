@@ -1,0 +1,14 @@
+{
+  "cwd": "/home/dev/shop",
+  "hook_event_name": "PermissionDenied",
+  "permission_mode": "auto",
+  "reason": "[Auto-Mode Bypass] The command wraps pytest in a helper binary.",
+  "session_id": "9b1d6f2e-0000-4000-8000-000000000001",
+  "tool_input": {
+    "command": "'/usr/local/bin/rein' run --id 'toolu_07' --sh 'python3 -m pytest -q'",
+    "description": "Run the tests"
+  },
+  "tool_name": "Bash",
+  "tool_use_id": "toolu_07",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-shop/9b1d6f2e-0000-4000-8000-000000000001.jsonl"
+}

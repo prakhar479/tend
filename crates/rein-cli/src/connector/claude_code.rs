@@ -381,6 +381,11 @@ impl Connector for ClaudeCode {
                     failed,
                 });
             }
+            "PermissionDenied" => evs.push(Event::ToolDenied {
+                tool_use_id,
+                tool,
+                reason: s(p, "reason").to_string(),
+            }),
             "UserPromptSubmit" => evs.push(Event::PromptSubmitted {
                 chars: s(p, "prompt").chars().count(),
             }),
@@ -439,6 +444,16 @@ impl Connector for ClaudeCode {
                     h["updatedToolOutput"] = encode_replacement(payload.get("tool_response"), t);
                 }
             }
+            // R3.7: the only output this event takes (2.1.303 hook docs).
+            "PermissionDenied" => {
+                if !r.retry {
+                    return None;
+                }
+                return Some(json!({ "hookSpecificOutput": {
+                    "hookEventName": hook_event,
+                    "retry": true,
+                }}));
+            }
             "PostToolUseFailure" | "UserPromptSubmit" | "SessionStart" => {}
             _ => return None,
         }
@@ -470,6 +485,8 @@ pub fn settings(exe: &Path) -> Value {
             "PreToolUse": entry("PreToolUse", Some(tools)),
             "PostToolUse": entry("PostToolUse", Some(tools)),
             "PostToolUseFailure": entry("PostToolUseFailure", Some(tools)),
+            // R3.7: only rein's own rewrites (Bash) can make auto mode deny a call.
+            "PermissionDenied": entry("PermissionDenied", Some("Bash")),
             "UserPromptSubmit": entry("UserPromptSubmit", None),
             "Stop": entry("Stop", None),
             "PreCompact": entry("PreCompact", None),
@@ -586,6 +603,35 @@ mod tests {
                 .unwrap();
             assert_eq!(preview.len(), preview_len, "{name}");
         }
+    }
+
+    /// R3.7: payload shape from the 2.1.303 hook schema (not yet captured live).
+    #[test]
+    fn permission_denied_maps_and_encodes_retry() {
+        let mut c = ClaudeCode {
+            started: true,
+            ..Default::default()
+        };
+        let p = fixture("permission_denied_bash.json");
+        let evs = c.map("PermissionDenied", &p);
+        assert!(matches!(
+            &evs[..],
+            [Event::ToolDenied { tool_use_id, reason, .. }]
+                if tool_use_id == "toolu_07" && reason.starts_with("[Auto-Mode Bypass]")
+        ));
+        assert_eq!(c.encode("PermissionDenied", &p, &Response::default()), None);
+        let r = Response {
+            retry: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            c.encode("PermissionDenied", &p, &r),
+            Some(json!({ "hookSpecificOutput": {
+                "hookEventName": "PermissionDenied", "retry": true
+            }}))
+        );
+        let hooks = &settings(Path::new("/x/rein"))["hooks"];
+        assert_eq!(hooks["PermissionDenied"][0]["matcher"], "Bash");
     }
 
     #[test]

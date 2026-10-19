@@ -147,7 +147,8 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
 - [ ] **R3.4** Spike: `http` hooks instead of the shim process.
 - [ ] **R3.5** `rein status` for the Claude Code statusline.
 - [ ] **R3.6** Report `systemMessage` not shown on PreToolUse `ask` (`/feedback`).
-- [ ] **R3.7** Detect auto-mode denials of wrapped calls (`PermissionDenied` hook) and measure the rate. Live: 1 of 9 wrapped test runs was denied as "[Auto-Mode Bypass]"; the agent then stops. Mitigation in place: a command key whose wrapped run got no result is not wrapped again in the session.
+- [x] **R3.7** Detect auto-mode denials of wrapped calls (`PermissionDenied` hook) and measure the rate. Live: 1 of 9 wrapped test runs was denied as "[Auto-Mode Bypass]"; the agent then stops. Mitigation in place: a command key whose wrapped run got no result is not wrapped again in the session.
+  Done: the `PermissionDenied` hook exists in 2.1.303 ("after auto mode classifier denies a tool call"; input `tool_name`, `tool_input`, `tool_use_id`, `reason`; output `retry: true` tells the model it may retry). Rein hooks it for Bash. A denied call that rein wrapped: the command key is not wrapped again (at once, not at the turn end), and rein answers `retry: true` (new action `retry`, new event `tool_denied`, both additive). The report shows `denied by auto mode: K (X%)` next to wrapped runs. Settings accepted live by 2.1.303. **[Verify]**: the fixture follows the schema in the binary, not a live capture; capture one with `REIN_CAPTURE=1` when a denial happens, and check that the agent retries after `retry: true`.
 
 **Owner decisions:** the name (collides with `pegasi-ai/reins`), positioning (loops and honesty first), and plugin distribution. See analysis §7.
 

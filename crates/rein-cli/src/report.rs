@@ -303,7 +303,7 @@ pub fn render(label: &str, entries: &[Entry], live: bool) -> String {
     let t = totals(entries);
     let (mut tools, mut bash, mut reopens, mut judgments) = (0u64, 0u64, 0u64, 0u64);
     let (mut shaped, mut before, mut after, mut shaped_applied) = (0u64, 0u64, 0u64, 0u64);
-    let (mut unshapeable, mut wrapped) = (0u64, 0u64);
+    let (mut unshapeable, mut wrapped, mut denied) = (0u64, 0u64, 0u64);
     let (mut loops, mut cycles, mut guards, mut adaptations, mut modes) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut config = Vec::new();
@@ -398,6 +398,7 @@ pub fn render(label: &str, entries: &[Entry], live: bool) -> String {
                     }
                 }
                 ActionKind::Wrap { .. } => wrapped += u64::from(*applied),
+                ActionKind::Retry { .. } => denied += 1,
                 ActionKind::BlockCommand { command } => guards.push(format!(
                     "{} the agent's `{}`: {reason}",
                     status(*applied, "blocked", "would block"),
@@ -484,9 +485,11 @@ pub fn render(label: &str, entries: &[Entry], live: bool) -> String {
         pct(saved, t.bash_tokens)
     );
     if wrapped > 0 {
+        // R3.7: auto mode sometimes denies a wrapped call; each denial is a Retry action.
         let _ = writeln!(
             out,
-            "Wrapped test runs: {wrapped} (summarized even when they fail)"
+            "Wrapped test runs: {wrapped} (summarized even when they fail) · denied by auto mode: {denied} ({}%)",
+            pct(denied, wrapped)
         );
     }
     if unshapeable > 0 {
@@ -552,6 +555,7 @@ fn describe(e: &Entry) -> String {
                 ActionKind::Guard { .. } => "guard",
                 ActionKind::BlockCommand { .. } => "block",
                 ActionKind::Wrap { .. } => "wrap",
+                ActionKind::Retry { .. } => "retry",
             };
             let state = match (applied, unsupported) {
                 (true, _) => "applied",

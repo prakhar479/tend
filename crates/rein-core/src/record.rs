@@ -105,6 +105,11 @@ pub enum ActionKind {
     Wrap {
         tool_use_id: String,
     },
+    /// Tell the agent it may retry a call that auto mode denied because rein had
+    /// wrapped it in `rein run` (R3.7). The retry runs unwrapped.
+    Retry {
+        tool_use_id: String,
+    },
     /// A command the agent may not run (it would lift a guard).
     BlockCommand {
         command: String,
