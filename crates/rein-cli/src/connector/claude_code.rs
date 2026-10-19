@@ -112,6 +112,30 @@ pub fn extract_output(v: &Value) -> String {
     }
 }
 
+/// The program behind a test command is a real executable. `rein run` uses plain bash,
+/// so a runner that exists only as a function or alias in the agent's shell snapshot
+/// would fail there (R0.4). No runner: nothing to check.
+fn runner_is_executable(command: &str, cwd: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Some((_, seg)) = rein_core::perception::runner_segment(command) else {
+        return true;
+    };
+    let Some(program) = seg
+        .iter()
+        .find(|w| !rein_core::perception::shell::is_assignment(w))
+    else {
+        return false;
+    };
+    let executable = |p: &Path| {
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    if program.contains('/') {
+        return executable(&resolve(cwd, program));
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|d| executable(&d.join(program))))
+}
+
 /// (path, old text, new text) for an edit tool call.
 fn edit_texts(tool: &str, input: &Value, cwd: &str) -> Option<(String, String, String)> {
     let path = s(input, "file_path");
@@ -199,7 +223,10 @@ impl Connector for ClaudeCode {
                         .get("run_in_background")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    let rewrite_ok = matches!(mode, "auto" | "bypassPermissions") && !background;
+                    let command = s(&input, "command");
+                    let rewrite_ok = matches!(mode, "auto" | "bypassPermissions")
+                        && !background
+                        && runner_is_executable(command, &cwd);
                     evs.push(Event::ToolRequested {
                         tool_use_id,
                         tool,
@@ -521,6 +548,27 @@ mod tests {
             assert!(
                 matches!(&evs[0], Event::ToolRequested { rewrite_ok, .. } if *rewrite_ok == want),
                 "{mode} bg={bg}"
+            );
+        }
+        // R0.4: a runner that is not an executable (a shell function, a missing path).
+        let mut q = p.clone();
+        q["permission_mode"] = json!("auto");
+        q["tool_input"]["run_in_background"] = json!(false);
+        for cmd in [
+            "/nonexistent/bin/pytest -q",
+            "./no-such-venv/bin/python -m pytest",
+        ] {
+            q["tool_input"]["command"] = json!(cmd);
+            let evs = c.map("PreToolUse", &q);
+            assert!(
+                matches!(
+                    &evs[0],
+                    Event::ToolRequested {
+                        rewrite_ok: false,
+                        ..
+                    }
+                ),
+                "{cmd}"
             );
         }
         let r = Response {

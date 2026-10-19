@@ -14,7 +14,7 @@ use crate::capability::Capabilities;
 use crate::event::{Event, Mode};
 use crate::guard::{is_test_path, GuardDecision};
 use crate::loops::{LoopDetector, LoopSignal};
-use crate::perception::{classify, extract_failures, Failure, OutputKind};
+use crate::perception::{classify, extract_failures, shell, Failure, OutputKind};
 use crate::record::{ActionKind, Body, Entry, SteerTrigger, LEDGER_FORMAT};
 use crate::session::{Change, SessionModel};
 use crate::shape::{shape, Shaped};
@@ -178,6 +178,15 @@ pub fn prepare(output: &str, level: u8, cfg: &Config) -> Prepared {
         shaped,
         level,
     }
+}
+
+/// A simple command of `command` runs `rein allow` (any path to rein). Text inside
+/// quotes, such as a commit message, does not count.
+fn runs_rein_allow(command: &str) -> bool {
+    shell::parse(command).segments.iter().any(|seg| {
+        let w = shell::program_words(seg);
+        w.len() >= 2 && shell::program_name(&w[0]) == "rein" && w[1] == "allow"
+    })
 }
 
 /// Whether `observe` may put a summary in place.
@@ -701,7 +710,7 @@ impl Controller {
             _ => (String::new(), String::new(), false),
         };
         let ev = self.push(d, now, vec![], Body::Event { event });
-        if !re!(r"\brein\s+allow\b").is_match(&command) {
+        if !runs_rein_allow(&command) {
             self.maybe_wrap(d, now, ev, tool_use_id, command, rewrite_ok);
             return;
         }
@@ -727,10 +736,26 @@ impl Controller {
         if info.kind != OutputKind::Test || info.show_target.is_some() || tool_use_id.is_empty() {
             return;
         }
-        // A subprocess would lose shell state changes (cd, export, source).
-        if re!(r"(^|[;&|(]\s*)(cd|pushd|popd|export|source|alias|unset|set|\.)\s")
-            .is_match(&command)
-        {
+        // `rein run` is a subprocess: it would lose shell state changes (cd, export,
+        // source), and it cannot follow groups, subshells, or multi-line scripts (R0.5).
+        let line = shell::parse(&command);
+        let changes_state = line.segments.iter().any(|seg| {
+            matches!(
+                seg.first().map(String::as_str),
+                Some(
+                    "cd" | "pushd"
+                        | "popd"
+                        | "export"
+                        | "unset"
+                        | "alias"
+                        | "set"
+                        | "shopt"
+                        | "source"
+                        | "."
+                )
+            )
+        });
+        if line.complex || changes_state {
             return;
         }
         let reason = if rewrite_ok {
@@ -1368,6 +1393,17 @@ mod tests {
                 .response
                 .wrap
         );
+        // R0.5: newline and group forms of a state change are caught too.
+        for (id, cmd) in [
+            ("b2", "cd api\npytest"),
+            ("b3", "{ cd api; pytest; }"),
+            ("b4", "git commit -m 'fix pytest'"),
+        ] {
+            assert!(
+                !c.handle(requested(id, cmd, true), 1).response.wrap,
+                "{cmd}"
+            );
+        }
         assert!(!c.handle(requested("c", "ls -la", true), 2).response.wrap);
         assert!(
             !ctl(Mode::Look)
@@ -1395,6 +1431,11 @@ mod tests {
         let req = |cmd: &str| requested("b", cmd, false);
         let d = c.handle(req("cd /x && rein allow a-1"), 0);
         assert!(matches!(d.response.permission, Some(Permission::Deny(_))));
+        let d = c.handle(req("/home/u/.cargo/bin/rein allow"), 0);
+        assert!(matches!(d.response.permission, Some(Permission::Deny(_))));
+        // R0.8: a commit message that mentions it is not running it.
+        let d = c.handle(req("git commit -m 'document rein allow'"), 1);
+        assert!(d.response.is_empty());
         assert!(c.handle(req("rein show o-1"), 1).response.is_empty());
         assert!(ctl(Mode::Look)
             .handle(req("rein allow"), 0)

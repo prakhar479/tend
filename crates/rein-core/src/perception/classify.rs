@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::shell;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputKind {
@@ -83,22 +85,39 @@ const BUILD: &str = r"\bcargo\s+(build|check|clippy)\b|\btsc\b|\b(npm|pnpm|yarn|
 
 const INSTALL: &str = r"\b(npm|pnpm|yarn|bun)\s+(install|i|add|ci)\b|\b(pip|pip3)\s+install\b|\buv\s+(sync|pip\s+install|add)\b|\bpoetry\s+install\b|\bcargo\s+(install|fetch)\b|\b(apt|apt-get|brew)\s+install\b|\bgo\s+(get|mod\s+download)\b";
 
-fn detect_runner(cmd: &str) -> Option<TestRunner> {
-    if re!(r"\b(pytest|py\.test)\b").is_match(cmd) {
-        Some(TestRunner::Pytest)
-    } else if re!(r"\bvitest\b").is_match(cmd) {
-        Some(TestRunner::Vitest)
-    } else if re!(r"\bjest\b").is_match(cmd) {
-        Some(TestRunner::Jest)
-    } else if re!(r"\bcargo\s+(test|nextest)\b").is_match(cmd) {
-        Some(TestRunner::Cargo)
-    } else if re!(r"\bgo\s+test\b").is_match(cmd) {
-        Some(TestRunner::Go)
-    } else if re!(r"\b(npm|pnpm|yarn|bun)\s+(run\s+)?test\b|\b(mocha|rspec|phpunit|tox|ctest)\b|\b(mvn|gradle|gradlew)\s+test\b|\bmake\s+test\b").is_match(cmd) {
-        Some(TestRunner::Other)
-    } else {
-        None
+/// The runner of a simple command, from its program words (command position only:
+/// `git commit -m "fix pytest"` runs git, not pytest).
+fn runner_of(words: &[String]) -> Option<TestRunner> {
+    let w = shell::program_words(words);
+    let first = shell::program_name(w.first()?);
+    let arg = |i: usize| w.get(i).map(String::as_str);
+    match (first, arg(1)) {
+        ("pytest" | "py.test", _) => Some(TestRunner::Pytest),
+        ("vitest", _) => Some(TestRunner::Vitest),
+        ("jest", _) => Some(TestRunner::Jest),
+        ("cargo", Some("test" | "nextest")) => Some(TestRunner::Cargo),
+        ("go", Some("test")) => Some(TestRunner::Go),
+        ("npm" | "pnpm" | "yarn" | "bun", Some("test" | "t")) => Some(TestRunner::Other),
+        ("npm" | "pnpm" | "yarn" | "bun", Some("run")) if arg(2) == Some("test") => {
+            Some(TestRunner::Other)
+        }
+        ("mocha" | "rspec" | "phpunit" | "tox" | "nox" | "ctest", _) => Some(TestRunner::Other),
+        ("mvn" | "gradle" | "gradlew", Some("test")) => Some(TestRunner::Other),
+        ("make", Some("test" | "check")) => Some(TestRunner::Other),
+        _ => None,
     }
+}
+
+fn detect_runner(cmd: &str) -> Option<TestRunner> {
+    runner_segment(cmd).map(|(runner, _)| runner)
+}
+
+/// The first simple command that runs a test runner, and its words.
+pub fn runner_segment(cmd: &str) -> Option<(TestRunner, Vec<String>)> {
+    shell::parse(cmd)
+        .segments
+        .into_iter()
+        .find_map(|seg| runner_of(&seg).map(|r| (r, seg)))
 }
 
 #[cfg(test)]
@@ -121,6 +140,24 @@ mod tests {
         assert_eq!(classify("git log --oneline -20").kind, OutputKind::Git);
         assert_eq!(classify("rg TODO src").kind, OutputKind::Search);
         assert_eq!(classify("echo hi").kind, OutputKind::Other);
+    }
+
+    /// R0.5 (D7): runners count only in command position.
+    #[test]
+    fn runner_in_command_position_only() {
+        assert_eq!(classify("git commit -m 'fix pytest flake'").runner, None);
+        assert_eq!(classify("grep jest package.json").runner, None);
+        assert_eq!(classify("echo run pytest later").runner, None);
+        assert_eq!(
+            classify("source .venv/bin/activate && python -m pytest -q 2>&1 | tail -20").runner,
+            Some(TestRunner::Pytest)
+        );
+        assert_eq!(
+            classify("CI=1 npx vitest run").runner,
+            Some(TestRunner::Vitest)
+        );
+        assert_eq!(classify("make check").kind, OutputKind::Test);
+        assert_eq!(classify("pnpm run test").runner, Some(TestRunner::Other));
     }
 
     #[test]

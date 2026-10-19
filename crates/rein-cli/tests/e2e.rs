@@ -297,7 +297,16 @@ fn failing_test_run_is_summarized_through_rein_run() {
 
     let pytest_out =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/outputs/pytest_fail.txt");
-    let command = format!("cat '{}' && false # pytest -v", pytest_out.display());
+    // A real executable named pytest that prints a captured failing run.
+    let fake = dir.join("bin/pytest");
+    fs::create_dir_all(fake.parent().unwrap()).unwrap();
+    fs::write(
+        &fake,
+        format!("#!/bin/sh\ncat '{}'\nexit 1\n", pytest_out.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let command = format!("{} -v", fake.display());
     let mut pre: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(fixture("post_tool_use_bash.json")).unwrap())
             .unwrap();
