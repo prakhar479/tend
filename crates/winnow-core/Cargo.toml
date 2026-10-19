@@ -1,0 +1,12 @@
+[package]
+name = "winnow-core"
+description = "Pure decision logic for winnow. No I/O."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

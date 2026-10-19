@@ -1,0 +1,19 @@
+{
+  "cwd": "/home/dev/shop",
+  "duration_ms": 1056,
+  "effort": {
+    "level": "low"
+  },
+  "error": "Exit code 3\nout-line\nerr-line",
+  "hook_event_name": "PostToolUseFailure",
+  "is_interrupt": false,
+  "permission_mode": "default",
+  "prompt_id": "9b1d6f2e-0000-4000-8000-000000000001",
+  "session_id": "9b1d6f2e-0000-4000-8000-000000000001",
+  "tool_input": {
+    "command": "sleep 1; printf 'out-line\\n'; printf 'err-line\\n' >&2; exit 3"
+  },
+  "tool_name": "Bash",
+  "tool_use_id": "toolu_06",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-shop/9b1d6f2e-0000-4000-8000-000000000001.jsonl"
+}

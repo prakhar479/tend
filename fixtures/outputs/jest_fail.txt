@@ -1,0 +1,94 @@
+PASS jest/ok.test.js
+  ✓ ok 1 (5 ms)
+  ✓ ok 2
+  ✓ ok 3 (1 ms)
+  ✓ ok 4
+  ✓ ok 5
+  ✓ ok 6
+  ✓ ok 7
+  ✓ ok 8
+  ✓ ok 9 (1 ms)
+  ✓ ok 10 (1 ms)
+  ✓ ok 11
+  ✓ ok 12
+  ✓ ok 13
+  ✓ ok 14 (20 ms)
+  ✓ ok 15
+  ✓ ok 16 (1 ms)
+  ✓ ok 17
+  ✓ ok 18
+  ✓ ok 19
+  ✓ ok 20
+  ✓ ok 21
+  ✓ ok 22
+  ✓ ok 23 (1 ms)
+  ✓ ok 24
+  ✓ ok 25
+  ✓ ok 26
+  ✓ ok 27
+  ✓ ok 28
+  ✓ ok 29 (1 ms)
+  ✓ ok 30
+
+FAIL jest/orders.test.js
+  orders
+    ✕ total includes tax (9 ms)
+    ✕ find order 42
+    ✕ find returns an object (5 ms)
+
+  ● orders › total includes tax
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 2158
+    Received: 1998
+
+      1 | const { total, find } = require("../src/orders");
+      2 | describe("orders", () => {
+    > 3 |   test("total includes tax", () => { expect(total([{ price: 999, qty: 2 }])).toBe(2158); });
+        |                                                                              ^
+      4 |   test("find order 42", () => { expect(find(42).id).toBe(42); });
+      5 |   test("find returns an object", () => { expect(find(7)).toEqual({ id: 8 }); });
+      6 | });
+
+      at Object.toBe (orders.test.js:3:78)
+
+  ● orders › find order 42
+
+    TypeError: Cannot read properties of undefined (reading 'total')
+
+      1 | function total(items) { return items.reduce((t, i) => t + i.price * i.qty, 0); }
+    > 2 | function find(id) { if (id === 42) throw new TypeError("Cannot read properties of undefined (reading 'total')"); return { id }; }
+        |                                          ^
+      3 | module.exports = { total, find };
+      4 |
+
+      at find (../src/orders.js:2:42)
+      at Object.find (orders.test.js:4:40)
+
+  ● orders › find returns an object
+
+    expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 1
+    + Received  + 1
+
+      Object {
+    -   "id": 8,
+    +   "id": 7,
+      }
+
+      3 |   test("total includes tax", () => { expect(total([{ price: 999, qty: 2 }])).toBe(2158); });
+      4 |   test("find order 42", () => { expect(find(42).id).toBe(42); });
+    > 5 |   test("find returns an object", () => { expect(find(7)).toEqual({ id: 8 }); });
+        |                                                          ^
+      6 | });
+      7 |
+
+      at Object.toEqual (orders.test.js:5:58)
+
+Test Suites: 1 failed, 1 passed, 2 total
+Tests:       3 failed, 30 passed, 33 total
+Snapshots:   0 total
+Time:        0.84 s
+Ran all test suites.

@@ -1,0 +1,100 @@
+
+ RUN  v2.1.9 /home/dev/shop/vt
+
+ ✓ ok.test.mjs > ok 1
+ ✓ ok.test.mjs > ok 2
+ ✓ ok.test.mjs > ok 3
+ ✓ ok.test.mjs > ok 4
+ ✓ ok.test.mjs > ok 5
+ ✓ ok.test.mjs > ok 6
+ ✓ ok.test.mjs > ok 7
+ ✓ ok.test.mjs > ok 8
+ ✓ ok.test.mjs > ok 9
+ ✓ ok.test.mjs > ok 10
+ ✓ ok.test.mjs > ok 11
+ ✓ ok.test.mjs > ok 12
+ ✓ ok.test.mjs > ok 13
+ ✓ ok.test.mjs > ok 14
+ ✓ ok.test.mjs > ok 15
+ ✓ ok.test.mjs > ok 16
+ ✓ ok.test.mjs > ok 17
+ ✓ ok.test.mjs > ok 18
+ ✓ ok.test.mjs > ok 19
+ ✓ ok.test.mjs > ok 20
+ ✓ ok.test.mjs > ok 21
+ ✓ ok.test.mjs > ok 22
+ ✓ ok.test.mjs > ok 23
+ ✓ ok.test.mjs > ok 24
+ ✓ ok.test.mjs > ok 25
+ ✓ ok.test.mjs > ok 26
+ ✓ ok.test.mjs > ok 27
+ ✓ ok.test.mjs > ok 28
+ ✓ ok.test.mjs > ok 29
+ ✓ ok.test.mjs > ok 30
+ × orders.test.mjs > orders > total includes tax
+   → expected 1998 to be 2158 // Object.is equality
+ × orders.test.mjs > orders > find order 42
+   → Cannot read properties of undefined (reading 'total')
+ × orders.test.mjs > orders > find returns an object
+   → expected { id: 7 } to deeply equal { id: 8 }
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  orders.test.mjs > orders > total includes tax
+AssertionError: expected 1998 to be 2158 // Object.is equality
+
+- Expected
++ Received
+
+- 2158
++ 1998
+
+ ❯ orders.test.mjs:5:78
+      3| const { total, find } = createRequire(import.meta.url)("../src/orders.…
+      4| describe("orders", () => {
+      5|   test("total includes tax", () => { expect(total([{ price: 999, qty: …
+       |                                                                              ^
+      6|   test("find order 42", () => { expect(find(42).id).toBe(42); });
+      7|   test("find returns an object", () => { expect(find(7)).toEqual({ id:…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  orders.test.mjs > orders > find order 42
+TypeError: Cannot read properties of undefined (reading 'total')
+ ❯ find ../src/orders.js:2:42
+ ❯ orders.test.mjs:6:40
+      4| describe("orders", () => {
+      5|   test("total includes tax", () => { expect(total([{ price: 999, qty: …
+      6|   test("find order 42", () => { expect(find(42).id).toBe(42); });
+       |                                        ^
+      7|   test("find returns an object", () => { expect(find(7)).toEqual({ id:…
+      8| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  orders.test.mjs > orders > find returns an object
+AssertionError: expected { id: 7 } to deeply equal { id: 8 }
+
+- Expected
++ Received
+
+  Object {
+-   "id": 8,
++   "id": 7,
+  }
+
+ ❯ orders.test.mjs:7:58
+      5|   test("total includes tax", () => { expect(total([{ price: 999, qty: …
+      6|   test("find order 42", () => { expect(find(42).id).toBe(42); });
+      7|   test("find returns an object", () => { expect(find(7)).toEqual({ id:…
+       |                                                          ^
+      8| });
+      9| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  3 failed | 30 passed (33)
+   Start at  13:58:38
+   Duration  412ms (transform 55ms, setup 0ms, collect 55ms, tests 24ms, environment 1ms, prepare 235ms)
+

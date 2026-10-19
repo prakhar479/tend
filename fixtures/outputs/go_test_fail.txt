@@ -1,0 +1,24 @@
+--- FAIL: TestTotalWithTax (0.00s)
+    orders_test.go:11: Total() = 1998, want 2158
+--- FAIL: TestFind (0.00s)
+    --- FAIL: TestFind/id=42 (0.00s)
+        orders_test.go:20: Find(42): order 42 not found
+--- FAIL: TestPanics (0.00s)
+panic: assignment to entry in nil map [recovered]
+	panic: assignment to entry in nil map
+
+goroutine 51 [running]:
+testing.tRunner.func1.2({0x51b740, 0x56eed0})
+	/usr/lib/go-1.22/src/testing/testing.go:1631 +0x24a
+testing.tRunner.func1()
+	/usr/lib/go-1.22/src/testing/testing.go:1634 +0x377
+panic({0x51b740?, 0x56eed0?})
+	/usr/lib/go-1.22/src/runtime/panic.go:770 +0x132
+example.com/shop.TestPanics(0xc0000cf040?)
+	/home/dev/shop/orders_test.go:28 +0x28
+testing.tRunner(0xc0000cf040, 0x5487f8)
+	/usr/lib/go-1.22/src/testing/testing.go:1689 +0xfb
+created by testing.(*T).Run in goroutine 1
+	/usr/lib/go-1.22/src/testing/testing.go:1742 +0x390
+FAIL	example.com/shop	0.006s
+FAIL

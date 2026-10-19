@@ -1,0 +1,19 @@
+{
+  "cwd": "/home/dev/shop",
+  "effort": {
+    "level": "low"
+  },
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "default",
+  "prompt_id": "9b1d6f2e-0000-4000-8000-000000000001",
+  "session_id": "9b1d6f2e-0000-4000-8000-000000000001",
+  "tool_input": {
+    "file_path": "/home/dev/shop/tests/test_api.py",
+    "new_string": "    assert resp[\"status_code\"] in (200, 500)",
+    "old_string": "    assert resp[\"status_code\"] == 200\n    assert resp[\"json\"][\"id\"] == 42",
+    "replace_all": false
+  },
+  "tool_name": "Edit",
+  "tool_use_id": "toolu_03",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-shop/9b1d6f2e-0000-4000-8000-000000000001.jsonl"
+}

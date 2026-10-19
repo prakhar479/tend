@@ -1,0 +1,502 @@
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+Traceback (most recent call last):
+  File "/home/dev/shop/worker.py", line 13, in <module>
+    process({"sku": "A-1", "qty": 2})
+  File "/home/dev/shop/worker.py", line 8, in process
+    return load_price(order["sku"]) * order["qty"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dev/shop/worker.py", line 5, in load_price
+    return prices[sku] / 0 if sku == "A-1" else prices[sku]
+           ~~~~~~~~~~~~^~~
+ZeroDivisionError: division by zero
+worker: starting batch of 50 orders
+worker: batch done, 0 succeeded, 50 failed

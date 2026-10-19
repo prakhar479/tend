@@ -1,0 +1,24 @@
+{
+  "cwd": "/home/dev/shop",
+  "duration_ms": 35,
+  "effort": {
+    "level": "low"
+  },
+  "hook_event_name": "PostToolUse",
+  "permission_mode": "default",
+  "prompt_id": "9b1d6f2e-0000-4000-8000-000000000001",
+  "session_id": "9b1d6f2e-0000-4000-8000-000000000001",
+  "tool_input": {
+    "command": "printf 'out-line\\n'; printf 'err-line\\n' >&2"
+  },
+  "tool_name": "Bash",
+  "tool_response": {
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false,
+    "stderr": "",
+    "stdout": "out-line\nerr-line"
+  },
+  "tool_use_id": "toolu_04",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-shop/9b1d6f2e-0000-4000-8000-000000000001.jsonl"
+}

@@ -1,0 +1,37 @@
+{
+  "cwd": "/home/dev/shop",
+  "duration_ms": 361,
+  "effort": {
+    "level": "low"
+  },
+  "hook_event_name": "PostToolUse",
+  "permission_mode": "default",
+  "prompt_id": "9b1d6f2e-0000-4000-8000-000000000001",
+  "session_id": "9b1d6f2e-0000-4000-8000-000000000001",
+  "tool_input": {
+    "content": "second\n",
+    "file_path": "/home/dev/shop/notes.txt"
+  },
+  "tool_name": "Write",
+  "tool_response": {
+    "content": "second\n",
+    "filePath": "/home/dev/shop/notes.txt",
+    "originalFile": "first\n",
+    "structuredPatch": [
+      {
+        "lines": [
+          "-first",
+          "+second"
+        ],
+        "newLines": 1,
+        "newStart": 1,
+        "oldLines": 1,
+        "oldStart": 1
+      }
+    ],
+    "type": "update",
+    "userModified": false
+  },
+  "tool_use_id": "toolu_08",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-shop/9b1d6f2e-0000-4000-8000-000000000001.jsonl"
+}
