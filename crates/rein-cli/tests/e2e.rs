@@ -235,3 +235,110 @@ fn concurrent_hooks_keep_the_ledger_ordered_and_whole() {
     }
     assert_eq!(last, Some(ledger.lines().count() as u64 - 1), "no gaps");
 }
+
+/// Start a daemon for a session dir. Returns the child and its socket.
+fn start_daemon(session: &Path, mode: &str) -> (std::process::Child, PathBuf) {
+    fs::create_dir_all(session).unwrap();
+    let child = Command::new(bin())
+        .args(["daemon", "--session-dir"])
+        .arg(session)
+        .args(["--mode", mode])
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let sock = session.join("reind.sock");
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    (child, sock)
+}
+
+fn hook(sock: &Path, event: &str, payload: &serde_json::Value) -> String {
+    use std::io::Write;
+    let mut child = Command::new(bin())
+        .args(["hook", event])
+        .env("REIN_SOCKET", sock)
+        .env("REIN_HOOK_TIMEOUT_MS", "5000")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+}
+
+#[test]
+fn failing_test_run_is_summarized_through_rein_run() {
+    let dir = tmp("wrap");
+    let session = dir.join("session");
+    let (mut daemon, sock) = start_daemon(&session, "optimize");
+
+    let pytest_out =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/outputs/pytest_fail.txt");
+    let command = format!("cat '{}' && false # pytest -v", pytest_out.display());
+    let mut pre: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("post_tool_use_bash.json")).unwrap())
+            .unwrap();
+    pre["hook_event_name"] = "PreToolUse".into();
+    pre["permission_mode"] = "auto".into();
+    pre["tool_input"]["command"] = command.clone().into();
+    pre.as_object_mut().unwrap().remove("tool_response");
+
+    // 1. PreToolUse: rein rewrites the command.
+    let out: serde_json::Value = serde_json::from_str(&hook(&sock, "PreToolUse", &pre)).unwrap();
+    let wrapped = out["hookSpecificOutput"]["updatedInput"]["command"]
+        .as_str()
+        .expect("updatedInput")
+        .to_string();
+    assert!(
+        wrapped.starts_with("rein run --id 'toolu_01' --sh "),
+        "{wrapped}"
+    );
+
+    // 2. Claude Code runs the new command in its shell.
+    let bin_dir = Path::new(bin()).parent().unwrap();
+    let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
+    let ran = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&wrapped)
+        .env("PATH", path)
+        .env("REIN_SOCKET", &sock)
+        .output()
+        .unwrap();
+    assert_eq!(ran.status.code(), Some(1), "exit code kept");
+    let shown = String::from_utf8(ran.stdout).unwrap();
+    assert!(shown.contains("rein show o-1"), "{shown}");
+    assert!(
+        shown.contains("FAILED tests/test_api.py::test_get_order"),
+        "{shown}"
+    );
+    assert!(shown.len() * 3 < fs::read_to_string(&pytest_out).unwrap().len());
+
+    // 3. PostToolUseFailure carries what the agent saw.
+    let mut post = pre.clone();
+    post["hook_event_name"] = "PostToolUseFailure".into();
+    post["tool_input"]["command"] = wrapped.into();
+    post["error"] = format!("Exit code 1\n{shown}").into();
+    assert_eq!(hook(&sock, "PostToolUseFailure", &post), "");
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+
+    let report = rein(&["report"], &session);
+    assert!(report.contains("Wrapped test runs: 1"), "{report}");
+    assert!(report.contains("Shaping: 1 outputs"), "{report}");
+    assert!(report.contains("[applied]"), "{report}");
+    assert!(!report.contains("Not shapeable"), "{report}");
+    assert_eq!(
+        rein(&["show", "o-1"], &session),
+        fs::read_to_string(&pytest_out).unwrap(),
+        "rein show gives the full original"
+    );
+}

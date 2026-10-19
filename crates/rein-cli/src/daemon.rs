@@ -106,6 +106,17 @@ fn serve(stream: UnixStream, state: &Mutex<State>, sock: &Path) -> Result<()> {
                     message: Some(format!("mode: {mode:?}").to_lowercase()),
                 }
             }
+            Request::Filter {
+                tool_use_id,
+                output,
+            } => {
+                let (d, text) = st.controller.filter(&tool_use_id, output, now_ms());
+                st.store.persist(&d)?;
+                Reply {
+                    output: None,
+                    message: text,
+                }
+            }
             Request::Allow { action } => {
                 let message = match st.controller.allow(action.as_deref(), now_ms()) {
                     Ok(d) => {

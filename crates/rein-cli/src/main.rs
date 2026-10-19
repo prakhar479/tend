@@ -8,6 +8,7 @@ mod launcher;
 mod paths;
 mod report;
 mod retro;
+mod run;
 mod sessions;
 mod shim;
 mod store;
@@ -96,6 +97,14 @@ enum Cmd {
         #[arg(long, value_name = "DAYS")]
         prune: Option<u64>,
     },
+    /// Wrapper rein puts around a test command (see run.rs). Keeps the exit code.
+    #[command(hide = true)]
+    Run {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        sh: String,
+    },
     /// Hook entry point. The agent calls this. Always exits 0.
     #[command(hide = true)]
     Hook { event: String },
@@ -134,6 +143,9 @@ fn main() {
     if let Cmd::Hook { event } = &cli.cmd {
         shim::run(event);
         std::process::exit(0);
+    }
+    if let Cmd::Run { id, sh } = &cli.cmd {
+        std::process::exit(run::run(id, sh));
     }
     match run(cli) {
         Ok(code) => std::process::exit(code),
@@ -234,6 +246,6 @@ fn run(cli: Cli) -> Result<i32> {
             daemon::run(session_dir, parent_pid, mode.into(), &agent)?;
             Ok(0)
         }
-        Cmd::Hook { .. } => unreachable!("handled in main"),
+        Cmd::Hook { .. } | Cmd::Run { .. } => unreachable!("handled in main"),
     }
 }

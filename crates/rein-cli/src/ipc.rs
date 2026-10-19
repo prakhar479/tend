@@ -21,6 +21,11 @@ pub enum Request {
     SetMode {
         mode: Mode,
     },
+    /// `rein run` finished a wrapped command. The reply message is the text to print.
+    Filter {
+        tool_use_id: String,
+        output: String,
+    },
     /// Allow one blocked edit (the latest if `action` is None).
     Allow {
         action: Option<String>,

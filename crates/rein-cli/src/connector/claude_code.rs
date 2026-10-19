@@ -181,10 +181,20 @@ impl Connector for ClaudeCode {
                         });
                     }
                 } else {
+                    // S2/D4: Claude Code checks permissions on the rewritten command, so a
+                    // rewrite is safe only where no prompt can appear. Background calls keep
+                    // their own output handling.
+                    let mode = s(p, "permission_mode");
+                    let background = input
+                        .get("run_in_background")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let rewrite_ok = matches!(mode, "auto" | "bypassPermissions") && !background;
                     evs.push(Event::ToolRequested {
                         tool_use_id,
                         tool,
                         input,
+                        rewrite_ok,
                     });
                 }
             }
@@ -235,6 +245,16 @@ impl Connector for ClaudeCode {
         let mut h = json!({ "hookEventName": hook_event });
         match hook_event {
             "PreToolUse" => {
+                if r.wrap {
+                    let mut input = payload.get("tool_input").cloned().unwrap_or(json!({}));
+                    let command = s(&input, "command").to_string();
+                    input["command"] = json!(crate::run::wrapped_command(
+                        s(payload, "tool_use_id"),
+                        &command
+                    ));
+                    // No permissionDecision: Claude Code still checks the new command.
+                    h["updatedInput"] = input;
+                }
                 if let Some(p) = &r.permission {
                     let (decision, reason) = match p {
                         Permission::Ask(m) => ("ask", m),
@@ -438,6 +458,45 @@ mod tests {
             "short"
         );
         assert_eq!(c.encode("PostToolUse", &p, &Response::default()), None);
+    }
+
+    #[test]
+    fn wraps_test_commands_only_where_no_prompt_can_appear() {
+        let mut c = ClaudeCode { started: true };
+        let mut p = fixture("post_tool_use_bash.json");
+        p["hook_event_name"] = json!("PreToolUse");
+        p.as_object_mut().unwrap().remove("tool_response");
+        for (mode, bg, want) in [
+            ("auto", false, true),
+            ("bypassPermissions", false, true),
+            ("default", false, false),
+            ("acceptEdits", false, false),
+            ("auto", true, false),
+        ] {
+            p["permission_mode"] = json!(mode);
+            p["tool_input"]["run_in_background"] = json!(bg);
+            let evs = c.map("PreToolUse", &p);
+            assert!(
+                matches!(&evs[0], Event::ToolRequested { rewrite_ok, .. } if *rewrite_ok == want),
+                "{mode} bg={bg}"
+            );
+        }
+        let r = Response {
+            wrap: true,
+            ..Default::default()
+        };
+        let out = c.encode("PreToolUse", &p, &r).unwrap();
+        let h = &out["hookSpecificOutput"];
+        let original = p["tool_input"]["command"].as_str().unwrap();
+        assert_eq!(
+            h["updatedInput"]["command"],
+            format!("rein run --id 'toolu_01' --sh '{original}'")
+        );
+        assert_eq!(
+            h["updatedInput"]["run_in_background"], true,
+            "other fields kept"
+        );
+        assert!(h.get("permissionDecision").is_none(), "never auto-allow");
     }
 
     #[test]

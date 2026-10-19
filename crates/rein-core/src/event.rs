@@ -28,6 +28,9 @@ pub enum Event {
         tool_use_id: String,
         tool: String,
         input: Value,
+        /// The connector says rewriting this input adds no permission prompt.
+        #[serde(default)]
+        rewrite_ok: bool,
     },
     /// An edit the agent wants to make. Sent before the edit runs.
     EditProposed {

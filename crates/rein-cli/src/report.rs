@@ -157,7 +157,7 @@ pub fn render(label: &str, entries: &[Entry]) -> String {
     let t = totals(entries);
     let (mut tools, mut bash, mut reopens, mut judgments) = (0u64, 0u64, 0u64, 0u64);
     let (mut shaped, mut before, mut after, mut shaped_applied) = (0u64, 0u64, 0u64, 0u64);
-    let mut unshapeable = 0u64;
+    let (mut unshapeable, mut wrapped) = (0u64, 0u64);
     let (mut loops, mut cycles, mut guards, mut adaptations, mut modes) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut config = Vec::new();
@@ -229,6 +229,7 @@ pub fn render(label: &str, entries: &[Entry]) -> String {
                         SteerTrigger::Cycle { .. } => cycles.push(format!("{st} {text}")),
                     }
                 }
+                ActionKind::Wrap { .. } => wrapped += u64::from(*applied),
                 ActionKind::BlockCommand { command } => guards.push(format!(
                     "{} the agent's `{}`: {reason}",
                     status(*applied, "blocked", "would block"),
@@ -314,6 +315,12 @@ pub fn render(label: &str, entries: &[Entry]) -> String {
         k(saved),
         pct(saved, t.bash_tokens)
     );
+    if wrapped > 0 {
+        let _ = writeln!(
+            out,
+            "Wrapped test runs: {wrapped} (summarized even when they fail)"
+        );
+    }
     if unshapeable > 0 {
         let _ = writeln!(
             out,
@@ -363,6 +370,7 @@ fn describe(e: &Entry) -> String {
                 ActionKind::Steer { .. } => "steer",
                 ActionKind::Guard { .. } => "guard",
                 ActionKind::BlockCommand { .. } => "block",
+                ActionKind::Wrap { .. } => "wrap",
             };
             let state = match (applied, unsupported) {
                 (true, _) => "applied",

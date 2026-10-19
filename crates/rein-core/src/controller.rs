@@ -81,19 +81,25 @@ pub enum Permission {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Response {
     pub replace_output: Option<String>,
+    /// Run this Bash call through `rein run` (PreToolUse input rewrite).
+    pub wrap: bool,
     pub add_context: Vec<String>,
     pub permission: Option<Permission>,
 }
 
 impl Response {
     pub fn is_empty(&self) -> bool {
-        self.replace_output.is_none() && self.add_context.is_empty() && self.permission.is_none()
+        self.replace_output.is_none()
+            && !self.wrap
+            && self.add_context.is_empty()
+            && self.permission.is_none()
     }
 
     pub fn merge(&mut self, other: Response) {
         if other.replace_output.is_some() {
             self.replace_output = other.replace_output;
         }
+        self.wrap |= other.wrap;
         self.add_context.extend(other.add_context);
         if self.permission.is_none() {
             self.permission = other.permission;
@@ -129,6 +135,18 @@ pub struct Controller {
     last_blocked: Option<String>,
     /// Edits the user allowed once, with the action id and the override entry seq.
     allowed: BTreeMap<EditKey, (String, u64)>,
+    /// Bash calls wrapped by `rein run`, by tool use id.
+    wrapped: BTreeMap<String, Wrapped>,
+}
+
+#[derive(Debug, Clone)]
+struct Wrapped {
+    /// The command the agent asked for.
+    command: String,
+    /// Seq of the wrap action (cause of the output entry).
+    action_seq: u64,
+    /// `rein run` reported the output.
+    filtered: bool,
 }
 
 impl Controller {
@@ -146,6 +164,7 @@ impl Controller {
             blocked: BTreeMap::new(),
             last_blocked: None,
             allowed: BTreeMap::new(),
+            wrapped: BTreeMap::new(),
         }
     }
 
@@ -246,8 +265,18 @@ impl Controller {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // A wrapped call reports the original command; the hook sees the wrapper.
+        let command = self
+            .wrapped
+            .get(&tool_use_id)
+            .map(|w| w.command.clone())
+            .unwrap_or(command);
         let info = classify(&command);
         let hash = sha256_hex(&output);
+        let filtered = self
+            .wrapped
+            .remove(&tool_use_id)
+            .is_some_and(|w| w.filtered);
         let stored = Event::ToolCompleted {
             tool_use_id,
             tool,
@@ -256,6 +285,14 @@ impl Controller {
             failed,
         };
         let ev = self.push(d, now, vec![], Body::Event { event: stored });
+        if filtered {
+            // `rein run` already recorded the full output; this is the summary the agent saw.
+            d.blobs.push(Blob {
+                hash,
+                content: output,
+            });
+            return;
+        }
 
         // Re-open of a summary: the agent needed the full output.
         if let Some(target) = info.show_target.as_deref() {
@@ -267,9 +304,33 @@ impl Controller {
             return;
         }
 
+        let supported = if failed {
+            self.caps.replace_failed_output
+        } else {
+            self.caps.replace_output
+        };
+        if let Some(text) = self.observe(d, now, ev, &command, info.kind, output, hash, supported) {
+            d.response.replace_output = Some(text);
+        }
+    }
+
+    /// Store an output, look for loops, and shape it. Returns the summary to show, if
+    /// the shape action applies. `can_replace`: the caller can put the summary in place.
+    #[allow(clippy::too_many_arguments)]
+    fn observe(
+        &mut self,
+        d: &mut Decision,
+        now: u64,
+        cause: u64,
+        command: &str,
+        kind: OutputKind,
+        output: String,
+        hash: String,
+        can_replace: bool,
+    ) -> Option<String> {
         let output_id = format!("o-{}", self.next_output);
         self.next_output += 1;
-        self.outputs.insert(output_id.clone(), info.kind);
+        self.outputs.insert(output_id.clone(), kind);
         d.blobs.push(Blob {
             hash: hash.clone(),
             content: output.clone(),
@@ -278,11 +339,11 @@ impl Controller {
         let out = self.push(
             d,
             now,
-            vec![ev],
+            vec![cause],
             Body::Output {
                 id: output_id.clone(),
                 blob: hash,
-                output_kind: info.kind,
+                output_kind: kind,
                 lines: output.lines().count(),
                 tokens,
             },
@@ -291,7 +352,7 @@ impl Controller {
         // Loops. All failures that reach the threshold in one run share one steer.
         let failures = extract_failures(&output);
         let mut looped: Vec<(String, String, u64, u64)> = Vec::new();
-        for obs in self.loops.on_run(&command, &failures, now) {
+        for obs in self.loops.on_run(command, &failures, now) {
             if let Some(prev) = obs.previous_message.as_deref() {
                 let q = Question::SameFailure {
                     test: obs.failure.test.as_deref(),
@@ -349,19 +410,17 @@ impl Controller {
 
         // Shaping.
         if tokens < self.cfg.shape_threshold_tokens {
-            return;
+            return None;
         }
-        let level = self.session.shape_level(info.kind);
-        let Some(s) = shape(&output, level, self.cfg.max_summary_ratio) else {
-            return;
-        };
+        let level = self.session.shape_level(kind);
+        let s = shape(&output, level, self.cfg.max_summary_ratio)?;
         let text = format!(
             "{}\n[rein: {} lines → {} · full output: rein show {}]",
             s.text, s.from_lines, s.to_lines, output_id
         );
         let reason = format!(
             "{} output was {} tokens; the summary keeps every failure line (level {level}).",
-            info.kind.label(),
+            kind.label(),
             s.from_tokens
         );
         let action = ActionKind::Shape {
@@ -371,39 +430,113 @@ impl Controller {
             from_lines: s.from_lines,
             to_lines: s.to_lines,
         };
-        let supported = if failed {
-            self.caps.replace_failed_output
-        } else {
-            self.caps.replace_output
-        };
-        if self.act_if(d, now, out, action, reason, supported) {
-            d.response.replace_output = Some(text);
-            if let Some(change) = self.session.on_shaped(info.kind) {
-                self.adapt(d, now, out, change);
-            }
+        if !self.act_if(d, now, out, action, reason, can_replace) {
+            return None;
         }
+        if let Some(change) = self.session.on_shaped(kind) {
+            self.adapt(d, now, out, change);
+        }
+        Some(text)
+    }
+
+    /// `rein run` ran a wrapped command and asks for the text to print.
+    /// Returns None when this call was not wrapped: print the original output.
+    pub fn filter(
+        &mut self,
+        tool_use_id: &str,
+        output: String,
+        now_ms: u64,
+    ) -> (Decision, Option<String>) {
+        let mut d = Decision::default();
+        let Some(w) = self.wrapped.get_mut(tool_use_id) else {
+            return (d, None);
+        };
+        if w.filtered {
+            return (d, None);
+        }
+        w.filtered = true;
+        let (command, cause) = (w.command.clone(), w.action_seq);
+        let kind = classify(&command).kind;
+        let hash = sha256_hex(&output);
+        let text = self.observe(&mut d, now_ms, cause, &command, kind, output, hash, true);
+        (d, text)
     }
 
     /// Only the user may lift a guard. Block the agent's own `rein allow`.
     /// The match is on the command text, so a determined agent can get around it;
     /// the guard is advisory and every allow is in the ledger.
     fn on_tool_requested(&mut self, d: &mut Decision, event: Event, now: u64) {
-        let command = match &event {
-            Event::ToolRequested { tool, input, .. } if tool == "Bash" => input
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            _ => String::new(),
+        let (command, tool_use_id, rewrite_ok) = match &event {
+            Event::ToolRequested {
+                tool,
+                input,
+                tool_use_id,
+                rewrite_ok,
+            } if tool == "Bash" => (
+                input
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                tool_use_id.clone(),
+                *rewrite_ok,
+            ),
+            _ => (String::new(), String::new(), false),
         };
         let ev = self.push(d, now, vec![], Body::Event { event });
         if !re!(r"\brein\s+allow\b").is_match(&command) {
+            self.maybe_wrap(d, now, ev, tool_use_id, command, rewrite_ok);
             return;
         }
         let message = "rein: only the user can allow a blocked edit. Ask the user to run `! rein allow`, then retry the edit.".to_string();
         let action = ActionKind::BlockCommand { command };
         if self.act(d, now, ev, action, message.clone()) {
             d.response.permission = Some(Permission::Deny(message));
+        }
+    }
+
+    /// Failed runs cannot be shaped after the fact (S2). Run test commands through
+    /// `rein run`, which asks for the summary before the agent sees the output.
+    fn maybe_wrap(
+        &mut self,
+        d: &mut Decision,
+        now: u64,
+        cause: u64,
+        tool_use_id: String,
+        command: String,
+        rewrite_ok: bool,
+    ) {
+        let info = classify(&command);
+        if info.kind != OutputKind::Test || info.show_target.is_some() || tool_use_id.is_empty() {
+            return;
+        }
+        // A subprocess would lose shell state changes (cd, export, source).
+        if re!(r"(^|[;&|(]\s*)(cd|pushd|popd|export|source|alias|unset|set|\.)\s")
+            .is_match(&command)
+        {
+            return;
+        }
+        let reason = if rewrite_ok {
+            "Test command wrapped in `rein run`, so its output can be summarized even when it fails.".to_string()
+        } else {
+            "Not wrapped: a rewrite could add a permission prompt in this permission mode."
+                .to_string()
+        };
+        let action = ActionKind::Wrap {
+            tool_use_id: tool_use_id.clone(),
+        };
+        let supported = self.caps.rewrite_input && rewrite_ok;
+        let seq = self.next_seq;
+        if self.act_if(d, now, cause, action, reason, supported) {
+            d.response.wrap = true;
+            self.wrapped.insert(
+                tool_use_id,
+                Wrapped {
+                    command,
+                    action_seq: seq,
+                    filtered: false,
+                },
+            );
         }
     }
 
@@ -547,6 +680,7 @@ impl Controller {
     fn supports(&self, action: &ActionKind) -> bool {
         match action {
             ActionKind::BlockCommand { .. } => self.caps.deny,
+            ActionKind::Wrap { .. } => self.caps.rewrite_input,
             ActionKind::Shape { .. } => self.caps.replace_output,
             ActionKind::Steer { .. } => self.caps.inject_context,
             ActionKind::Guard { decision, .. } => match decision {
@@ -822,14 +956,126 @@ mod tests {
         );
     }
 
+    fn requested(id: &str, cmd: &str, rewrite_ok: bool) -> Event {
+        Event::ToolRequested {
+            tool_use_id: id.into(),
+            tool: "Bash".into(),
+            input: json!({ "command": cmd }),
+            rewrite_ok,
+        }
+    }
+
+    fn failed_bash(id: &str, cmd: &str, out: &str) -> Event {
+        Event::ToolCompleted {
+            tool_use_id: id.into(),
+            tool: "Bash".into(),
+            input: json!({ "command": cmd }),
+            output: out.into(),
+            failed: true,
+        }
+    }
+
+    #[test]
+    fn failing_test_run_is_shaped_through_rein_run() {
+        let mut c = ctl(Mode::Optimize);
+        let d = c.handle(requested("t1", "pytest -v", true), 0);
+        assert!(d.response.wrap, "test command is wrapped");
+
+        // `rein run` reports the full output and prints the summary.
+        let (d, text) = c.filter("t1", PYTEST.into(), 1);
+        let text = text.expect("summary");
+        assert!(text.contains("rein show o-1"));
+        assert!(text.contains("FAILED tests/test_api.py::test_get_order"));
+        assert!(d.entries.iter().any(|e| matches!(
+            &e.body,
+            Body::Action {
+                applied: true,
+                action: ActionKind::Shape { .. },
+                ..
+            }
+        )));
+        assert_eq!(c.filter("t1", PYTEST.into(), 1).1, None, "only once");
+
+        // The hook then sees the wrapper and the summary: record it, do not re-shape.
+        let d = c.handle(
+            failed_bash("t1", "rein run --id t1 --sh 'pytest -v'", &text),
+            2,
+        );
+        assert!(d.response.is_empty());
+        assert!(!d
+            .entries
+            .iter()
+            .any(|e| matches!(e.body, Body::Output { .. })));
+        assert_eq!(d.blobs.len(), 1, "the summary the agent saw is stored");
+    }
+
+    #[test]
+    fn loops_are_found_through_rein_run() {
+        let mut c = ctl(Mode::Optimize);
+        let mut steered = false;
+        for i in 0..4u64 {
+            if i > 0 {
+                c.handle(edited("src/app.py", &format!("h{i}")), i);
+            }
+            let id = format!("t{i}");
+            c.handle(requested(&id, "pytest -v", true), i);
+            let (d, _) = c.filter(&id, PYTEST.into(), i);
+            steered |= d.entries.iter().any(|e| {
+                matches!(
+                    &e.body,
+                    Body::Action {
+                        action: ActionKind::Steer { .. },
+                        ..
+                    }
+                )
+            });
+        }
+        assert!(steered, "original command keys the loop detector");
+    }
+
+    #[test]
+    fn wrap_downgrades_honestly() {
+        let mut c = ctl(Mode::Optimize);
+        let d = c.handle(requested("a", "pytest", false), 0);
+        assert!(!d.response.wrap, "permission mode may prompt");
+        assert!(d.entries.iter().any(|e| matches!(
+            &e.body,
+            Body::Action {
+                unsupported: true,
+                action: ActionKind::Wrap { .. },
+                ..
+            }
+        )));
+        assert!(
+            !c.handle(requested("b", "cd api && pytest", true), 1)
+                .response
+                .wrap
+        );
+        assert!(!c.handle(requested("c", "ls -la", true), 2).response.wrap);
+        assert!(
+            !ctl(Mode::Look)
+                .handle(requested("d", "pytest", true), 0)
+                .response
+                .wrap
+        );
+        // Unwrapped or unknown ids: print the original.
+        assert_eq!(c.filter("zzz", "out".into(), 3).1, None);
+        // A wrapped call whose `rein run` never reported falls back to normal handling.
+        c.handle(requested("e", "pytest -v", true), 4);
+        let d = c.handle(
+            failed_bash("e", "rein run --id e --sh 'pytest -v'", PYTEST),
+            5,
+        );
+        assert!(d
+            .entries
+            .iter()
+            .any(|e| matches!(e.body, Body::Output { .. })));
+    }
+
     #[test]
     fn agent_cannot_allow_itself() {
         let mut c = ctl(Mode::Optimize);
-        let req = |cmd: &str| Event::ToolRequested {
-            tool_use_id: "b".into(),
-            tool: "Bash".into(),
-            input: json!({ "command": cmd }),
-        };
+        let req = |cmd: &str| requested("b", cmd, false);
         let d = c.handle(req("cd /x && rein allow a-1"), 0);
         assert!(matches!(d.response.permission, Some(Permission::Deny(_))));
         assert!(c.handle(req("rein show o-1"), 1).response.is_empty());

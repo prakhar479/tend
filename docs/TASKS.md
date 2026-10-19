@@ -66,6 +66,28 @@ Exit: owners of about 20 real sessions agree the reports are correct.
 - [x] **T10. Daemon test.** Integration test: two concurrent hook calls; the ledger has strictly increasing `seq` and no torn lines.
   Note: 8 threads × 5 hook calls against a real daemon.
 
+## Next steps (after Phase 1)
+
+Consolidated 2026-10-19 from the Phase 0/1 results. Owner decisions are marked **[Decided]**.
+
+- [x] **N1. Guard reason (S6) [Decided: deny].** Deny with the reason; `rein allow` lifts one block.
+- [x] **N2. Rename (S9) [Decided: rein].** Command `rein`; crates `rein-core`, `rein-cli`.
+- [x] **N3. Failed-run shaping (D4) [Decided: build].** PreToolUse rewrites a test command to `rein run --id <id> --sh '<cmd>'`. `rein run` keeps the exit code, asks the daemon for a summary, and fails open to the original bytes.
+  Spike (2026-10-19): `updatedInput` applies without a `permissionDecision`, and Claude Code checks permissions on the **rewritten** command (a compound rewrite was refused as "multiple operations"; `permissionDecision: "allow"` skips the check, so rein never sends it). Auto mode ran the single-command rewrite without a prompt; default mode prompted with the rewritten text. So rein wraps only in `auto` and `bypassPermissions` modes, never background calls, never commands that change shell state (`cd`, `export`, `source`, …). Live: a failing pytest run went from 324 to 54 lines; the agent named the failing test and kept exit code 1.
+- [x] **N4. Git.** Repo under git; baseline commit, work on branch `next-steps`.
+- [ ] **N5. CI.** Run `make check` on push.
+- [ ] **N6. Private sockets and session dirs.** 0700 session dirs; the `/tmp` fallback socket in a private directory.
+- [ ] **N7. Raw capture off by default.** `hooks.jsonl` only with `REIN_CAPTURE=1`.
+- [ ] **N8. Old ledgers.** Report infers "not shapeable" for failed runs in ledgers written before the `unsupported` flag.
+- [ ] **N9. Active loop time.** Leave out idle gaps (default: gaps over 10 min) from loop time.
+- [ ] **N10. More re-open signals.** Reading a persisted-output file or re-running the same command right after a summary counts as a re-open.
+- [ ] **N11. Retro and live agree.** Same tool-call counting in retro and live reports.
+- [ ] **N12. Capture script.** `scripts/capture-fixtures` turns a session's `hooks.jsonl` into sanitized fixtures.
+- [ ] **N13. Real pytest and cargo fixtures.** Replace the synthetic ones.
+- [ ] **N14. Edge cases.** Claude Code's mid-output cut; persisted preview with no newline in 2000 bytes; the 1 MiB size boundary.
+- [ ] **N15. macOS.** Latency, Ctrl-C, socket fallback. Needs a Mac.
+- [ ] **N16. Real-session review (Phase 1 exit).** ~20 sessions in look mode; owners confirm the reports.
+
 ## Phase 2 — Optimize + Codex (not started)
 
 - [ ] Tune `Config` defaults from Phase 1 data.

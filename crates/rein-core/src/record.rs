@@ -101,6 +101,10 @@ pub enum ActionKind {
         path: String,
         decision: GuardDecision,
     },
+    /// A Bash call run through `rein run`, so its output can be summarized even on failure.
+    Wrap {
+        tool_use_id: String,
+    },
     /// A command the agent may not run (it would lift a guard).
     BlockCommand {
         command: String,
