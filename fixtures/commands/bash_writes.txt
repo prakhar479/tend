@@ -8,9 +8,9 @@ def get_order(oid):
 def test_order():
     assert get_order(1)["status_code"] in (200, 500)
 EOF2
-== expect: crates/rein-cli/tests/e2e.rs
+== expect: crates/tend-cli/tests/e2e.rs
 python3 -I - <<'EOF2'
-p="crates/rein-cli/tests/e2e.rs"; s=open(p).read()
+p="crates/tend-cli/tests/e2e.rs"; s=open(p).read()
 a='''    assert!(report.contains("Test guard: 1"), "{report}");'''
 assert a in s; s=s.replace(a,'',1)
 open(p,"w").write(s)

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Turn real Claude Code captures into sanitized fixtures.
 
-    # One hook payload from a session (run the session with REIN_CAPTURE=1):
-    scripts/capture_fixtures.py hooks ~/.local/share/rein/sessions/<id>/hooks.jsonl \
+    # One hook payload from a session (run the session with TEND_CAPTURE=1):
+    scripts/capture_fixtures.py hooks ~/.local/share/tend/sessions/<id>/hooks.jsonl \
         --event PostToolUse --match "pytest" --tool-use 1 \
         --out fixtures/claude_code/post_tool_use_bash.json
 
-    # A whole transcript (keeps only user/assistant lines and the fields rein reads):
+    # A whole transcript (keeps only user/assistant lines and the fields tend reads):
     scripts/capture_fixtures.py transcript ~/.claude/projects/<p>/<s>.jsonl \
         fixtures/transcripts/loop_session.jsonl
 

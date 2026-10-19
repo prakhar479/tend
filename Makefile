@@ -15,7 +15,7 @@ test:
 	cargo test
 
 e2e:
-	cargo test -p rein-cli --test e2e
+	cargo test -p tend-cli --test e2e
 
 build:
 	cargo build

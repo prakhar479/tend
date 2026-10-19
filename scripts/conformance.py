@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Conformance check: do the Claude Code behaviors rein depends on still hold? (R3.1)
+"""Conformance check: do the Claude Code behaviors tend depends on still hold? (R3.1)
 
-Runs one short, scripted Claude Code session under `rein claude --rein-mode optimize`
+Runs one short, scripted Claude Code session under `tend claude --tend-mode optimize`
 in a throwaway project, in auto mode, then checks the ledger, the raw hook payloads,
 and the transcript. Run it after each Claude Code update.
 
-    scripts/conformance.py                      # uses target/debug/rein
+    scripts/conformance.py                      # uses target/debug/tend
     scripts/conformance.py --record             # also write docs/conformance/<version>.md
 
 It costs one short model session. Exit code 0 if every check passes.
@@ -99,7 +99,7 @@ def tool_results(transcript: list) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rein", default=str(ROOT / "target/debug/rein"))
+    ap.add_argument("--tend", default=str(ROOT / "target/debug/tend"))
     ap.add_argument("--claude", default="claude")
     ap.add_argument("--record", action="store_true", help="write docs/conformance/<version>.md")
     ap.add_argument("--timeout", type=int, default=600)
@@ -109,21 +109,21 @@ def main() -> int:
     version = subprocess.run(
         [args.claude, "--version"], capture_output=True, text=True
     ).stdout.split()[0]
-    work = Path(tempfile.mkdtemp(prefix="rein-conformance-"))
+    work = Path(tempfile.mkdtemp(prefix="tend-conformance-"))
     proj, home = work / "shop", work / "home"
     project(proj)
-    env = dict(os.environ, REIN_HOME=str(home), REIN_CAPTURE="1", REIN_CLAUDE_BIN=args.claude)
-    env.pop("REIN_SOCKET", None)
-    env.pop("REIN_SESSION_DIR", None)
+    env = dict(os.environ, TEND_HOME=str(home), TEND_CAPTURE="1", TEND_CLAUDE_BIN=args.claude)
+    env.pop("TEND_SOCKET", None)
+    env.pop("TEND_SESSION_DIR", None)
     run = subprocess.run(
-        [args.rein, "claude", "--rein-mode", "optimize",
+        [args.tend, "claude", "--tend-mode", "optimize",
          "-p", PROMPT, "--permission-mode", "auto"],
         cwd=proj, env=env, capture_output=True, text=True, timeout=args.timeout,
     )
 
     sessions = sorted((home / "sessions").glob("*"))
     if not sessions:
-        print(f"no rein session was recorded\n{run.stderr}", file=sys.stderr)
+        print(f"no tend session was recorded\n{run.stderr}", file=sys.stderr)
         return 2
     session = sessions[-1]
     ledger = [e["body"] for e in jsonl(session / "ledger.jsonl") if "body" in e]
@@ -157,15 +157,15 @@ def main() -> int:
     check("A failing Bash call fires PostToolUseFailure with error 'Exit code N'",
           any(str(p.get("error", "")).startswith("Exit code") for p in fail))
     wraps = [a for a in actions("wrap") if a.get("applied")]
-    check("rein wrapped the test run (auto mode)", wraps,
+    check("tend wrapped the test run (auto mode)", wraps,
           "; ".join(a["reason"] for a in actions("wrap")) or "no wrap action")
     rewritten = [p for p in payloads("PostToolUse", "Bash") + fail
                  if " run --id " in p.get("tool_input", {}).get("command", "")]
     check("updatedInput without permissionDecision is applied (the tool ran the wrapper)",
           rewritten)
     wrapped_ids = {a["action"]["tool_use_id"] for a in wraps}
-    check("The agent saw rein's summary of the wrapped run",
-          any("[rein:" in seen.get(i, "") for i in wrapped_ids))
+    check("The agent saw tend's summary of the wrapped run",
+          any("[tend:" in seen.get(i, "") for i in wrapped_ids))
     check("A deny with reason reaches the agent (Edit weakening a test)",
           any("may weaken tests" in t for t in seen.values()))
     check("The denied edit did not happen",
@@ -176,7 +176,7 @@ def main() -> int:
     check("Settings with a PermissionDenied hook load (the session ran)", ledger)
 
     lines = [f"# Claude Code {version}", "",
-             f"rein conformance (scripts/conformance.py), {len(hooks)} hook calls, "
+             f"tend conformance (scripts/conformance.py), {len(hooks)} hook calls, "
              f"{len(denied)} auto-mode denials.", "",
              "| Check | Result | Detail |", "|---|---|---|"]
     for name, ok, detail in checks:
@@ -187,7 +187,7 @@ def main() -> int:
     if passed and not args.keep:
         shutil.rmtree(work, ignore_errors=True)
     else:
-        print(f"work dir (project, rein session, raw hooks): {work}")
+        print(f"work dir (project, tend session, raw hooks): {work}")
     if args.record:
         out = ROOT / "docs" / "conformance" / f"{version}.md"
         out.parent.mkdir(parents=True, exist_ok=True)

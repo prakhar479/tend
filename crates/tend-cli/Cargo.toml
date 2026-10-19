@@ -1,0 +1,18 @@
+[package]
+name = "tend-cli"
+description = "Local supervisor for command-line coding agents."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "tend"
+path = "src/main.rs"
+
+[dependencies]
+tend-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
