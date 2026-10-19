@@ -35,6 +35,8 @@ pub fn run(dir: PathBuf, parent_pid: Option<i32>, mode: Mode, agent: &str) -> Re
     let connector = connector::for_agent(agent)?;
     let controller = Controller::new(crate::config::load(), connector.capabilities(), mode);
     let store = Store::open(&dir)?;
+    // Without a token file (a daemon started by hand), control requests are open.
+    let token: Arc<Option<String>> = Arc::new(crate::paths::read_token(&dir));
     let state = Arc::new(Mutex::new(State {
         controller,
         connector,
@@ -52,8 +54,9 @@ pub fn run(dir: PathBuf, parent_pid: Option<i32>, mode: Mode, agent: &str) -> Re
             Ok(stream) => {
                 let state = Arc::clone(&state);
                 let sock = sock.clone();
+                let token = Arc::clone(&token);
                 thread::spawn(move || {
-                    if let Err(e) = serve(stream, &state, &sock) {
+                    if let Err(e) = serve(stream, &state, &sock, &token) {
                         eprintln!("reind: {e:#}");
                     }
                 });
@@ -86,11 +89,35 @@ fn reply_to(mut stream: UnixStream, reply: &Reply) -> Result<()> {
     Ok(())
 }
 
-fn serve(stream: UnixStream, state: &Mutex<State>, sock: &Path) -> Result<()> {
+fn serve(
+    stream: UnixStream,
+    state: &Mutex<State>,
+    sock: &Path,
+    token: &Option<String>,
+) -> Result<()> {
     let mut line = String::new();
     BufReader::new(stream.try_clone()?).read_line(&mut line)?;
     let req: Request = serde_json::from_str(&line).context("bad request")?;
     let mut shutdown = false;
+
+    // Control requests must show the session token (R0.8).
+    let given = match &req {
+        Request::SetMode { token, .. }
+        | Request::Allow { token, .. }
+        | Request::Shutdown { token } => Some(token),
+        _ => None,
+    };
+    if let Some(given) = given {
+        if token.is_some() && given != token {
+            eprintln!("reind: refused a control request without the session token");
+            return reply_to(stream, &Reply {
+                output: None,
+                message: Some(
+                    "rein: refused: this needs the session's control token. Run `rein allow` or `rein mode` yourself.".into(),
+                ),
+            });
+        }
+    }
 
     // Requests that must not wait behind other work (R0.3).
     let req = match req {
@@ -158,7 +185,7 @@ fn serve(stream: UnixStream, state: &Mutex<State>, sock: &Path) -> Result<()> {
                     message: None,
                 }
             }
-            Request::SetMode { mode } => {
+            Request::SetMode { mode, .. } => {
                 let d = st.controller.set_mode(mode, now_ms());
                 st.store.persist(&d)?;
                 Reply {
@@ -166,7 +193,7 @@ fn serve(stream: UnixStream, state: &Mutex<State>, sock: &Path) -> Result<()> {
                     message: Some(format!("mode: {mode:?}").to_lowercase()),
                 }
             }
-            Request::Allow { action } => {
+            Request::Allow { action, .. } => {
                 let message = match st.controller.allow(action.as_deref(), now_ms()) {
                     Ok(d) => {
                         st.store.persist(&d)?;
@@ -180,7 +207,7 @@ fn serve(stream: UnixStream, state: &Mutex<State>, sock: &Path) -> Result<()> {
                 }
             }
             Request::Ping | Request::Filter { .. } => unreachable!("answered above"),
-            Request::Shutdown => {
+            Request::Shutdown { .. } => {
                 shutdown = true;
                 Reply {
                     output: None,

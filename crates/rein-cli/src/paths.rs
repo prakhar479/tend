@@ -63,6 +63,40 @@ pub fn socket_path(dir: &Path) -> PathBuf {
         .join(format!("{}.sock", &hash[..16]))
 }
 
+/// The control token file: `rein allow`, `rein mode`, and the launcher's shutdown
+/// must show it. It keeps a plain socket write by the agent from lifting a guard or
+/// turning rein off. The agent runs as the same user, so it could read the file:
+/// this raises the bar, it is not a security boundary (R0.8).
+pub fn token_path(dir: &Path) -> PathBuf {
+    dir.join("control.token")
+}
+
+pub fn read_token(dir: &Path) -> Option<String> {
+    fs::read_to_string(token_path(dir))
+        .ok()
+        .map(|t| t.trim().to_string())
+}
+
+/// Write a new random token (0600) and return it.
+pub fn new_token(dir: &Path) -> Result<String> {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut bytes = [0u8; 16];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .context("read /dev/urandom")?;
+    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(token_path(dir))
+        .context("write control token")?;
+    f.write_all(token.as_bytes())?;
+    Ok(token)
+}
+
 /// Create `dir` (and missing parents) as 0700. An existing dir must belong to us;
 /// a shared temp dir could hold one that another user made.
 pub fn ensure_private_dir(dir: &Path) -> Result<()> {

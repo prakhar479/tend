@@ -482,3 +482,32 @@ fn shim_exits_zero_when_stdout_is_closed() {
     child.stdin.take().unwrap().write_all(&payload).unwrap();
     assert_eq!(child.wait().unwrap().code(), Some(0));
 }
+
+/// R0.8 (D6): a plain socket write cannot lift a guard or turn rein off.
+#[test]
+fn control_requests_need_the_session_token() {
+    use std::io::{BufRead, BufReader, Write};
+    let dir = tmp("token");
+    let session = dir.join("session");
+    fs::create_dir_all(&session).unwrap();
+    fs::write(session.join("control.token"), "s3cret").unwrap();
+    let (_daemon, sock) = start_daemon(&session, "optimize");
+    let raw = |req: &str| {
+        let mut s = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        writeln!(s, "{req}").unwrap();
+        let mut line = String::new();
+        BufReader::new(s).read_line(&mut line).unwrap();
+        line
+    };
+    for req in [
+        r#"{"type":"allow","action":null}"#,
+        r#"{"type":"set_mode","mode":"look"}"#,
+        r#"{"type":"shutdown"}"#,
+    ] {
+        assert!(raw(req).contains("refused"), "{req}");
+    }
+    assert!(raw(r#"{"type":"ping"}"#).contains("pong"), "still running");
+    // The CLI reads the token from the session dir.
+    assert!(rein(&["allow"], &session).contains("No edit was blocked"));
+    assert!(rein(&["mode", "look"], &session).contains("mode: look"));
+}

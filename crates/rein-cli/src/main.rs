@@ -165,14 +165,20 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Undo { .. } => bail!("undo is Phase 3 (see docs/TASKS.md)"),
         Cmd::Mode { mode, session } => {
             let dir = paths::resolve_session(session)?;
-            let req = ipc::Request::SetMode { mode: mode.into() };
+            let req = ipc::Request::SetMode {
+                mode: mode.into(),
+                token: paths::read_token(&dir),
+            };
             let reply = ipc::send(&paths::socket_path(&dir), &req, Duration::from_secs(1))?;
             println!("{}", reply.message.unwrap_or_default());
             Ok(0)
         }
         Cmd::Allow { id, session } => {
             let dir = paths::resolve_session(session)?;
-            let req = ipc::Request::Allow { action: id };
+            let req = ipc::Request::Allow {
+                action: id,
+                token: paths::read_token(&dir),
+            };
             let reply = ipc::send(&paths::socket_path(&dir), &req, Duration::from_secs(1))
                 .with_context(|| format!("session {} is not live", dir.display()))?;
             println!("{}", reply.message.unwrap_or_default());

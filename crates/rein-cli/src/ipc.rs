@@ -18,8 +18,11 @@ pub enum Request {
         event: String,
         payload: Value,
     },
+    // Control requests carry the session's control token (see paths::read_token).
     SetMode {
         mode: Mode,
+        #[serde(default)]
+        token: Option<String>,
     },
     /// `rein run` finished a wrapped command. The reply message is the text to print.
     Filter {
@@ -29,9 +32,14 @@ pub enum Request {
     /// Allow one blocked edit (the latest if `action` is None).
     Allow {
         action: Option<String>,
+        #[serde(default)]
+        token: Option<String>,
     },
     Ping,
-    Shutdown,
+    Shutdown {
+        #[serde(default)]
+        token: Option<String>,
+    },
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

@@ -25,6 +25,7 @@ pub fn run_claude(mode: Mode, args: Vec<String>) -> Result<i32> {
     let dir = paths::sessions_dir().join(&id);
     paths::ensure_private_dir(&paths::home())?;
     paths::ensure_private_dir(&dir)?;
+    let token = paths::new_token(&dir)?;
     let settings_path = dir.join("claude-settings.json");
     fs::write(
         &settings_path,
@@ -62,7 +63,8 @@ pub fn run_claude(mode: Mode, args: Vec<String>) -> Result<i32> {
         .with_context(|| format!("start `{bin}`"))?;
 
     if daemon_ok {
-        let _ = ipc::send(&sock, &Request::Shutdown, Duration::from_millis(500));
+        let req = Request::Shutdown { token: Some(token) };
+        let _ = ipc::send(&sock, &req, Duration::from_millis(500));
         eprintln!("rein: session {id} ended · run `rein report` for details");
     }
     Ok(status.code().unwrap_or(1))
