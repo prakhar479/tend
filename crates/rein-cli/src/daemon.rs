@@ -17,6 +17,9 @@ use crate::ipc::{Reply, Request};
 use crate::paths::{now_ms, socket_path};
 use crate::store::Store;
 
+/// Time to encode and send a reply. A hook later than its deadline minus this is late.
+const REPLY_MARGIN_MS: u64 = 10;
+
 struct State {
     controller: Controller,
     connector: Box<dyn Connector>,
@@ -171,14 +174,33 @@ fn serve(
         let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
         let st = &mut *st;
         match req {
-            Request::Hook { event, payload } => {
+            Request::Hook {
+                event,
+                payload,
+                deadline_ms,
+            } => {
                 let now = now_ms();
                 st.store.capture(now, &event, &payload)?;
-                let mut response = Response::default();
+                // D9: a reply after the shim's deadline reaches no one.
+                let late = |t: u64| deadline_ms.is_some_and(|d| t + REPLY_MARGIN_MS > d);
+                let unanswered = late(now);
+                let mut decisions = Vec::new();
                 for ev in st.connector.map(&event, &payload) {
-                    let d = st.controller.handle(ev, now);
+                    decisions.push(if unanswered {
+                        st.controller.handle_unanswered(ev, now)
+                    } else {
+                        st.controller.handle(ev, now)
+                    });
+                }
+                let mut response = Response::default();
+                for d in &decisions {
+                    st.store.persist(d)?;
+                    response.merge(d.response.clone());
+                }
+                if !response.is_empty() && late(now_ms()) {
+                    let d = st.controller.undelivered(&decisions, now_ms());
                     st.store.persist(&d)?;
-                    response.merge(d.response);
+                    response = Response::default();
                 }
                 Reply {
                     output: st.connector.encode(&event, &payload, &response),

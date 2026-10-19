@@ -369,7 +369,7 @@ pub fn render(label: &str, entries: &[Entry], live: bool) -> String {
     let t = totals(entries);
     let (mut tools, mut bash, mut reopens, mut judgments) = (0u64, 0u64, 0u64, 0u64);
     let (mut shaped, mut before, mut after, mut shaped_applied) = (0u64, 0u64, 0u64, 0u64);
-    let (mut unshapeable, mut wrapped, mut denied) = (0u64, 0u64, 0u64);
+    let (mut unshapeable, mut wrapped, mut denied, mut undelivered) = (0u64, 0u64, 0u64, 0u64);
     let (mut loops, mut cycles, mut guards, mut adaptations, mut modes) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut config = Vec::new();
@@ -430,6 +430,7 @@ pub fn render(label: &str, entries: &[Entry], live: bool) -> String {
                 _ => {}
             },
             Body::Output { .. } | Body::Format { .. } => {}
+            Body::Undelivered { actions, .. } => undelivered += actions.len() as u64,
             Body::Override { action } => guards.push(format!("[user allowed] {action} once")),
             Body::Judgment { .. } => judgments += 1,
             Body::Action {
@@ -576,6 +577,12 @@ pub fn render(label: &str, entries: &[Entry], live: bool) -> String {
             t.bash_test_writes
         )
     );
+    if undelivered > 0 {
+        let _ = writeln!(
+            out,
+            "Not delivered: {undelivered} actions (the reply came after the hook timeout)"
+        );
+    }
     let _ = write!(out, "{}", precision(&t, live));
     let _ = writeln!(out, "Re-opens: {reopens}");
     let loop_title = if t.loop_ms > 0 {
@@ -658,6 +665,9 @@ fn describe(e: &Entry) -> String {
             reason,
         } => format!("adaptation {knob} {from} → {to}: {reason}"),
         Body::ModeChanged { from, to } => format!("mode {from:?} → {to:?}"),
+        Body::Undelivered { actions, reason } => {
+            format!("undelivered {}: {reason}", actions.join(", "))
+        }
         Body::Config { overrides } => format!("config {overrides:?}"),
         Body::Format { version } => format!("ledger format {version}"),
         Body::Override { action } => format!("user allowed {action} once"),

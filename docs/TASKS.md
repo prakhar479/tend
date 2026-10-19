@@ -118,6 +118,8 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
   Done (wrapped entries dropped at each turn end since R0.2).
 - [x] **R0.8** Agent-proof `allow`/`set_mode`/`shutdown` (token or peer check); fix the commit-message false positive. (D6)
   Done: `<session>/control.token` (0600). Raises the bar; the agent runs as the same user, so it is not a security boundary.
+- [x] **R0.9** A hook reply after the shim's timeout must not be recorded as applied. (D9)
+  Done: the shim sends `deadline_ms`. A hook already late when the daemon gets to it (usually after waiting for the lock) is handled as look mode, with no response. One that becomes late while being handled gets no response and an `undelivered` entry naming its actions; readers treat those as not applied (`settle_undelivered`), and the report shows `Not delivered: N actions`. New entry kind `undelivered` (additive).
 
 **R1. Coverage gaps from the data**
 - [x] **R1.1** Wrap behind `source …/activate &&` and env assignments (74% of test runs are refused today).

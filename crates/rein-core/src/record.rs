@@ -77,10 +77,87 @@ pub enum Body {
     Override {
         action: String,
     },
+    /// The reply carrying these applied actions came after the shim gave up, so the
+    /// agent never got them (D9). Readers treat them as not applied.
+    Undelivered {
+        actions: Vec<String>,
+        reason: String,
+    },
     /// Config values that differ from the defaults, recorded at session start.
     Config {
         overrides: BTreeMap<String, String>,
     },
+}
+
+/// Read actions that an `undelivered` entry names as not applied, with a note in the
+/// reason (D9). The ledger itself is never changed.
+pub fn settle_undelivered(entries: &mut [Entry]) {
+    let late: std::collections::BTreeSet<String> = entries
+        .iter()
+        .filter_map(|e| match &e.body {
+            Body::Undelivered { actions, .. } => Some(actions.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    if late.is_empty() {
+        return;
+    }
+    for e in entries.iter_mut() {
+        if let Body::Action {
+            id,
+            applied,
+            reason,
+            ..
+        } = &mut e.body
+        {
+            if *applied && late.contains(id) {
+                *applied = false;
+                reason.push_str(" [not delivered: the reply came too late]");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn undelivered_actions_read_as_not_applied() {
+        let action = |id: &str| Entry {
+            seq: 0,
+            ts_ms: 0,
+            causes: vec![],
+            body: Body::Action {
+                id: id.into(),
+                action: ActionKind::Wrap {
+                    tool_use_id: "t".into(),
+                },
+                reason: "Wrapped.".into(),
+                applied: true,
+                unsupported: false,
+            },
+        };
+        let late = Entry {
+            seq: 2,
+            ts_ms: 0,
+            causes: vec![0],
+            body: Body::Undelivered {
+                actions: vec!["a-1".into()],
+                reason: "late".into(),
+            },
+        };
+        let mut entries = vec![action("a-1"), action("a-2"), late];
+        settle_undelivered(&mut entries);
+        assert!(
+            matches!(&entries[0].body, Body::Action { applied: false, reason, .. } if reason.ends_with("too late]"))
+        );
+        assert!(matches!(
+            &entries[1].body,
+            Body::Action { applied: true, .. }
+        ));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

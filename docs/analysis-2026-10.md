@@ -80,7 +80,7 @@ Ranked by harm. **Confirmed** means reproduced by running it. **Plausible** mean
 | D6 | controller + daemon | The agent can lift a guard without `rein allow`. The socket path is in its environment, so a Python one-liner can send `allow`, `set_mode`, or `shutdown`, and quoting tricks bypass the regex. A false positive also exists: `git commit -m "… rein allow …"` is denied. | Plausible (from reading) |
 | D7 | `classify.rs` | Runner detection matches anywhere in the command, so `git commit -m "fix pytest"` gets wrapped. The state-change regex misses newline-separated `cd`, `export`, and `{ cd …; }`. | Plausible |
 | D8 | `store.rs` | `writeln!` makes two `write` calls, so a crash can tear a ledger line. Blobs are written in place and never repaired. Shutdown exits without taking the lock. | Plausible |
-| D9 | `daemon.rs` | When the shim times out, the controller has already recorded guard, wrap, or shape as `applied`. | Plausible |
+| D9 | `daemon.rs` | When the shim times out, the controller has already recorded guard, wrap, or shape as `applied`. | Plausible; fixed in R0.9 |
 | D10 | `paths.rs` | `ensure_private_dir` follows symlinks. A pre-made `/tmp/rein-<uid>` symlink makes rein chmod its target. | Plausible |
 | D11 | controller | `wrapped`, `blocked`, `allowed`, and `outputs` never shrink. Wraps leak when no PostToolUse arrives. | Plausible, low |
 | D12 | `shim.rs` | `println!` panics on EPIPE and exits 101, which breaks rule 1. | Plausible, low |

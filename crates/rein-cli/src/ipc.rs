@@ -17,6 +17,10 @@ pub enum Request {
     Hook {
         event: String,
         payload: Value,
+        /// When the shim stops waiting (ms since the epoch). A reply after it reaches no
+        /// one, so the daemon must not record its actions as applied (D9).
+        #[serde(default)]
+        deadline_ms: Option<u64>,
     },
     // Control requests carry the session's control token (see paths::read_token).
     SetMode {

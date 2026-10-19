@@ -103,6 +103,7 @@ pub fn read_entries(dir: &Path) -> Result<Vec<Entry>> {
             Err(err) => eprintln!("rein: skip ledger line {}: {err}", n + 1),
         }
     }
+    rein_core::record::settle_undelivered(&mut out);
     Ok(out)
 }
 

@@ -276,6 +276,61 @@ impl Controller {
         self.active_ms
     }
 
+    /// Handle an event whose reply would reach the agent too late (D9): as in look mode,
+    /// so the ledger records no action as applied, and with no response.
+    pub fn handle_unanswered(&mut self, event: Event, now_ms: u64) -> Decision {
+        let mode = std::mem::replace(&mut self.session.mode, Mode::Look);
+        let mut d = self.handle(event, now_ms);
+        self.session.mode = mode;
+        d.response = Response::default();
+        d
+    }
+
+    /// The reply with these decisions' applied actions reached no one (D9). Record that,
+    /// and drop state that assumed the agent got them.
+    pub fn undelivered(&mut self, decisions: &[Decision], now_ms: u64) -> Decision {
+        let mut out = Decision::default();
+        let (mut ids, mut causes) = (Vec::new(), Vec::new());
+        for e in decisions.iter().flat_map(|d| &d.entries) {
+            if let Body::Action {
+                id,
+                action,
+                applied: true,
+                ..
+            } = &e.body
+            {
+                ids.push(id.clone());
+                causes.push(e.seq);
+                if matches!(action, ActionKind::Shape { .. }) {
+                    self.last_summary = None;
+                }
+            }
+        }
+        if ids.is_empty() {
+            return out;
+        }
+        for id in &ids {
+            self.blocked.remove(id);
+            if self.last_blocked.as_ref() == Some(id) {
+                self.last_blocked = None;
+            }
+        }
+        // The agent runs the command as it wrote it.
+        self.wrapped.retain(|_, w| !causes.contains(&w.action_seq));
+        let reason =
+            "The hook reply came after the shim's timeout, so the agent did not get these actions.";
+        self.push(
+            &mut out,
+            now_ms,
+            causes,
+            Body::Undelivered {
+                actions: ids,
+                reason: reason.into(),
+            },
+        );
+        out
+    }
+
     /// The user allows one blocked edit (the latest one if `action` is None).
     /// Err is a message for the user.
     pub fn allow(&mut self, action: Option<&str>, now_ms: u64) -> Result<Decision, String> {
@@ -1467,6 +1522,47 @@ mod tests {
             .entries
             .iter()
             .any(|e| matches!(e.body, Body::Judgment { .. })));
+    }
+
+    /// D9: a hook already past its deadline is handled as look mode: nothing applied,
+    /// nothing returned, nothing to allow later.
+    #[test]
+    fn late_hook_records_nothing_as_applied() {
+        let mut c = ctl(Mode::Optimize);
+        let d = c.handle_unanswered(weakening(), 0);
+        assert!(d.response.is_empty());
+        assert!(d.entries.iter().any(|e| matches!(
+            &e.body,
+            Body::Action {
+                action: ActionKind::Guard { .. },
+                applied: false,
+                ..
+            }
+        )));
+        assert!(c.allow(None, 1).is_err(), "no block reached the agent");
+        assert_eq!(c.mode(), Mode::Optimize, "mode is restored");
+        assert!(c.handle(weakening(), 2).response.permission.is_some());
+    }
+
+    /// D9: a reply that missed its deadline after handling is recorded as undelivered,
+    /// and state that assumed the agent got it is dropped.
+    #[test]
+    fn undelivered_reply_is_recorded_and_forgotten() {
+        let mut c = ctl(Mode::Optimize);
+        let deny = c.handle(weakening(), 0);
+        let wrap = c.handle(requested("t1", "pytest -q", true), 1);
+        assert!(wrap.response.wrap);
+        let d = c.undelivered(&[deny, wrap], 2);
+        assert!(matches!(
+            &d.entries[..],
+            [Entry { body: Body::Undelivered { actions, .. }, .. }] if actions.len() == 2
+        ));
+        assert!(
+            c.allow(None, 3).is_err(),
+            "the deny never reached the agent"
+        );
+        assert_eq!(c.filter_level("t1"), None, "the call runs unwrapped");
+        assert!(c.undelivered(&[], 4).entries.is_empty());
     }
 
     #[test]

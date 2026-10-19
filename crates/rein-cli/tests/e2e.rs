@@ -677,3 +677,40 @@ fn status_line_shows_mode_and_counts() {
     );
     assert_eq!(status(None), "", "nothing outside a rein session");
 }
+
+/// D9: a hook whose shim has already given up gets no response, and the ledger does
+/// not claim the guard denied the edit.
+#[test]
+fn late_hook_is_not_recorded_as_applied() {
+    use std::io::{BufRead, BufReader, Write};
+    let dir = tmp("late");
+    let session = dir.join("session");
+    let (_daemon, sock) = start_daemon(&session, "optimize");
+    let payload: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("pre_tool_use_edit_test.json")).unwrap())
+            .unwrap();
+    let send = |deadline_ms: u64| {
+        let req = serde_json::json!({
+            "type": "hook", "event": "PreToolUse", "payload": payload, "deadline_ms": deadline_ms
+        });
+        let mut s = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        writeln!(s, "{req}").unwrap();
+        let mut line = String::new();
+        BufReader::new(s).read_line(&mut line).unwrap();
+        serde_json::from_str::<serde_json::Value>(&line).unwrap()
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(
+        send(now - 1000)["output"].is_null(),
+        "too late: no response"
+    );
+    let report = rein(&["report"], &session);
+    assert!(report.contains("[would deny]"), "{report}");
+    assert!(
+        !send(now + 60_000)["output"].is_null(),
+        "in time: the guard denies"
+    );
+}

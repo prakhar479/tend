@@ -46,6 +46,7 @@ pub fn forward(
     let req = Request::Hook {
         event: event.to_string(),
         payload,
+        deadline_ms: Some(crate::paths::now_ms() + timeout.as_millis() as u64),
     };
     let reply = ipc::send(socket, &req, timeout).ok()?;
     reply.output.map(|v| v.to_string())
