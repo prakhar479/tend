@@ -539,8 +539,14 @@ impl Controller {
             },
         );
 
-        // Loops. All failures that reach the threshold in one run share one steer.
-        let failures = p.failures;
+        // Loops. All failures that reach the threshold in one run share one steer. Only
+        // test and build runs count: a file view or log dump that contains failure text
+        // is not a run that failed (checkpoint C2).
+        let failures = if matches!(kind, OutputKind::Test | OutputKind::Build) {
+            p.failures
+        } else {
+            Vec::new()
+        };
         let mut looped: Vec<(String, String, u64, u64)> = Vec::new();
         let active = self.active_ms;
         for obs in self.loops.on_run(command, &failures, active) {
@@ -1441,6 +1447,35 @@ mod tests {
                     }
                 )));
             }
+        }
+    }
+
+    /// Checkpoint C2: reading a log or test file that shows a failure is not a run.
+    #[test]
+    fn viewing_failure_text_is_not_a_loop() {
+        let mut c = ctl(Mode::Optimize);
+        for i in 0..=4 {
+            c.handle(edited("src/app.py", &format!("h{i}")), i * 60_000);
+            let d = c.handle(bash("cat test-output.log", PYTEST), i * 60_000);
+            assert!(d.response.add_context.is_empty(), "view {i}");
+        }
+    }
+
+    /// Checkpoint C1: a large code read is never summarized, however it is spelled.
+    #[test]
+    fn large_file_reads_are_not_shaped() {
+        let code: String = (0..3000)
+            .map(|i| format!("    let value_{i} = compute(input, {i}); // step {i}\n"))
+            .collect();
+        let mut c = ctl(Mode::Optimize);
+        for cmd in [
+            "cd /app; cat -n src/lib.rs",
+            "wc -l src/lib.rs && sed -n 1,3000p src/lib.rs",
+            "git diff HEAD -- src/lib.rs",
+            "grep -n let src/lib.rs",
+        ] {
+            let d = c.handle(bash(cmd, &code), 0);
+            assert!(d.response.replace_output.is_none(), "{cmd}");
         }
     }
 

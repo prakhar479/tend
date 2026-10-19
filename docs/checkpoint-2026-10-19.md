@@ -2,6 +2,8 @@
 
 This is a checkpoint after roadmap R from `docs/analysis-2026-10.md`. R0 is complete. Most of R1–R3 is done. This document records where tend stands, what fresh measurements show, the defects those measurements found, and what to do next.
 
+**Update (same day):** C1–C4 are fixed (see "Checkpoint C" in `docs/TASKS.md`). After the fixes, `retro --all` over the owner's real work shows 0 loops, and the probe shapes 1 output (a lint run) instead of 84. The measurements below are from before the fixes.
+
 ## 1. Summary
 
 1. **The engineering plan is mostly done, but the value case is unproven.** Every item that made optimize mode unsafe (R0) is fixed. Wrapper coverage rose from 26% to 93% of test runs. The guard now sees Bash writes. On the owner's real work, though, tend has yet to do anything useful: 0 test outputs shaped, 0 guard flags, and 0 true loops.
@@ -47,10 +49,10 @@ What changed since the analysis:
 
 | # | Where | Defect | Status |
 |---|---|---|---|
-| C1 | `classify::is_view`, `shell::leading_cd`, `session::SessionModel::new` | Only views are excluded from shaping, and the view check reads only the first segment. `leading_cd` accepts `cd X &&` but not `cd X;`. Any file read that starts with another command (`wc`, `mkdir`, `S=…;`, `docker exec`) or pipes `cat -n` into `sed -n` is classified as Other or Search and summarized. Git diffs are shaped too. | **Confirmed** (probe over the owner's transcripts: 84 would-shape outputs, mostly code) |
-| C2 | `Controller::observe` → `loops.on_run` | Failures are extracted from every Bash output, not only test runs (`OutputKind::Test`). Viewing code or logs that contain failure text builds a loop. A signature like `assert!(` is accepted. | **Confirmed** (both real nudges trace to `sed -n` and `jq` outputs) |
-| C3 | `retro::run_all` | It counts scripted sessions under `/tmp/*` project dirs, which hold every guard flag. It skips `*/subagents/*.jsonl`, which hold most large outputs. | **Confirmed** |
-| C4 | `docs/TASKS.md`, notes | The R2.3 "loop precision 66%" and the "6 guard flags" figures come from false or scripted events. | **Confirmed**: correct them with C2 and C3 |
+| C1 | `classify::is_view`, `shell::leading_cd`, `session::SessionModel::new` | Only views are excluded from shaping, and the view check reads only the first segment. `leading_cd` accepts `cd X &&` but not `cd X;`. Any file read that starts with another command (`wc`, `mkdir`, `S=…;`, `docker exec`) or pipes `cat -n` into `sed -n` is classified as Other or Search and summarized. Git diffs are shaped too. | **Fixed** (probe: 84 would-shape outputs, mostly code → 1) |
+| C2 | `Controller::observe` → `loops.on_run` | Failures are extracted from every Bash output, not only test runs (`OutputKind::Test`). Viewing code or logs that contain failure text builds a loop. A signature like `assert!(` is accepted. | **Fixed** (both real nudges traced to `sed -n` and `jq` outputs; now 0) |
+| C3 | `retro::run_all` | It counts scripted sessions under `/tmp/*` project dirs, which hold every guard flag. It skips `*/subagents/*.jsonl`, which hold most large outputs. | **Fixed** |
+| C4 | `docs/TASKS.md`, notes | The R2.3 "loop precision 66%" and the "6 guard flags" figures come from false or scripted events. | **Fixed** |
 | C5 | repo | No remote, so CI has never run. | Process |
 
 ## 5. What is proven and what is not

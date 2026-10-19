@@ -34,17 +34,18 @@ impl SessionModel {
         Self {
             mode,
             guard: GuardDecision::Ask,
-            // File views start off: summarizing code the agent asked to read would hide
-            // what it needs (R1.5 will decide what is safe).
+            // Only test, build, and install output starts on: summarizing code, diffs, or
+            // search hits the agent asked to read would hide what it needs (C1; R1.5 and
+            // R1.6 will decide what else is safe).
             levels: OutputKind::ALL
                 .iter()
                 .map(|k| {
                     (
                         *k,
-                        if *k == OutputKind::View {
-                            0
-                        } else {
+                        if k.shaped_by_default() {
                             DEFAULT_LEVEL
+                        } else {
+                            0
                         },
                     )
                 })

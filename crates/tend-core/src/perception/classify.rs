@@ -40,6 +40,16 @@ impl OutputKind {
             OutputKind::Other => "other",
         }
     }
+
+    /// Kinds tend summarizes by default. The others hold what the agent asked to read
+    /// (code, diffs, search hits), and the owner's data shows they are mostly file reads
+    /// that a summary would cut (checkpoint C1).
+    pub fn shaped_by_default(self) -> bool {
+        matches!(
+            self,
+            OutputKind::Test | OutputKind::Build | OutputKind::Install
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,21 +102,55 @@ const BUILD: &str = r"\bcargo\s+(build|check|clippy)\b|\btsc\b|\b(npm|pnpm|yarn|
 
 const INSTALL: &str = r"\b(npm|pnpm|yarn|bun)\s+(install|i|add|ci)\b|\b(pip|pip3)\s+install\b|\buv\s+(sync|pip\s+install|add)\b|\bpoetry\s+install\b|\bcargo\s+(install|fetch)\b|\b(apt|apt-get|brew)\s+install\b|\bgo\s+(get|mod\s+download)\b";
 
-/// The first command (after a leading cd) prints file content: `cat`, `head`, `tail`,
-/// `less`, `bat`, `nl`, or `sed` without `-i`.
+/// Some simple command prints file content: `cat`, `head`, `tail`, `less`, `bat`, `nl`,
+/// or `sed` without `-i`, with a file operand (`git log | head` reads a pipe, not a
+/// file). Also inside `bash -c '…'`, as in `docker exec box bash -c 'cat -n f'`.
 fn is_view(command: &str) -> bool {
-    let (prefix, _) = shell::leading_cd(command);
-    let line = shell::parse(&command[prefix..]);
-    let Some(seg) = line.segments.first() else {
-        return false;
-    };
-    let w = shell::program_words(seg);
+    shell::parse(command)
+        .segments
+        .iter()
+        .any(|seg| segment_views(shell::program_words(seg)))
+}
+
+fn segment_views(w: &[String]) -> bool {
+    if let Some(i) = w
+        .windows(2)
+        .position(|p| matches!(shell::program_name(&p[0]), "bash" | "sh" | "zsh") && p[1] == "-c")
+    {
+        if w.get(i + 2).is_some_and(|script| is_view(script)) {
+            return true;
+        }
+    }
     let Some(first) = w.first() else {
         return false;
     };
-    match shell::program_name(first) {
-        "cat" | "head" | "tail" | "less" | "more" | "bat" | "nl" => true,
-        "sed" => !w.iter().any(|x| x.starts_with("-i")),
+    let program = shell::program_name(first);
+    // Operands: words that are not options, redirections, or the value of `-n`/`-c`/`-e`.
+    let mut operands = Vec::new();
+    let mut skip = false;
+    let mut script_given = false;
+    for x in &w[1..] {
+        if std::mem::take(&mut skip) {
+            continue;
+        }
+        if matches!(x.as_str(), ">" | ">>" | "<" | "2>" | "&>") {
+            skip = true;
+        } else if x.contains('>') || x.contains('<') {
+        } else if matches!(x.as_str(), "-n" | "-c") && matches!(program, "head" | "tail") {
+            skip = true;
+        } else if matches!(x.as_str(), "-e" | "-f") && program == "sed" {
+            skip = true;
+            script_given = true;
+        } else if !x.starts_with('-') || x == "-" {
+            operands.push(x);
+        }
+    }
+    match program {
+        "cat" | "head" | "tail" | "less" | "more" | "bat" | "nl" => !operands.is_empty(),
+        "sed" => {
+            !w.iter().any(|x| x.starts_with("-i"))
+                && operands.len() > if script_given { 0 } else { 1 }
+        }
         _ => false,
     }
 }
@@ -354,8 +398,24 @@ mod tests {
             "cat README.md",
             "head -50 build.log",
             "cd /app && cat -n src/app.py | head -100",
+            // Checkpoint C1: file reads behind another command.
+            "cd /app; cat -n src/app.py",
+            "cat -n src/app.py | sed -n 1,300p",
+            "wc -l src/app.py && sed -n 180,260p src/app.py",
+            "cd /app; cat src/models.py; grep -n device src/models.py",
+            "S=/tmp/x; mkdir -p $S; tail -n 40 build.log",
+            "docker exec box bash -c 'cat -n /srv/app/plot.R'",
         ] {
             assert_eq!(classify(cmd).kind, OutputKind::View, "{cmd}");
+        }
+        for cmd in [
+            "git log --oneline | head -20",
+            "git diff | sed -n 1,40p",
+            "grep -rn foo src | head -n 50",
+            "cat > notes.txt",
+            "make 2>&1 | tail -5",
+        ] {
+            assert_ne!(classify(cmd).kind, OutputKind::View, "{cmd}");
         }
         assert_eq!(classify("pytest -q | tail -20").kind, OutputKind::Test);
         assert_eq!(classify("sed -i 's/a/b/' x.py").kind, OutputKind::Other);

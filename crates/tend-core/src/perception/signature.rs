@@ -107,7 +107,7 @@ pub fn extract_failures(output: &str) -> Vec<Failure> {
                 }
                 _ => l,
             };
-            if re!(r"^\w+(Error|Exception)(: .+)?$|^assert\b.+|^error(\[E\d+\])?: .+|\berror TS\d+: .+|:\d+:\d+: error: .+")
+            if re!(r"^\w+(Error|Exception)(: .+)?$|^assert\s.+|^error(\[E\d+\])?: .+|\berror TS\d+: .+|:\d+:\d+: error: .+")
                 .is_match(l)
             {
                 found.push((None, l.to_string()));
@@ -420,6 +420,14 @@ mod tests {
         // A passing summary is not a failure.
         assert!(extract_failures("300 passed in 0.14s").is_empty());
         assert!(extract_failures("test result: ok. 2 passed; 0 failed; 0 ignored").is_empty());
+    }
+
+    /// Checkpoint C2: Rust or Python source in a file view is not a failure.
+    #[test]
+    fn source_lines_are_not_failures() {
+        let src = "    assert!(out.contains(\"x\"));\n    assert_eq!(a, b);\nassert(true)\n";
+        assert!(extract_failures(src).is_empty());
+        assert_eq!(extract_failures("assert 1 == 2\n").len(), 1);
     }
 
     #[test]

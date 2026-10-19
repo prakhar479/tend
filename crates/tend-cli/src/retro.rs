@@ -141,34 +141,75 @@ pub fn analyze(transcript: &Path) -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
-/// Session transcripts under a Claude Code projects dir: `<root>/<project>/<session>.jsonl`.
-/// Subagent transcripts in deeper folders are part of their session and are skipped.
+/// The transcripts under a Claude Code projects dir, sorted: `<project>/<session>.jsonl`
+/// and `<project>/<session>/subagents/*.jsonl`. A subagent's tool calls appear only in
+/// its own transcript, so counting both counts nothing twice.
 pub fn transcripts(root: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = fs::read_dir(root)
+    let jsonl = |d: &Path| -> Vec<PathBuf> {
+        fs::read_dir(d)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "jsonl"))
+            .collect()
+    };
+    let mut out = Vec::new();
+    for project in fs::read_dir(root)
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .flat_map(|d| fs::read_dir(d.path()).into_iter().flatten())
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "jsonl"))
-        .collect();
+    {
+        let project = project.path();
+        if !project.is_dir() {
+            continue;
+        }
+        out.extend(jsonl(&project));
+        for session in fs::read_dir(&project)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+        {
+            out.extend(jsonl(&session.path().join("subagents")));
+        }
+    }
     out.sort();
     out
 }
 
+/// A project dir for a working directory under `/tmp`: scratch work, such as tend's
+/// own conformance runs, rather than real sessions (checkpoint C3).
+fn is_tmp_project(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .ok()
+        .and_then(|p| p.components().next())
+        .is_some_and(|c| c.as_os_str().to_string_lossy().starts_with("-tmp-"))
+}
+
+fn is_subagent(path: &Path) -> bool {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .is_some_and(|n| n == "subagents")
+}
+
 struct Row {
     label: String,
+    subagent: bool,
     prompt: u64,
     totals: report::Totals,
 }
 
 /// Retro over every transcript: a total, then the top sessions by noise and by loop time.
-pub fn run_all(root: &Path, top: usize) -> Result<String> {
+/// Subagent transcripts count too, on their own line. Projects under `/tmp` are left out
+/// unless `include_tmp`.
+pub fn run_all(root: &Path, top: usize, include_tmp: bool) -> Result<String> {
     let mut rows = Vec::new();
-    let mut skipped = 0;
+    let (mut skipped, mut tmp) = (0, 0);
     for path in transcripts(root) {
+        if !include_tmp && is_tmp_project(root, &path) {
+            tmp += 1;
+            continue;
+        }
         let Ok(entries) = analyze(&path) else {
             skipped += 1;
             continue;
@@ -180,25 +221,38 @@ pub fn run_all(root: &Path, top: usize) -> Result<String> {
             .to_string();
         rows.push(Row {
             label,
+            subagent: is_subagent(&path),
             prompt: report::usage_from_transcript(&path).map_or(0, |u| u.prompt_total()),
             totals: report::totals(&entries),
         });
     }
 
-    let sum = |f: fn(&Row) -> u64| rows.iter().map(f).sum::<u64>();
-    let (bash, noise) = (sum(|r| r.totals.bash_tokens), sum(|r| r.totals.noise));
+    let subagents = rows.iter().filter(|r| r.subagent).count();
+    let mut notes = Vec::new();
+    if tmp > 0 {
+        notes.push(format!(
+            "{tmp} in /tmp projects left out; --include-tmp keeps them"
+        ));
+    }
+    if skipped > 0 {
+        notes.push(format!("{skipped} unreadable, skipped"));
+    }
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "Retro over {} transcripts in {}{}",
+        "Retro over {} transcripts ({} sessions, {subagents} subagents) in {}{}",
         rows.len(),
+        rows.len() - subagents,
         root.display(),
-        if skipped > 0 {
-            format!(" ({skipped} unreadable, skipped)")
-        } else {
+        if notes.is_empty() {
             String::new()
+        } else {
+            format!(" ({})", notes.join("; "))
         }
     );
+
+    let sum = |f: fn(&Row) -> u64| rows.iter().map(f).sum::<u64>();
+    let (bash, noise) = (sum(|r| r.totals.bash_tokens), sum(|r| r.totals.noise));
     let _ = writeln!(
         out,
         "Total: {} prompt tokens · Bash output {} tokens (est.) · noise {}% (est.) · {} loops ({} in loops)",
@@ -208,6 +262,18 @@ pub fn run_all(root: &Path, top: usize) -> Result<String> {
         sum(|r| r.totals.loops),
         report::minutes(sum(|r| r.totals.loop_ms)),
     );
+    for (name, sub) in [("Main sessions", false), ("Subagents", true)] {
+        let part: Vec<&Row> = rows.iter().filter(|r| r.subagent == sub).collect();
+        let bash: u64 = part.iter().map(|r| r.totals.bash_tokens).sum();
+        let noise: u64 = part.iter().map(|r| r.totals.noise).sum();
+        let _ = writeln!(
+            out,
+            "  {name}: Bash output {} tokens · noise {}% · {} loops",
+            report::k(bash),
+            report::pct(noise, bash),
+            part.iter().map(|r| r.totals.loops).sum::<u64>(),
+        );
+    }
     let mut by_kind = std::collections::BTreeMap::new();
     for r in &rows {
         for (k, n) in &r.totals.by_kind {
@@ -303,26 +369,41 @@ mod tests {
         );
         let root = std::env::temp_dir().join(format!("tend-retro-all-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        for p in ["-home-dev-shop", "-home-dev-api"] {
+        for p in ["-home-dev-shop", "-home-dev-api", "-tmp-scratch"] {
             fs::create_dir_all(root.join(p).join("s1/subagents")).unwrap();
             fs::copy(&fixture, root.join(p).join("s1.jsonl")).unwrap();
-            fs::copy(&fixture, root.join(p).join("s1/subagents/a.jsonl")).unwrap();
             fs::write(root.join(p).join("notes.txt"), "x").unwrap();
         }
-        let out = run_all(&root, 5).unwrap();
+        fs::copy(
+            &fixture,
+            root.join("-home-dev-api/s1/subagents/agent-a.jsonl"),
+        )
+        .unwrap();
+        let out = run_all(&root, 5, false).unwrap();
+        let with_tmp = run_all(&root, 5, true).unwrap();
         let _ = fs::remove_dir_all(&root);
-        assert!(out.contains("Retro over 2 transcripts"), "{out}");
         assert!(
-            out.contains("Test runs: 8 · wrapped (or would be, in auto mode): 8 (100%)"),
+            out.contains("Retro over 3 transcripts (2 sessions, 1 subagents)"),
             "{out}"
         );
-        assert!(out.contains("360.9k prompt tokens"), "{out}");
-        assert!(out.contains("2 loops (27 s in loops)"), "{out}");
+        assert!(
+            out.contains("1 in /tmp projects left out; --include-tmp keeps them"),
+            "{out}"
+        );
+        assert!(with_tmp.contains("Retro over 4 transcripts"), "{with_tmp}");
+        assert!(
+            out.contains("Test runs: 12 · wrapped (or would be, in auto mode): 12 (100%)"),
+            "{out}"
+        );
+        assert!(out.contains("3 loops (41 s in loops)"), "{out}");
+        assert!(out.contains("  Main sessions: Bash output"), "{out}");
+        assert!(out.contains("  Subagents: Bash output"), "{out}");
         let by_loop = out.split("Top 5 by loop time:\n").nth(1).unwrap();
         assert_eq!(
             by_loop.lines().collect::<Vec<_>>(),
             vec![
                 "  13 s in 1 loops · -home-dev-api/s1.jsonl",
+                "  13 s in 1 loops · -home-dev-api/s1/subagents/agent-a.jsonl",
                 "  13 s in 1 loops · -home-dev-shop/s1.jsonl"
             ]
         );

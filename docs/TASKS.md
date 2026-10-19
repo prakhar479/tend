@@ -141,7 +141,7 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
 - [x] **R2.2** `retro --all` prints coverage and output share by class.
   Done: report and `retro --all` show output share by kind, test runs wrapped, and Edit/Write edits vs Bash writes. Also: new `view` kind, never shaped (it used to be shaped in optimize mode); retro counted repeated transcript lines twice (fixed). Owner's data: view 44% / search 26% / test 11%; 93% of test runs wrappable; the guard sees 9% of edits (101 vs 1009 Bash writes).
 - [x] **R2.3** Guard and loop precision in `tend report`.
-  Done: `Guard precision: N flagged · K allowed by the user` (allowed = likely false positive) and `Loop nudges: N · failure stopped within 1 more run: K`. `retro --all` shows both (guard: flag count only). Owner's data: 6 guard flags; 2 of 3 loop nudges followed by the failure stopping.
+  Done: `Guard precision: N flagged · K allowed by the user` (allowed = likely false positive) and `Loop nudges: N · failure stopped within 1 more run: K`. `retro --all` shows both (guard: flag count only). Owner's data, corrected by the checkpoint (C2, C3): real sessions have 0 guard flags and 0 true loops. The earlier "6 guard flags; 2 of 3 loop nudges followed by the failure stopping" counted tend's own scripted sessions and two false loops.
 - [ ] **R2.4** Review 20 real sessions in look mode (N16).
 
 **R3. Platform and distribution**
@@ -158,6 +158,16 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
   Done: the `PermissionDenied` hook exists in 2.1.303 ("after auto mode classifier denies a tool call"; input `tool_name`, `tool_input`, `tool_use_id`, `reason`; output `retry: true` tells the model it may retry). Tend hooks it for Bash. A denied call that tend wrapped: the command key is not wrapped again (at once, not at the turn end), and tend answers `retry: true` (new action `retry`, new event `tool_denied`, both additive). The report shows `denied by auto mode: K (X%)` next to wrapped runs. Settings accepted live by 2.1.303. **[Verify]**: the fixture follows the schema in the binary, not a live capture; capture one with `TEND_CAPTURE=1` when a denial happens, and check that the agent retries after `retry: true`.
 
 **Owner decisions:** positioning (loops and honesty first), and plugin distribution. See analysis §7.
+
+## Checkpoint C (from `docs/checkpoint-2026-10-19.md`)
+
+- [x] **C1** Shape by allow-list: only test, build, and install output by default. File reads are found in any segment, behind `cd X;`, and inside `bash -c '…'`.
+  Done: `OutputKind::shaped_by_default`; `classify::is_view` checks every simple command for a view program with a file operand (`git log | head` stays git). A probe over the owner's transcripts went from 84 would-shape outputs (mostly code reads and diffs) to 1 (`black --check`).
+- [x] **C2** Loops come only from test and build runs. The generic `assert …` fallback needs a space, so Rust's `assert!(` in source is not a failure.
+  Done: this repo's dev session went from 2 false loop nudges to 0. The scripted loop session still steers.
+- [x] **C3** `retro --all` counts subagent transcripts (a line each for main sessions and subagents) and leaves out projects under `/tmp` unless `--include-tmp`.
+- [x] **C4** Corrected the R2.3 figures above.
+- [ ] **C5** Add a git remote so CI runs (owner decision).
 
 ## Phase 2 — Optimize + Codex (not started)
 

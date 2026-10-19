@@ -104,6 +104,10 @@ enum Cmd {
         /// Projects dir for --all (default: $CLAUDE_CONFIG_DIR/projects or ~/.claude/projects).
         #[arg(long, requires = "all")]
         projects: Option<PathBuf>,
+        /// With --all, keep projects whose working directory was under /tmp (scratch work,
+        /// such as tend's own test runs). They are left out by default.
+        #[arg(long, requires = "all")]
+        include_tmp: bool,
     },
     /// List recorded sessions.
     Sessions {
@@ -307,12 +311,13 @@ fn run(cli: Cli) -> Result<i32> {
             transcript,
             all,
             projects,
+            include_tmp,
         } => {
             match transcript {
                 Some(t) if !all => print!("{}", retro::run(&t)?),
                 _ => {
                     let root = projects.unwrap_or_else(paths::claude_projects_dir);
-                    print!("{}", retro::run_all(&root, 5)?);
+                    print!("{}", retro::run_all(&root, 5, include_tmp)?);
                 }
             }
             Ok(0)
