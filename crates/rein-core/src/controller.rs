@@ -14,7 +14,9 @@ use crate::capability::Capabilities;
 use crate::event::{Event, Mode};
 use crate::guard::{is_test_path, GuardDecision};
 use crate::loops::{LoopDetector, LoopSignal};
-use crate::perception::{classify, extract_failures, shell, Failure, OutputKind};
+use crate::perception::{
+    classify, command_key, extract_failures, shell, writes_files, Failure, OutputKind,
+};
 use crate::record::{ActionKind, Body, Entry, SteerTrigger, LEDGER_FORMAT};
 use crate::session::{Change, SessionModel};
 use crate::shape::{shape, Shaped};
@@ -434,6 +436,14 @@ impl Controller {
         p: Prepared,
         can_replace: Replace,
     ) -> Option<String> {
+        // A Bash write before the run in the same call (`python3 - <<EOF … EOF; pytest`)
+        // is an edit for loop detection: agents edit mostly through Bash (R1.3).
+        if writes_files(command) {
+            self.loops.note_edit();
+        }
+        // Loops and re-runs compare normalized keys: agents vary pipes and flags (R1.3).
+        let key = command_key(command);
+        let command = key.as_str();
         // Re-running the same command right after a summary, with no edit in between,
         // means the summary hid something the agent wanted: treat it as a re-open.
         if let Some(last) = self.last_summary.take() {
@@ -504,18 +514,18 @@ impl Controller {
             let duration_ms = Some(active.saturating_sub(first));
             let text = if looped.len() == 1 {
                 format!(
-                    "rein: this failure is unchanged after {edits} different edits: {}. A different approach may be needed.",
+                    "rein: this failure is unchanged after {edits} fix attempts (edit, then run): {}. A different approach may be needed.",
                     summaries[0]
                 )
             } else {
                 format!(
-                    "rein: {} failures are unchanged after {edits} different edits: {}. A different approach may be needed.",
+                    "rein: {} failures are unchanged after {edits} fix attempts (edit, then run): {}. A different approach may be needed.",
                     looped.len(),
                     summaries.join("; ")
                 )
             };
             let reason = format!(
-                "Failure signature(s) {} recurred after {edits} distinct edits.",
+                "Failure signature(s) {} recurred after {edits} fix attempts.",
                 signatures.join(", ")
             );
             let trigger = SteerTrigger::Loop {
@@ -1130,6 +1140,63 @@ mod tests {
         assert_eq!(c.session().shape_level(OutputKind::Test), DEFAULT_LEVEL - 1);
     }
 
+    /// R1.3: the agent varies the pipe and flags; it is still the same test run.
+    #[test]
+    fn loops_and_reruns_use_normalized_commands() {
+        let mut c = ctl(Mode::Optimize);
+        let variants = [
+            "pytest tests/test_api.py -v 2>&1 | tail -40",
+            "python -m pytest tests/test_api.py -x --tb=short",
+            "source .venv/bin/activate && pytest tests/test_api.py -vv | head -80",
+            "pytest -v tests/test_api.py 2>&1",
+        ];
+        let mut steered = false;
+        for (i, cmd) in variants.iter().enumerate() {
+            if i > 0 {
+                c.handle(edited("src/app.py", &format!("h{i}")), i as u64);
+            }
+            let d = c.handle(bash(cmd, PYTEST), i as u64);
+            steered |= d.entries.iter().any(|e| {
+                matches!(
+                    &e.body,
+                    Body::Action {
+                        action: ActionKind::Steer { .. },
+                        ..
+                    }
+                )
+            });
+        }
+        assert!(steered, "one loop across command variants");
+
+        // Asking for more of the same output right after a summary is a re-open.
+        let mut c = ctl(Mode::Optimize);
+        c.handle(bash("pytest -v | tail -20", PYTEST), 0);
+        c.handle(bash("pytest -v | tail -200", PYTEST), 1);
+        assert_eq!(c.session().shape_level(OutputKind::Test), DEFAULT_LEVEL - 1);
+    }
+
+    /// R1.3: Bash writes are fix attempts too.
+    #[test]
+    fn loops_count_bash_writes() {
+        let mut c = ctl(Mode::Optimize);
+        c.handle(bash("pytest tests/test_api.py -q", PYTEST), 0);
+        let mut steered = false;
+        for i in 1..=3u64 {
+            c.handle(bash(&format!("sed -i 's/{i}/x/' src/app.py"), ""), i);
+            let d = c.handle(bash("pytest tests/test_api.py -q | tail -30", PYTEST), i);
+            steered |= d.entries.iter().any(|e| {
+                matches!(
+                    &e.body,
+                    Body::Action {
+                        action: ActionKind::Steer { .. },
+                        ..
+                    }
+                )
+            });
+        }
+        assert!(steered);
+    }
+
     #[test]
     fn immediate_rerun_loosens_like_a_reopen() {
         let mut c = ctl(Mode::Optimize);
@@ -1170,7 +1237,7 @@ mod tests {
                 .response
                 .add_context
                 .iter()
-                .any(|t| t.contains("unchanged after 3"));
+                .any(|t| t.contains("unchanged after 3 fix attempts"));
             assert_eq!(steered, i == 3, "run after edit {i}");
             if i == 3 {
                 assert!(d.entries.iter().any(|e| matches!(

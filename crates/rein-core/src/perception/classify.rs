@@ -112,6 +112,105 @@ fn detect_runner(cmd: &str) -> Option<TestRunner> {
     runner_segment(cmd).map(|(runner, _)| runner)
 }
 
+/// A key for "the same test run": the runner and its test selection, without output
+/// options, pipes, redirections, or setup prefixes. Agents rarely repeat a command
+/// exactly (`| tail -20` becomes `| tail -50`), so loops and re-runs compare keys (R1.3).
+/// Commands without a test runner keep their text.
+pub fn command_key(cmd: &str) -> String {
+    let Some((_, seg)) = runner_segment(cmd) else {
+        return cmd.trim().to_string();
+    };
+    let words = shell::program_words(&seg);
+    let mut key: Vec<&str> = Vec::new();
+    let mut skip_next = false;
+    for (i, w) in words.iter().enumerate() {
+        let w = w.as_str();
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let name = if i == 0 { shell::program_name(w) } else { w };
+        // Redirections and output-only options.
+        let redirect = w.contains('>') || w.starts_with('<');
+        let noise = matches!(
+            w,
+            "-q" | "-qq"
+                | "-v"
+                | "-vv"
+                | "-vvv"
+                | "-s"
+                | "-x"
+                | "--quiet"
+                | "--verbose"
+                | "--no-header"
+                | "--nocapture"
+                | "--color"
+                | "--no-cov"
+                | "-rA"
+                | "--exitfirst"
+        ) || ["--tb=", "--color=", "-r", "--maxfail=", "--durations="]
+            .iter()
+            .any(|p| w.starts_with(p) && w.len() > p.len());
+        if w == "-p" {
+            skip_next = true; // `-p no:asyncio`
+            continue;
+        }
+        if !redirect && !noise {
+            key.push(name);
+        }
+    }
+    // A trailing `--` with nothing after it (cargo test -- --nocapture).
+    while key.last() == Some(&"--") {
+        key.pop();
+    }
+    key.join(" ")
+}
+
+/// The command (probably) writes files: `sed -i`, `perl -i`, `tee`, `cp`/`mv`/`rm`/
+/// `patch`/`git apply`/`git checkout --`, an output redirection to a file, or a here-doc
+/// script that writes (`open(...)`, `.write(`, `write_text`). Agents edit mostly through
+/// Bash, so loop detection counts these as edits (R1.3). A heuristic: it errs toward
+/// "writes".
+pub fn writes_files(cmd: &str) -> bool {
+    let line = shell::parse(cmd);
+    let segment_writes = line.segments.iter().any(|seg| {
+        let w = shell::program_words(seg);
+        let Some(first) = w.first() else {
+            return false;
+        };
+        let first = shell::program_name(first);
+        let has = |flag: &str| w.iter().skip(1).any(|x| x == flag || x.starts_with(flag));
+        // `>file`, `>> file`, `1>file`, `&>file`: a redirection to a real file.
+        let redirect = seg.iter().enumerate().any(|(k, x)| {
+            let t = x.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
+            if !t.starts_with('>') {
+                return false;
+            }
+            let rest = t.trim_start_matches('>');
+            let target = if rest.is_empty() {
+                seg.get(k + 1).map(String::as_str).unwrap_or("")
+            } else {
+                rest
+            };
+            !target.is_empty() && !target.starts_with('&') && !target.starts_with("/dev/")
+        });
+        redirect
+            || matches!(
+                first,
+                "tee" | "cp" | "mv" | "rm" | "patch" | "truncate" | "touch"
+            )
+            || (matches!(first, "sed" | "perl" | "ruby") && has("-i"))
+            || (first == "git"
+                && matches!(
+                    w.get(1).map(String::as_str),
+                    Some("apply" | "checkout" | "restore" | "stash")
+                ))
+    });
+    let script_writes = cmd.contains("<<")
+        && (cmd.contains("open(") || cmd.contains(".write(") || cmd.contains("write_text("));
+    segment_writes || script_writes
+}
+
 /// The first simple command that runs a test runner, and its words.
 pub fn runner_segment(cmd: &str) -> Option<(TestRunner, Vec<String>)> {
     shell::parse(cmd)
@@ -140,6 +239,56 @@ mod tests {
         assert_eq!(classify("git log --oneline -20").kind, OutputKind::Git);
         assert_eq!(classify("rg TODO src").kind, OutputKind::Search);
         assert_eq!(classify("echo hi").kind, OutputKind::Other);
+    }
+
+    #[test]
+    fn spots_bash_writes() {
+        for cmd in [
+            "sed -i 's/a/b/' src/app.py",
+            "cat > src/app.py <<'EOF'\nx = 1\nEOF",
+            "python3 - <<'EOF'\np='src/app.py'\ns=open(p).read()\nopen(p,'w').write(s)\nEOF",
+            "echo x >> notes.txt",
+            "git checkout -- src/app.py",
+            "printf 'a' | tee src/a.py",
+        ] {
+            assert!(writes_files(cmd), "{cmd}");
+        }
+        for cmd in [
+            "pytest -q 2>&1 | tail -20",
+            "grep -rn foo src > /dev/null",
+            "cat src/app.py",
+            "sed -n '1,20p' src/app.py",
+            "cargo test 2>&1 >&2",
+        ] {
+            assert!(!writes_files(cmd), "{cmd}");
+        }
+    }
+
+    /// R1.3: variants of one test run share a key; other targets do not.
+    #[test]
+    fn command_keys() {
+        let same = [
+            "pytest -q tests/test_api.py 2>&1 | tail -20",
+            "python -m pytest tests/test_api.py -x --tb=short",
+            "source .venv/bin/activate && pytest tests/test_api.py -v -p no:asyncio | grep FAIL",
+            "cd /app && CI=1 timeout 120 uv run pytest tests/test_api.py -vv",
+        ];
+        for cmd in same {
+            assert_eq!(command_key(cmd), "pytest tests/test_api.py", "{cmd}");
+        }
+        assert_ne!(
+            command_key("pytest tests/a.py"),
+            command_key("pytest tests/b.py")
+        );
+        assert_eq!(
+            command_key("pytest -k 'total and tax' -q"),
+            "pytest -k total and tax"
+        );
+        assert_eq!(
+            command_key("cargo test orders -- --nocapture"),
+            "cargo test orders"
+        );
+        assert_eq!(command_key("ls -la"), "ls -la");
     }
 
     /// R0.5 (D7): runners count only in command position.

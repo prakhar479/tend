@@ -1,7 +1,9 @@
 //! Loop detection.
 //!
 //! A loop is one of these:
-//! - The same failure signature after `threshold` or more distinct edits.
+//! - The same failure signature after `threshold` or more fix attempts. An attempt is
+//!   one or more edits followed by a run that still shows the failure. Edits made
+//!   between two runs count once, so a long stretch of unrelated work is one attempt.
 //! - A file returns to an earlier content hash (edit, revert, edit).
 //!
 //! Failures at the start of a session are normal: they count only after edits.
@@ -35,7 +37,10 @@ pub struct Observation {
 
 #[derive(Debug, Clone)]
 struct SigState {
-    first_edit: u64,
+    /// Edit count when this failure was last seen.
+    last_edit: u64,
+    /// Runs that still failed after at least one edit.
+    attempts: u64,
     first_ms: u64,
     steered: bool,
     command: String,
@@ -67,6 +72,12 @@ impl LoopDetector {
         self.edits
     }
 
+    /// An edit with no content hash (a Bash write). It counts toward fix attempts but
+    /// cannot show an edit cycle.
+    pub fn note_edit(&mut self) {
+        self.edits += 1;
+    }
+
     pub fn on_edit(&mut self, path: &str, hash: &str) -> Option<LoopSignal> {
         let hist = self.files.entry(path.to_string()).or_default();
         if hist.last().map(String::as_str) == Some(hash) {
@@ -94,7 +105,11 @@ impl LoopDetector {
         for f in failures {
             match self.sigs.get_mut(&f.signature) {
                 Some(st) => {
-                    let edits = self.edits - st.first_edit;
+                    if self.edits > st.last_edit {
+                        st.attempts += 1;
+                        st.last_edit = self.edits;
+                    }
+                    let edits = st.attempts;
                     let previous_message = Some(st.message.clone());
                     let signal = if edits >= self.threshold && !st.steered {
                         st.steered = true;
@@ -117,7 +132,8 @@ impl LoopDetector {
                     self.sigs.insert(
                         f.signature.clone(),
                         SigState {
-                            first_edit: self.edits,
+                            last_edit: self.edits,
+                            attempts: 0,
                             first_ms: now_ms,
                             steered: false,
                             command: command.to_string(),
@@ -167,6 +183,26 @@ mod tests {
             d.on_run("pytest", &f, 9_000)[0].signal.is_none(),
             "steer only once"
         );
+    }
+
+    /// Many edits between two runs are one attempt, not many.
+    #[test]
+    fn a_batch_of_edits_is_one_attempt() {
+        let mut d = LoopDetector::new(3);
+        let f = [fail("assert 500 == 200")];
+        d.on_run("pytest", &f, 0);
+        for i in 0..50 {
+            d.on_edit("src/other.py", &format!("h{i}"));
+        }
+        assert!(d.on_run("pytest", &f, 1)[0].signal.is_none(), "1 attempt");
+        d.on_edit("src/app.py", "a");
+        assert!(d.on_run("pytest", &f, 2)[0].signal.is_none(), "2 attempts");
+        assert!(
+            d.on_run("pytest", &f, 3)[0].signal.is_none(),
+            "a re-run without edit"
+        );
+        d.on_edit("src/app.py", "b");
+        assert!(d.on_run("pytest", &f, 4)[0].signal.is_some(), "3 attempts");
     }
 
     #[test]
