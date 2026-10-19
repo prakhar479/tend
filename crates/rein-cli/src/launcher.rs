@@ -65,7 +65,10 @@ pub fn run_claude(mode: Mode, args: Vec<String>) -> Result<i32> {
     if daemon_ok {
         let req = Request::Shutdown { token: Some(token) };
         let _ = ipc::send(&sock, &req, Duration::from_millis(500));
-        eprintln!("rein: session {id} ended · run `rein report` for details");
+        let summary = crate::store::read_entries(&dir)
+            .map(|e| format!(" · {}", crate::report::one_line(&e)))
+            .unwrap_or_default();
+        eprintln!("rein: session {id} ended{summary} · `rein report` for details");
     }
     Ok(status.code().unwrap_or(1))
 }

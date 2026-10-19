@@ -142,7 +142,8 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
 
 **R3. Platform and distribution**
 - [ ] **R3.1** Conformance tests per Claude Code version (`updatedInput` without a decision is undocumented).
-- [ ] **R3.2** `SessionEnd` hook: stop the daemon, print a one-line report.
+- [x] **R3.2** `SessionEnd` hook: stop the daemon, print a one-line report.
+  Done (launcher part): the closing line says what rein did, e.g. `rein: session … ended · 41 tool calls · shaped 3 outputs, saved 9.2k tokens · 1 guard flag · \`rein report\` for details`. The `SessionEnd` hook itself moves to R3.3: Claude Code shows its output to no one ("exit code 0 - command completes successfully"), and the launcher already stops the daemon. Only a plugin, with no launcher, needs it.
 - [ ] **R3.3** Spike: ship as a Claude Code plugin instead of the launcher.
 - [ ] **R3.4** Spike: `http` hooks instead of the shim process.
 - [ ] **R3.5** `rein status` for the Claude Code statusline.

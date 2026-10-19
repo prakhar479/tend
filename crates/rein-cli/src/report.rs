@@ -253,6 +253,56 @@ pub fn coverage(
     out
 }
 
+/// What rein did in a session, in one line: the launcher prints it at the end (R3.2).
+pub fn one_line(entries: &[Entry]) -> String {
+    let t = totals(entries);
+    let (mut tools, mut shaped, mut saved, mut applied) = (0u64, 0u64, 0u64, false);
+    for e in entries {
+        match &e.body {
+            Body::Event {
+                event: Event::ToolCompleted { .. },
+            } => tools += 1,
+            Body::Action {
+                action:
+                    ActionKind::Shape {
+                        from_tokens,
+                        to_tokens,
+                        ..
+                    },
+                applied: a,
+                unsupported: false,
+                ..
+            } => {
+                shaped += 1;
+                saved += from_tokens.saturating_sub(*to_tokens) as u64;
+                applied |= *a;
+            }
+            _ => {}
+        }
+    }
+    let plural = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut parts = vec![plural(tools, "tool call", "tool calls")];
+    if shaped > 0 {
+        let (verb, saving) = if applied {
+            ("shaped", "saved")
+        } else {
+            ("would shape", "saving")
+        };
+        parts.push(format!(
+            "{verb} {}, {saving} {} tokens",
+            plural(shaped, "output", "outputs"),
+            k(saved)
+        ));
+    }
+    if t.guard_flags > 0 {
+        parts.push(plural(t.guard_flags, "guard flag", "guard flags"));
+    }
+    if t.loops > 0 {
+        parts.push(plural(t.loops, "loop", "loops"));
+    }
+    parts.join(" · ")
+}
+
 /// How often the guard and the loop nudges were right, as far as the ledger shows (R2.3).
 /// `live`: from a session's ledger, where the user could allow a flag (not a retro).
 pub fn precision(t: &Totals, live: bool) -> String {
@@ -828,6 +878,25 @@ mod tests {
         assert!(
             p.contains("Loop nudges: 2 · failure stopped within 1 more run: 1 (50%)"),
             "{p}"
+        );
+    }
+
+    #[test]
+    fn one_line_says_what_rein_did() {
+        let saved = |applied| shape("a-1", 5_000, 400, applied, false);
+        let entries = [entry(0, saved(true)), entry(1, saved(true))];
+        assert_eq!(
+            one_line(&entries),
+            "0 tool calls · shaped 2 outputs, saved 9.2k tokens"
+        );
+        assert_eq!(
+            one_line(&[entry(0, saved(false))]),
+            "0 tool calls · would shape 1 output, saving 4.6k tokens"
+        );
+        // Output the agent cannot replace is not counted as shaped.
+        assert_eq!(
+            one_line(&[entry(0, shape("a-1", 5_000, 400, false, true))]),
+            "0 tool calls"
         );
     }
 
