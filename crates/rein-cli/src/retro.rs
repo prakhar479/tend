@@ -25,7 +25,7 @@ pub fn run(transcript: &Path) -> Result<String> {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    Ok(report::render(&label, &entries))
+    Ok(report::render(&label, &entries, false))
 }
 
 /// Ledger entries look mode would have written for this transcript.
@@ -226,6 +226,14 @@ pub fn run_all(root: &Path, top: usize) -> Result<String> {
             sum(|r| r.totals.bash_test_writes),
         )
     );
+    let all = report::Totals {
+        guard_flags: sum(|r| r.totals.guard_flags),
+        guard_allowed: sum(|r| r.totals.guard_allowed),
+        loops: sum(|r| r.totals.loops),
+        loops_stopped: sum(|r| r.totals.loops_stopped),
+        ..Default::default()
+    };
+    let _ = write!(out, "{}", report::precision(&all, false));
 
     // Ties break on the label, so the order is stable.
     rows.sort_by(|a, b| {

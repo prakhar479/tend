@@ -149,6 +149,12 @@ fn optimize_mode_shapes_and_guards() {
     assert!(fs::read_to_string(dir.join("allow-out.txt"))
         .unwrap()
         .contains("Allowed once"));
+    // R2.3: the flag the user lifted counts against the guard's precision.
+    let report = rein(&["report"], &session);
+    assert!(
+        report.contains("Guard precision: 1 flagged · 1 allowed by the user (100%"),
+        "{report}"
+    );
 
     let original: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(fixture("post_tool_use_bash.json")).unwrap())

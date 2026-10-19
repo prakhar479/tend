@@ -244,7 +244,7 @@ fn run(cli: Cli) -> Result<i32> {
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
-            print!("{}", report::render(&label, &entries));
+            print!("{}", report::render(&label, &entries, true));
             let flags = store::read_flags(&dir);
             println!("Flags: {}", flags.len());
             for f in &flags {

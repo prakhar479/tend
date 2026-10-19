@@ -128,10 +128,45 @@ pub struct Totals {
     pub bash_writes: u64,
     /// Bash writes that name a test file: the guard compares these before and after (R1.4).
     pub bash_test_writes: u64,
+    /// Test-guard flags (a retry the user allowed is not a new flag).
+    pub guard_flags: u64,
+    /// Flags the user lifted with `rein allow`: likely false positives (R2.3).
+    pub guard_allowed: u64,
+    /// Loop nudges after which the failure recurred at most once more (R2.3).
+    pub loops_stopped: u64,
 }
+
+/// A loop nudge counts as followed when its failures recur at most this often after it.
+const STOPPED_WITHIN_RUNS: usize = 1;
 
 pub fn totals(entries: &[Entry]) -> Totals {
     let mut t = Totals::default();
+    let overrides: HashSet<u64> = entries
+        .iter()
+        .filter(|e| matches!(e.body, Body::Override { .. }))
+        .map(|e| e.seq)
+        .collect();
+    t.guard_allowed = overrides.len() as u64;
+    for (i, e) in entries.iter().enumerate() {
+        if let Body::Action {
+            action:
+                ActionKind::Steer {
+                    trigger: SteerTrigger::Loop { signatures, .. },
+                    ..
+                },
+            ..
+        } = &e.body
+        {
+            let again = entries[i + 1..]
+                .iter()
+                .filter(|later| {
+                    matches!(&later.body, Body::Judgment { question, subject, .. }
+                        if question == "same_failure" && signatures.contains(subject))
+                })
+                .count();
+            t.loops_stopped += u64::from(again <= STOPPED_WITHIN_RUNS);
+        }
+    }
     for e in entries {
         match &e.body {
             Body::Output {
@@ -169,6 +204,10 @@ pub fn totals(entries: &[Entry]) -> Totals {
                 reason,
                 ..
             } if !reason.starts_with("Not wrapped") => t.wrapped += 1,
+            Body::Action {
+                action: ActionKind::Guard { .. },
+                ..
+            } if !e.causes.iter().any(|c| overrides.contains(c)) => t.guard_flags += 1,
             Body::Event {
                 event: Event::FileEdited { .. },
             } => t.tool_edits += 1,
@@ -214,6 +253,37 @@ pub fn coverage(
     out
 }
 
+/// How often the guard and the loop nudges were right, as far as the ledger shows (R2.3).
+/// `live`: from a session's ledger, where the user could allow a flag (not a retro).
+pub fn precision(t: &Totals, live: bool) -> String {
+    let mut out = String::new();
+    if t.guard_flags > 0 && !live {
+        let _ = writeln!(
+            out,
+            "Guard flags: {} (a retro cannot tell which ones the user would allow)",
+            t.guard_flags
+        );
+    } else if t.guard_flags > 0 {
+        let _ = writeln!(
+            out,
+            "Guard precision: {} flagged · {} allowed by the user ({}%, likely false positives)",
+            t.guard_flags,
+            t.guard_allowed,
+            pct(t.guard_allowed, t.guard_flags)
+        );
+    }
+    if t.loops > 0 {
+        let _ = writeln!(
+            out,
+            "Loop nudges: {} · failure stopped within {STOPPED_WITHIN_RUNS} more run: {} ({}%)",
+            t.loops,
+            t.loops_stopped,
+            pct(t.loops_stopped, t.loops)
+        );
+    }
+    out
+}
+
 /// "view 51% · search 18% · test 8%": shares of Bash output by kind, largest first.
 pub fn kind_shares(by_kind: &BTreeMap<OutputKind, u64>) -> String {
     let total: u64 = by_kind.values().sum();
@@ -225,7 +295,8 @@ pub fn kind_shares(by_kind: &BTreeMap<OutputKind, u64>) -> String {
         .join(" · ")
 }
 
-pub fn render(label: &str, entries: &[Entry]) -> String {
+/// `live`: a session ledger (not a retro), where the user could act on flags.
+pub fn render(label: &str, entries: &[Entry], live: bool) -> String {
     let mut agent = String::from("?");
     let mut mode = String::from("?");
     let mut transcript: Option<String> = None;
@@ -436,6 +507,7 @@ pub fn render(label: &str, entries: &[Entry]) -> String {
             t.bash_test_writes
         )
     );
+    let _ = write!(out, "{}", precision(&t, live));
     let _ = writeln!(out, "Re-opens: {reopens}");
     let loop_title = if t.loop_ms > 0 {
         format!("Loops ({} in loops)", minutes(t.loop_ms))
@@ -617,7 +689,7 @@ mod tests {
             entry(3, shape("a-2", 5000, 1000, false, true)),
             entry(4, output("o-3", 1000)),
         ];
-        let r = render("t", &entries);
+        let r = render("t", &entries, true);
         assert!(
             r.contains("Bash output: 10.0k tokens (est.) · noise 70% (est.)"),
             "{r}"
@@ -652,6 +724,7 @@ mod tests {
                 ),
                 allowed,
             ],
+            true,
         );
         assert!(r.contains("[deny] reason a-1"), "{r}");
         assert!(r.contains("[user allowed] a-1 once"), "{r}");
@@ -678,14 +751,80 @@ mod tests {
         };
         let mut old = chain(0, true);
         old.extend(chain(3, false));
-        let r = render("t", &old);
+        let r = render("t", &old, true);
         assert!(r.contains("Shaping: 1 outputs"), "{r}");
         assert!(r.contains("Not shapeable: 1 outputs"), "{r}");
 
         // A versioned ledger is trusted as written.
         let mut new = vec![entry(100, Body::Format { version: 1 })];
         new.extend(chain(0, true));
-        assert!(render("t", &new).contains("Shaping: 1 outputs"));
+        assert!(render("t", &new, true).contains("Shaping: 1 outputs"));
+    }
+
+    /// R2.3: guard flags the user allowed, and loops whose failure stopped after the nudge.
+    #[test]
+    fn precision_counts_allowed_flags_and_stopped_loops() {
+        let guard = |id: &str| Body::Action {
+            id: id.into(),
+            action: ActionKind::Guard {
+                path: "tests/test_a.py".into(),
+                decision: rein_core::guard::GuardDecision::Deny,
+            },
+            reason: "r".into(),
+            applied: true,
+            unsupported: false,
+        };
+        let steer = |sig: &str| Body::Action {
+            id: "a-9".into(),
+            action: ActionKind::Steer {
+                trigger: SteerTrigger::Loop {
+                    signatures: vec![sig.into()],
+                    duration_ms: None,
+                },
+                text: "rein: stuck".into(),
+            },
+            reason: "r".into(),
+            applied: true,
+            unsupported: false,
+        };
+        let again = |sig: &str| Body::Judgment {
+            question: "same_failure".into(),
+            version: 1,
+            subject: sig.into(),
+            answer: rein_core::broker::Answer::Same,
+            source: rein_core::broker::Source::Rule,
+        };
+        let mut retry = entry(4, guard("a-3"));
+        retry.causes = vec![3];
+        let entries = [
+            entry(0, guard("a-1")),
+            entry(1, guard("a-2")),
+            entry(2, guard("a-2b")),
+            entry(
+                3,
+                Body::Override {
+                    action: "a-2".into(),
+                },
+            ),
+            retry,
+            entry(5, steer("s1")),
+            entry(6, again("s1")),
+            entry(7, steer("s2")),
+            entry(8, again("s2")),
+            entry(9, again("s2")),
+        ];
+        let t = totals(&entries);
+        assert_eq!((t.guard_flags, t.guard_allowed), (3, 1));
+        assert_eq!((t.loops, t.loops_stopped), (2, 1));
+        let p = precision(&t, true);
+        assert!(
+            p.contains("Guard precision: 3 flagged · 1 allowed by the user (33%"),
+            "{p}"
+        );
+        assert!(
+            p.contains("Loop nudges: 2 · failure stopped within 1 more run: 1 (50%)"),
+            "{p}"
+        );
     }
 
     #[test]
@@ -713,6 +852,7 @@ mod tests {
         let r = render(
             "t",
             &[entry(0, steer(Some(22 * 60_000))), entry(1, steer(None))],
+            true,
         );
         assert!(r.contains("Loops (22 min in loops): 2"), "{r}");
         assert!(r.contains("[would steer] after 22 min: rein: stuck"), "{r}");
