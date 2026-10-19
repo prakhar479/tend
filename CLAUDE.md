@@ -70,6 +70,7 @@ cargo run -- retro --all            # every transcript in ~/.claude/projects
 cargo build && ./target/debug/rein claude      # live, look mode
 REIN_CAPTURE=1 ./target/debug/rein claude          # also keep raw hook payloads
 jq . ~/.local/share/rein/sessions/<id>/hooks.jsonl   # raw payloads (with REIN_CAPTURE=1)
+scripts/capture_fixtures.py hooks <hooks.jsonl> --event PostToolUse --match pytest --out fixtures/claude_code/x.json
 ```
 
 ## How to work

@@ -14,5 +14,5 @@
 Rules:
 
 - Every parser change needs a fixture here and a test.
-- Captured payloads come from `<session>/hooks.jsonl`. Remove secrets and personal paths before you commit them.
+- Captured payloads come from `<session>/hooks.jsonl` (run the session with `REIN_CAPTURE=1`). Make fixtures with `scripts/capture_fixtures.py`; it removes personal paths and ids and refuses output that still has `$HOME` or `$USER`. Read the result before you commit it.
 - In captures, paths are `/home/dev/shop`, the session id is `9b1d6f2e-0000-4000-8000-000000000001`, and tool-use ids are `toolu_0N`.
