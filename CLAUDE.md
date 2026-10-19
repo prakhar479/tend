@@ -68,7 +68,8 @@ make e2e                            # end-to-end with fake agent
 cargo run -- retro fixtures/transcripts/loop_session.jsonl
 cargo run -- retro --all            # every transcript in ~/.claude/projects
 cargo build && ./target/debug/rein claude      # live, look mode
-jq . ~/.local/share/rein/sessions/<id>/hooks.jsonl   # raw payloads
+REIN_CAPTURE=1 ./target/debug/rein claude          # also keep raw hook payloads
+jq . ~/.local/share/rein/sessions/<id>/hooks.jsonl   # raw payloads (with REIN_CAPTURE=1)
 ```
 
 ## How to work

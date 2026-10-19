@@ -3,14 +3,18 @@
 //! Layout: <home>/sessions/<id>/
 //!   ledger.jsonl        append-only ledger
 //!   blobs/<sha256>      original outputs and edit texts
-//!   hooks.jsonl         raw hook payloads (set REIN_CAPTURE=0 to disable)
-//!   claude-settings.json, daemon.log, reind.sock (in the temp dir if the path is long)
+//!   hooks.jsonl         raw hook payloads, only with REIN_CAPTURE=1 (they hold code)
+//!   claude-settings.json, daemon.log, reind.sock (in <tmp>/rein-<uid>/ if the path is long)
+//!
+//! Directories are private (0700): sessions hold code, outputs, and a control socket.
 
 use std::env;
+use std::fs;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rein_core::text::sha256_hex;
 
 pub fn home() -> PathBuf {
@@ -52,7 +56,33 @@ pub fn socket_path(dir: &Path) -> PathBuf {
         return p;
     }
     let hash = sha256_hex(&dir.to_string_lossy());
-    env::temp_dir().join(format!("rein-{}.sock", &hash[..16]))
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    env::temp_dir()
+        .join(format!("rein-{uid}"))
+        .join(format!("{}.sock", &hash[..16]))
+}
+
+/// Create `dir` (and missing parents) as 0700. An existing dir must belong to us;
+/// a shared temp dir could hold one that another user made.
+pub fn ensure_private_dir(dir: &Path) -> Result<()> {
+    if !dir.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("create {}", dir.display()))?;
+    }
+    let meta = fs::metadata(dir).with_context(|| format!("stat {}", dir.display()))?;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    if meta.uid() != unsafe { libc::getuid() } {
+        bail!("{} belongs to another user", dir.display());
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("make {} private", dir.display()))?;
+    }
+    Ok(())
 }
 
 /// Sortable session id: zero-padded unix seconds plus pid.
@@ -113,5 +143,24 @@ mod tests {
             sock.display()
         );
         assert_eq!(sock, socket_path(&long), "same path both sides");
+        let uid = unsafe { libc::getuid() };
+        assert!(sock.parent().unwrap().ends_with(format!("rein-{uid}")));
+    }
+
+    #[test]
+    fn private_dirs() {
+        let base = env::temp_dir().join(format!("rein-private-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let d = base.join("a/b");
+        ensure_private_dir(&d).unwrap();
+        assert_eq!(
+            fs::metadata(&d).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_private_dir(&d).unwrap();
+        let mode = fs::metadata(&d).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "tightened");
+        let _ = fs::remove_dir_all(&base);
     }
 }

@@ -28,9 +28,8 @@ fn append_file(path: &Path) -> Result<File> {
 impl Store {
     pub fn open(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir.join("blobs"))?;
-        let capture = std::env::var("REIN_CAPTURE")
-            .map(|v| v != "0")
-            .unwrap_or(true);
+        // Raw payloads hold code and file contents. Keep them only when asked.
+        let capture = std::env::var("REIN_CAPTURE").is_ok_and(|v| v == "1");
         Ok(Self {
             dir: dir.to_path_buf(),
             ledger: append_file(&dir.join("ledger.jsonl"))?,

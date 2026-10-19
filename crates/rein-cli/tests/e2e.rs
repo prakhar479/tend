@@ -178,6 +178,7 @@ fn concurrent_hooks_keep_the_ledger_ordered_and_whole() {
         .args(["daemon", "--session-dir"])
         .arg(&session)
         .args(["--mode", "optimize"])
+        .env("REIN_CAPTURE", "1")
         .stderr(Stdio::null())
         .spawn()
         .unwrap();

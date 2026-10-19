@@ -25,6 +25,11 @@ struct State {
 
 pub fn run(dir: PathBuf, parent_pid: Option<i32>, mode: Mode, agent: &str) -> Result<()> {
     let sock = socket_path(&dir);
+    // The socket accepts hook events and `rein allow`: keep it in a private dir.
+    crate::paths::ensure_private_dir(&dir)?;
+    if let Some(parent) = sock.parent() {
+        crate::paths::ensure_private_dir(parent)?;
+    }
     let _ = fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
     let connector = connector::for_agent(agent)?;

@@ -41,5 +41,5 @@ Session data: `~/.local/share/rein/sessions/<id>/` (override with `REIN_HOME`).
 | `REIN_HOME` | Data directory |
 | `REIN_CLAUDE_BIN` | Agent binary (default `claude`) |
 | `REIN_HOOK_TIMEOUT_MS` | Shim timeout (default 250) |
-| `REIN_CAPTURE=0` | Do not write raw hook payloads to `hooks.jsonl` |
+| `REIN_CAPTURE=1` | Also write raw hook payloads to `hooks.jsonl` (they contain code; off by default) |
 | `REIN_CONFIG` | Config file (default `~/.config/rein/config.toml`) |

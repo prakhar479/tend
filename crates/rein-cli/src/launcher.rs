@@ -23,7 +23,8 @@ pub fn run_claude(mode: Mode, args: Vec<String>) -> Result<i32> {
     let _ = crate::sessions::remove_stale_sockets(&paths::sessions_dir());
     let id = paths::new_session_id();
     let dir = paths::sessions_dir().join(&id);
-    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    paths::ensure_private_dir(&paths::home())?;
+    paths::ensure_private_dir(&dir)?;
     let settings_path = dir.join("claude-settings.json");
     fs::write(
         &settings_path,
