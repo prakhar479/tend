@@ -143,9 +143,20 @@ pub struct Controller {
     wrapped: BTreeMap<String, Wrapped>,
     /// The last summary the agent saw, to spot an immediate re-run of its command.
     last_summary: Option<LastSummary>,
+    /// Set by `observe` in deferred mode; `filter` moves it into the wrapped call.
+    deferred: Option<PendingShape>,
     /// Active clock for loop time: wall time with idle gaps capped.
     last_ms: Option<u64>,
     active_ms: u64,
+}
+
+/// Whether `observe` may put a summary in place.
+#[derive(Debug, Clone, Copy)]
+enum Replace {
+    /// Decide now; the bool is whether the agent supports replacing this output.
+    Now(bool),
+    /// `rein run` prints it; record it once the tool result shows what the agent saw.
+    Deferred,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +176,21 @@ struct Wrapped {
     action_seq: u64,
     /// `rein run` reported the output.
     filtered: bool,
+    /// A summary `rein run` was told to print. It is recorded once the tool result
+    /// shows what the agent really saw (R0.2).
+    pending: Option<PendingShape>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingShape {
+    action: ActionKind,
+    reason: String,
+    text: String,
+    kind: OutputKind,
+    /// Seq of the output entry.
+    out: u64,
+    command: String,
+    output_id: String,
 }
 
 impl Controller {
@@ -184,6 +210,7 @@ impl Controller {
             allowed: BTreeMap::new(),
             wrapped: BTreeMap::new(),
             last_summary: None,
+            deferred: None,
             last_ms: None,
             active_ms: 0,
         }
@@ -275,6 +302,10 @@ impl Controller {
                 }
             }
             Event::ToolRequested { .. } => self.on_tool_requested(&mut d, event, now_ms),
+            Event::TurnEnded => {
+                let ev = self.push(&mut d, now_ms, vec![], Body::Event { event });
+                self.end_turn(&mut d, now_ms, ev);
+            }
             other => {
                 self.push(&mut d, now_ms, vec![], Body::Event { event: other });
             }
@@ -306,10 +337,8 @@ impl Controller {
             .unwrap_or(command);
         let info = classify(&command);
         let hash = sha256_hex(&output);
-        let filtered = self
-            .wrapped
-            .remove(&tool_use_id)
-            .is_some_and(|w| w.filtered);
+        let wrapped = self.wrapped.remove(&tool_use_id);
+        let filtered = wrapped.as_ref().is_some_and(|w| w.filtered);
         let stored = Event::ToolCompleted {
             tool_use_id,
             tool,
@@ -319,7 +348,10 @@ impl Controller {
         };
         let ev = self.push(d, now, vec![], Body::Event { event: stored });
         if filtered {
-            // `rein run` already recorded the full output; this is the summary the agent saw.
+            // `rein run` already recorded the full output; this is what the agent saw.
+            if let Some(p) = wrapped.and_then(|w| w.pending) {
+                self.confirm_shape(d, now, ev, p, &output);
+            }
             d.blobs.push(Blob {
                 hash,
                 content: output,
@@ -342,7 +374,8 @@ impl Controller {
         } else {
             self.caps.replace_output
         };
-        if let Some(text) = self.observe(d, now, ev, &command, info.kind, output, hash, supported) {
+        let mode = Replace::Now(supported);
+        if let Some(text) = self.observe(d, now, ev, &command, info.kind, output, hash, mode) {
             d.response.replace_output = Some(text);
         }
     }
@@ -359,7 +392,7 @@ impl Controller {
         kind: OutputKind,
         output: String,
         hash: String,
-        can_replace: bool,
+        can_replace: Replace,
     ) -> Option<String> {
         // Re-running the same command right after a summary, with no edit in between,
         // means the summary hid something the agent wanted: treat it as a re-open.
@@ -475,9 +508,38 @@ impl Controller {
             from_lines: s.from_lines,
             to_lines: s.to_lines,
         };
-        if !self.act_if(d, now, out, action, reason, can_replace) {
+        let supported = match can_replace {
+            Replace::Now(s) => s,
+            Replace::Deferred => {
+                self.deferred = Some(PendingShape {
+                    action,
+                    reason,
+                    text: text.clone(),
+                    kind,
+                    out,
+                    command: command.to_string(),
+                    output_id,
+                });
+                return Some(text);
+            }
+        };
+        if !self.act_if(d, now, out, action, reason, supported) {
             return None;
         }
+        self.shown(d, now, out, command, output_id, kind);
+        Some(text)
+    }
+
+    /// A summary reached the agent: adapt, and remember it for the re-run signal.
+    fn shown(
+        &mut self,
+        d: &mut Decision,
+        now: u64,
+        out: u64,
+        command: &str,
+        output_id: String,
+        kind: OutputKind,
+    ) {
         if let Some(change) = self.session.on_shaped(kind) {
             self.adapt(d, now, out, change);
         }
@@ -487,7 +549,46 @@ impl Controller {
             kind,
             edits: self.loops.edits(),
         });
-        Some(text)
+    }
+
+    /// Record a deferred shape against the tool result the agent saw. If `rein run`
+    /// printed the original (the daemon answered too late), the summary was not applied.
+    fn confirm_shape(&mut self, d: &mut Decision, now: u64, ev: u64, p: PendingShape, seen: &str) {
+        if seen.trim_end().ends_with(p.text.trim_end()) {
+            self.record(d, now, vec![p.out, ev], p.action, p.reason, true, false);
+            self.shown(d, now, p.out, &p.command, p.output_id, p.kind);
+        } else {
+            let reason =
+                "rein run printed the original output, so the agent did not see this summary.";
+            self.record(
+                d,
+                now,
+                vec![p.out, ev],
+                p.action,
+                reason.into(),
+                false,
+                false,
+            );
+        }
+    }
+
+    /// A turn ended. A wrapped call with no tool result was stopped: its summary was not
+    /// seen. Drop every wrapped entry, so the map cannot grow (R0.7).
+    fn end_turn(&mut self, d: &mut Decision, now: u64, ev: u64) {
+        for (_, w) in std::mem::take(&mut self.wrapped) {
+            if let Some(p) = w.pending {
+                let reason = "No tool result arrived (the call was stopped), so the agent did not see this summary.";
+                self.record(
+                    d,
+                    now,
+                    vec![p.out, ev],
+                    p.action,
+                    reason.into(),
+                    false,
+                    false,
+                );
+            }
+        }
     }
 
     /// `rein run` ran a wrapped command and asks for the text to print.
@@ -510,7 +611,19 @@ impl Controller {
         let (command, cause) = (w.command.clone(), w.action_seq);
         let kind = classify(&command).kind;
         let hash = sha256_hex(&output);
-        let text = self.observe(&mut d, now_ms, cause, &command, kind, output, hash, true);
+        let text = self.observe(
+            &mut d,
+            now_ms,
+            cause,
+            &command,
+            kind,
+            output,
+            hash,
+            Replace::Deferred,
+        );
+        if let Some(w) = self.wrapped.get_mut(tool_use_id) {
+            w.pending = self.deferred.take();
+        }
         (d, text)
     }
 
@@ -587,6 +700,7 @@ impl Controller {
                     command,
                     action_seq: seq,
                     filtered: false,
+                    pending: None,
                 },
             );
         }
@@ -767,20 +881,35 @@ impl Controller {
         supported: bool,
     ) -> bool {
         let applied = self.session.mode == Mode::Optimize && supported;
+        self.record(d, now, vec![cause], action, reason, applied, !supported);
+        applied
+    }
+
+    /// Push an action entry. Returns its seq.
+    #[allow(clippy::too_many_arguments)]
+    fn record(
+        &mut self,
+        d: &mut Decision,
+        now: u64,
+        causes: Vec<u64>,
+        action: ActionKind,
+        reason: String,
+        applied: bool,
+        unsupported: bool,
+    ) -> u64 {
         let id = self.next_action_id();
         self.push(
             d,
             now,
-            vec![cause],
+            causes,
             Body::Action {
                 id,
                 action,
                 reason,
                 applied,
-                unsupported: !supported,
+                unsupported,
             },
-        );
-        applied
+        )
     }
 
     fn steer(
@@ -1063,6 +1192,29 @@ mod tests {
         let text = text.expect("summary");
         assert!(text.contains("rein show o-1"));
         assert!(text.contains("FAILED tests/test_api.py::test_get_order"));
+        assert!(
+            !d.entries.iter().any(|e| matches!(
+                e.body,
+                Body::Action {
+                    action: ActionKind::Shape { .. },
+                    ..
+                }
+            )),
+            "not recorded until the agent's view is known"
+        );
+        assert_eq!(c.filter("t1", PYTEST.into(), 1).1, None, "only once");
+
+        // The hook sees the wrapper and the summary: record the shape, do not re-shape.
+        let seen = format!("Exit code 1\n{text}");
+        let d = c.handle(
+            failed_bash("t1", "rein run --id t1 --sh 'pytest -v'", &seen),
+            2,
+        );
+        assert!(d.response.is_empty());
+        assert!(!d
+            .entries
+            .iter()
+            .any(|e| matches!(e.body, Body::Output { .. })));
         assert!(d.entries.iter().any(|e| matches!(
             &e.body,
             Body::Action {
@@ -1071,19 +1223,55 @@ mod tests {
                 ..
             }
         )));
-        assert_eq!(c.filter("t1", PYTEST.into(), 1).1, None, "only once");
+        assert_eq!(d.blobs.len(), 1, "the summary the agent saw is stored");
+    }
 
-        // The hook then sees the wrapper and the summary: record it, do not re-shape.
+    /// R0.2 (D3): the daemon answered too late, so rein run printed the original.
+    #[test]
+    fn late_filter_reply_is_recorded_as_not_applied() {
+        let mut c = ctl(Mode::Optimize);
+        c.handle(requested("t1", "pytest -v", true), 0);
+        c.filter("t1", PYTEST.into(), 1).1.expect("summary");
+        let seen = format!("Exit code 1\n{PYTEST}");
         let d = c.handle(
-            failed_bash("t1", "rein run --id t1 --sh 'pytest -v'", &text),
+            failed_bash("t1", "rein run --id t1 --sh 'pytest -v'", &seen),
             2,
         );
-        assert!(d.response.is_empty());
+        assert!(d.entries.iter().any(|e| matches!(
+            &e.body,
+            Body::Action { applied: false, action: ActionKind::Shape { .. }, reason, .. }
+                if reason.contains("printed the original")
+        )));
+        // No summary was seen, so running it again is not a re-open.
+        c.handle(requested("t2", "pytest -v", true), 3);
+        let (d, _) = c.filter("t2", PYTEST.into(), 4);
         assert!(!d
             .entries
             .iter()
-            .any(|e| matches!(e.body, Body::Output { .. })));
-        assert_eq!(d.blobs.len(), 1, "the summary the agent saw is stored");
+            .any(|e| matches!(e.body, Body::Adaptation { .. })));
+    }
+
+    /// R0.2/R0.7: a stopped call never gets a tool result; the turn end settles it.
+    #[test]
+    fn stopped_wrapped_call_is_settled_at_turn_end() {
+        let mut c = ctl(Mode::Optimize);
+        c.handle(requested("t1", "pytest -v", true), 0);
+        c.filter("t1", PYTEST.into(), 1);
+        c.handle(requested("t2", "pytest -q", true), 2);
+        let d = c.handle(Event::TurnEnded, 3);
+        let settled = d
+            .entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    &e.body,
+                    Body::Action { applied: false, action: ActionKind::Shape { .. }, reason, .. }
+                        if reason.contains("No tool result arrived")
+                )
+            })
+            .count();
+        assert_eq!(settled, 1, "only the call that had a summary");
+        assert_eq!(c.filter("t2", PYTEST.into(), 4).1, None, "entries dropped");
     }
 
     #[test]
