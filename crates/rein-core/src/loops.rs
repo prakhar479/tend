@@ -16,7 +16,7 @@ pub enum LoopSignal {
         signature: String,
         summary: String,
         edits: u64,
-        /// When this failure was first seen (ms).
+        /// When this failure was first seen (ms on the caller's clock).
         first_ms: u64,
     },
     Cycle {

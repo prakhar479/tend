@@ -7,6 +7,7 @@
 //! max_summary_ratio = 0.7
 //! loop_threshold = 3
 //! tighten_after = 5
+//! idle_gap_minutes = 10
 //! ```
 
 use std::env;
@@ -82,6 +83,7 @@ fn parse(text: &str) -> Result<Config> {
                     bail!("tighten_after must be at least 1");
                 }
             }
+            "idle_gap_minutes" => c.idle_gap_minutes = value.parse().map_err(|e| bad(&e))?,
             other => bail!("line {}: unknown key `{other}`", n + 1),
         }
     }

@@ -75,12 +75,15 @@ Consolidated 2026-10-19 from the Phase 0/1 results. Owner decisions are marked *
 - [x] **N3. Failed-run shaping (D4) [Decided: build].** PreToolUse rewrites a test command to `rein run --id <id> --sh '<cmd>'`. `rein run` keeps the exit code, asks the daemon for a summary, and fails open to the original bytes.
   Spike (2026-10-19): `updatedInput` applies without a `permissionDecision`, and Claude Code checks permissions on the **rewritten** command (a compound rewrite was refused as "multiple operations"; `permissionDecision: "allow"` skips the check, so rein never sends it). Auto mode ran the single-command rewrite without a prompt; default mode prompted with the rewritten text. So rein wraps only in `auto` and `bypassPermissions` modes, never background calls, never commands that change shell state (`cd`, `export`, `source`, …). Live: a failing pytest run went from 324 to 54 lines; the agent named the failing test and kept exit code 1.
 - [x] **N4. Git.** Repo under git; baseline commit, work on branch `next-steps`.
-- [ ] **N5. CI.** Run `make check` on push.
+- [x] **N5. CI.** Run `make check` on push.
+  Note: `.github/workflows/ci.yml` (Linux and macOS). Not run yet: the repo has no remote.
 - [x] **N6. Private sockets and session dirs.** 0700 session dirs; the `/tmp` fallback socket in a private directory.
   Note: data, session, and `<tmp>/rein-<uid>/` dirs are 0700; an existing dir owned by another user is refused (the launcher then fails open).
 - [x] **N7. Raw capture off by default.** `hooks.jsonl` only with `REIN_CAPTURE=1`.
-- [ ] **N8. Old ledgers.** Report infers "not shapeable" for failed runs in ledgers written before the `unsupported` flag.
-- [ ] **N9. Active loop time.** Leave out idle gaps (default: gaps over 10 min) from loop time.
+- [x] **N8. Old ledgers.** Report infers "not shapeable" for failed runs in ledgers written before the `unsupported` flag.
+  Note: applies only to ledgers without a `format` entry; it follows action → output → event.
+- [x] **N9. Active loop time.** Leave out idle gaps (default: gaps over 10 min) from loop time.
+  Note: config `idle_gap_minutes`. Retro over 35 real transcripts: loop time 4937 → 663 min (one session 3912 → 72 min).
 - [ ] **N10. More re-open signals.** Reading a persisted-output file or re-running the same command right after a summary counts as a re-open.
 - [ ] **N11. Retro and live agree.** Same tool-call counting in retro and live reports.
 - [ ] **N12. Capture script.** `scripts/capture-fixtures` turns a session's `hooks.jsonl` into sanitized fixtures.

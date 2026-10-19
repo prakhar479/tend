@@ -117,7 +117,8 @@ pub enum SteerTrigger {
     /// One steer covers every failure that reached the threshold in the same run.
     Loop {
         signatures: Vec<String>,
-        /// First occurrence of the oldest failure to the steer. None in older ledgers.
+        /// First occurrence of the oldest failure to the steer, idle gaps capped
+        /// (`idle_gap_minutes`). None in older ledgers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
     },

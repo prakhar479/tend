@@ -168,6 +168,28 @@ pub fn render(label: &str, entries: &[Entry]) -> String {
         .filter(|e| matches!(e.body, Body::Override { .. }))
         .map(|e| e.seq)
         .collect();
+    // Ledgers from before the `unsupported` flag (no `format` entry) recorded shapes of
+    // failed runs as supported. Claude Code cannot replace those (S2): infer it.
+    let versioned = entries
+        .iter()
+        .any(|e| matches!(e.body, Body::Format { .. }));
+    let by_seq: HashMap<u64, &Entry> = entries.iter().map(|e| (e.seq, e)).collect();
+    let legacy_failed = |e: &Entry| {
+        !versioned
+            && e.causes
+                .first()
+                .and_then(|o| by_seq.get(o))
+                .and_then(|o| o.causes.first())
+                .and_then(|ev| by_seq.get(ev))
+                .is_some_and(|ev| {
+                    matches!(
+                        &ev.body,
+                        Body::Event {
+                            event: Event::ToolCompleted { failed: true, .. }
+                        }
+                    )
+                })
+    };
     for e in entries {
         match &e.body {
             Body::Event { event } => match event {
@@ -205,7 +227,7 @@ pub fn render(label: &str, entries: &[Entry]) -> String {
                 unsupported,
                 ..
             } => match action {
-                ActionKind::Shape { .. } if *unsupported => unshapeable += 1,
+                ActionKind::Shape { .. } if *unsupported || legacy_failed(e) => unshapeable += 1,
                 ActionKind::Shape {
                     from_tokens,
                     to_tokens,
@@ -540,6 +562,36 @@ mod tests {
         assert!(r.contains("[deny] reason a-1"), "{r}");
         assert!(r.contains("[user allowed] a-1 once"), "{r}");
         assert!(r.contains("[allowed] reason a-2"), "{r}");
+    }
+
+    #[test]
+    fn old_ledgers_infer_unshapeable_failed_runs() {
+        let completed = |failed| Body::Event {
+            event: Event::ToolCompleted {
+                tool_use_id: "t".into(),
+                tool: "Bash".into(),
+                input: serde_json::json!({ "command": "pytest" }),
+                output: "<blob:h>".into(),
+                failed,
+            },
+        };
+        let chain = |base: u64, failed: bool| {
+            let mut o = entry(base + 1, output("o", 4000));
+            o.causes = vec![base];
+            let mut a = entry(base + 2, shape("a", 4000, 1000, true, false));
+            a.causes = vec![base + 1];
+            vec![entry(base, completed(failed)), o, a]
+        };
+        let mut old = chain(0, true);
+        old.extend(chain(3, false));
+        let r = render("t", &old);
+        assert!(r.contains("Shaping: 1 outputs"), "{r}");
+        assert!(r.contains("Not shapeable: 1 outputs"), "{r}");
+
+        // A versioned ledger is trusted as written.
+        let mut new = vec![entry(100, Body::Format { version: 1 })];
+        new.extend(chain(0, true));
+        assert!(render("t", &new).contains("Shaping: 1 outputs"));
     }
 
     #[test]

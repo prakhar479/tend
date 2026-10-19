@@ -31,6 +31,8 @@ pub struct Config {
     pub loop_threshold: u64,
     /// Summaries without a re-open before the controller tightens a kind.
     pub tighten_after: u32,
+    /// Loop time counts at most this much of any gap between events (idle time).
+    pub idle_gap_minutes: u64,
 }
 
 impl Default for Config {
@@ -40,6 +42,7 @@ impl Default for Config {
             max_summary_ratio: 0.7,
             loop_threshold: 3,
             tighten_after: 5,
+            idle_gap_minutes: 10,
         }
     }
 }
@@ -48,6 +51,7 @@ impl Config {
     /// Every knob as `name → value`, in a stable order.
     pub fn fields(&self) -> BTreeMap<String, String> {
         [
+            ("idle_gap_minutes", self.idle_gap_minutes.to_string()),
             ("loop_threshold", self.loop_threshold.to_string()),
             ("max_summary_ratio", self.max_summary_ratio.to_string()),
             (
@@ -137,6 +141,9 @@ pub struct Controller {
     allowed: BTreeMap<EditKey, (String, u64)>,
     /// Bash calls wrapped by `rein run`, by tool use id.
     wrapped: BTreeMap<String, Wrapped>,
+    /// Active clock for loop time: wall time with idle gaps capped.
+    last_ms: Option<u64>,
+    active_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -165,7 +172,20 @@ impl Controller {
             last_blocked: None,
             allowed: BTreeMap::new(),
             wrapped: BTreeMap::new(),
+            last_ms: None,
+            active_ms: 0,
         }
+    }
+
+    /// Advance the active clock to `now_ms`. A gap longer than `idle_gap_minutes`
+    /// counts as that long, so a session left open overnight does not inflate loop time.
+    fn tick(&mut self, now_ms: u64) -> u64 {
+        let cap = self.cfg.idle_gap_minutes.saturating_mul(60_000);
+        if let Some(last) = self.last_ms {
+            self.active_ms += now_ms.saturating_sub(last).min(cap);
+        }
+        self.last_ms = Some(self.last_ms.map_or(now_ms, |l| l.max(now_ms)));
+        self.active_ms
     }
 
     /// The user allows one blocked edit (the latest one if `action` is None).
@@ -217,6 +237,7 @@ impl Controller {
     }
 
     pub fn handle(&mut self, event: Event, now_ms: u64) -> Decision {
+        self.tick(now_ms);
         let mut d = Decision::default();
         let is_bash = matches!(&event, Event::ToolCompleted { tool, .. } if tool == "Bash");
         match event {
@@ -352,7 +373,8 @@ impl Controller {
         // Loops. All failures that reach the threshold in one run share one steer.
         let failures = extract_failures(&output);
         let mut looped: Vec<(String, String, u64, u64)> = Vec::new();
-        for obs in self.loops.on_run(command, &failures, now) {
+        let active = self.active_ms;
+        for obs in self.loops.on_run(command, &failures, active) {
             if let Some(prev) = obs.previous_message.as_deref() {
                 let q = Question::SameFailure {
                     test: obs.failure.test.as_deref(),
@@ -383,8 +405,9 @@ impl Controller {
             let edits = looped.iter().map(|l| l.2).min().unwrap_or(0);
             let summaries: Vec<&str> = looped.iter().map(|l| l.1.as_str()).collect();
             let signatures: Vec<String> = looped.iter().map(|l| l.0.clone()).collect();
-            let first = looped.iter().map(|l| l.3).min().unwrap_or(now);
-            let duration_ms = Some(now.saturating_sub(first));
+            // Both ends on the active clock (idle gaps capped).
+            let first = looped.iter().map(|l| l.3).min().unwrap_or(active);
+            let duration_ms = Some(active.saturating_sub(first));
             let text = if looped.len() == 1 {
                 format!(
                     "rein: this failure is unchanged after {edits} different edits: {}. A different approach may be needed.",
@@ -447,6 +470,7 @@ impl Controller {
         output: String,
         now_ms: u64,
     ) -> (Decision, Option<String>) {
+        self.tick(now_ms);
         let mut d = Decision::default();
         let Some(w) = self.wrapped.get_mut(tool_use_id) else {
             return (d, None);
@@ -1141,6 +1165,34 @@ mod tests {
         assert_eq!(first[0].seq, 0);
         let next = c.handle(edited("a", "h2"), 6).entries;
         assert!(next.iter().all(|e| !matches!(e.body, Body::Format { .. })));
+    }
+
+    #[test]
+    fn loop_time_skips_idle_gaps() {
+        let mut c = ctl(Mode::Optimize);
+        let min = 60_000;
+        c.handle(bash("pytest", PYTEST), 0);
+        // Edit 1 a minute later; then the session sits idle for two days.
+        c.handle(edited("src/app.py", "h1"), min);
+        c.handle(bash("pytest", PYTEST), 2 * min);
+        let back = 2 * 24 * 60 * min;
+        c.handle(edited("src/app.py", "h2"), back);
+        c.handle(bash("pytest", PYTEST), back + min);
+        c.handle(edited("src/app.py", "h3"), back + 2 * min);
+        let d = c.handle(bash("pytest", PYTEST), back + 3 * min);
+        let dur = d.entries.iter().find_map(|e| match &e.body {
+            Body::Action {
+                action:
+                    ActionKind::Steer {
+                        trigger: SteerTrigger::Loop { duration_ms, .. },
+                        ..
+                    },
+                ..
+            } => *duration_ms,
+            _ => None,
+        });
+        // 2 min + 10 min (capped idle gap) + 3 min.
+        assert_eq!(dur, Some(15 * min));
     }
 
     #[test]
