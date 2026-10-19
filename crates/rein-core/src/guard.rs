@@ -32,6 +32,10 @@ pub fn assess(old: &str, new: &str) -> Answer {
         r"@pytest\.mark\.(skip|skipif|xfail)\b|\bpytest\.(skip|xfail)\(|\b(it|test|describe)\.(skip|only|todo)\(|\bx(it|describe|test)\(|#\[ignore\]|\bt\.Skip(Now|f)?\(|@(Disabled|Ignore)\b|@unittest\.skip"
     );
     let true_re = re!(r"\|\|\s*true\b");
+    // Assertions that cannot fail: `assert True`, `assert!(true)`, `expect(true).toBe(true)`.
+    let always_re = re!(
+        r"\bassert\s*\(?\s*(True|true|1)\s*\)?\s*(;|$|#|//)|\bassert!\(\s*true\s*\)|\bexpect\(\s*true\s*\)\.toBe(Truthy)?\(\s*(true)?\s*\)"
+    );
 
     let mut reasons = Vec::new();
     let (a_old, a_new) = (count(assert_re, old), count(assert_re, new));
@@ -43,6 +47,10 @@ pub fn assess(old: &str, new: &str) -> Answer {
     }
     if count(true_re, new) > count(true_re, old) {
         reasons.push("`|| true` added".to_string());
+    }
+    let always = |s: &str| s.lines().filter(|l| always_re.is_match(l.trim())).count();
+    if always(new) > always(old) {
+        reasons.push("assertion that always passes added".to_string());
     }
     // TODO(Phase 3): expected value changed to the actual value of the last failure.
     // TODO(Phase 3): tolerance increased (approx, rel_tol, toBeCloseTo, delta).
@@ -89,6 +97,33 @@ mod tests {
             assess("it('a', f)", "it.only('a', f)"),
             Answer::Weakened { .. }
         ));
+    }
+
+    #[test]
+    fn always_true_assertions() {
+        for new in [
+            "    assert True",
+            "    assert True  # TODO",
+            "assert(true);",
+            "assert!(true);",
+            "expect(true).toBe(true);",
+            "expect(true).toBeTruthy()",
+        ] {
+            assert!(
+                matches!(
+                    assess("    assert total([1, 2, 3]) == 6", new),
+                    Answer::Weakened { .. }
+                ),
+                "{new}"
+            );
+        }
+        for new in [
+            "    assert ok is True",
+            "    assert flag == True_value",
+            "assert x",
+        ] {
+            assert_eq!(assess("    assert y", new), Answer::Neutral, "{new}");
+        }
     }
 
     #[test]

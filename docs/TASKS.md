@@ -145,7 +145,8 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
 - [ ] **R2.4** Review 20 real sessions in look mode (N16).
 
 **R3. Platform and distribution**
-- [ ] **R3.1** Conformance tests per Claude Code version (`updatedInput` without a decision is undocumented).
+- [x] **R3.1** Conformance tests per Claude Code version (`updatedInput` without a decision is undocumented).
+  Done: `scripts/conformance.py [--record]` runs one scripted session under `rein claude --rein-mode optimize` in auto mode, in a throwaway project, and checks 9 facts: hook payload fields, PostToolUseFailure on exit codes, the wrap, `updatedInput` without a decision applied, the agent seeing the summary, the guard deny reaching the agent and stopping the edit, the Bash-write warning reaching the agent, and settings with `PermissionDenied` loading. 2.1.303: all pass (`docs/conformance/2.1.303.md`). This was the first live check of R1.4. It also found a guard gap: `assert True` in place of a real assertion was neutral; now flagged as "assertion that always passes added".
 - [x] **R3.2** `SessionEnd` hook: stop the daemon, print a one-line report.
   Done (launcher part): the closing line says what rein did, e.g. `rein: session … ended · 41 tool calls · shaped 3 outputs, saved 9.2k tokens · 1 guard flag · \`rein report\` for details`. The `SessionEnd` hook itself moves to R3.3: Claude Code shows its output to no one ("exit code 0 - command completes successfully"), and the launcher already stops the daemon. Only a plugin, with no launcher, needs it.
 - [ ] **R3.3** Spike: ship as a Claude Code plugin instead of the launcher.
