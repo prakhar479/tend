@@ -66,6 +66,11 @@ pub fn socket_path(dir: &Path) -> PathBuf {
 /// Create `dir` (and missing parents) as 0700. An existing dir must belong to us;
 /// a shared temp dir could hold one that another user made.
 pub fn ensure_private_dir(dir: &Path) -> Result<()> {
+    // Never follow a symlink: in a shared temp dir, another user could point
+    // /tmp/rein-<uid> at one of our directories and have us chmod it (R0.7).
+    if fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!("{} is a symlink; refusing to use it", dir.display());
+    }
     if !dir.exists() {
         fs::DirBuilder::new()
             .recursive(true)
@@ -73,7 +78,10 @@ pub fn ensure_private_dir(dir: &Path) -> Result<()> {
             .create(dir)
             .with_context(|| format!("create {}", dir.display()))?;
     }
-    let meta = fs::metadata(dir).with_context(|| format!("stat {}", dir.display()))?;
+    let meta = fs::symlink_metadata(dir).with_context(|| format!("stat {}", dir.display()))?;
+    if !meta.is_dir() {
+        bail!("{} is not a directory", dir.display());
+    }
     // SAFETY: getuid has no preconditions and cannot fail.
     if meta.uid() != unsafe { libc::getuid() } {
         bail!("{} belongs to another user", dir.display());
@@ -161,6 +169,16 @@ mod tests {
         ensure_private_dir(&d).unwrap();
         let mode = fs::metadata(&d).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "tightened");
+
+        // A symlink is refused, and its target is left alone.
+        let target = base.join("target");
+        fs::create_dir_all(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(ensure_private_dir(&link).is_err());
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "target untouched");
         let _ = fs::remove_dir_all(&base);
     }
 }
