@@ -649,3 +649,31 @@ fn denied_wrapped_call_may_be_retried_unwrapped() {
     let report = rein(&["report"], &session);
     assert!(report.contains("denied by auto mode: 1 (100%)"), "{report}");
 }
+
+/// R3.5: `rein status` reads the session from REIN_SESSION_DIR and prints one line.
+#[test]
+fn status_line_shows_mode_and_counts() {
+    let dir = tmp("status");
+    let session = dir.join("session");
+    let (_daemon, sock) = start_daemon(&session, "optimize");
+    let post: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("post_tool_use_bash.json")).unwrap())
+            .unwrap();
+    hook(&sock, "PostToolUse", &post);
+    let status = |env: Option<&Path>| {
+        let mut cmd = Command::new(bin());
+        cmd.arg("status").env_remove("REIN_SESSION_DIR");
+        if let Some(d) = env {
+            cmd.env("REIN_SESSION_DIR", d);
+        }
+        let out = cmd.output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let line = status(Some(&session));
+    assert!(
+        line.starts_with("rein optimize · 1 tool call · shaped 1 output, saved "),
+        "{line}"
+    );
+    assert_eq!(status(None), "", "nothing outside a rein session");
+}

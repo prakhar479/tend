@@ -89,6 +89,9 @@ enum Cmd {
     },
     /// List flags across all sessions, with what each one points at.
     Review,
+    /// One line for the Claude Code status line: mode and what rein did so far.
+    /// Prints nothing outside a rein session.
+    Status,
     /// Reverse an action (Phase 3).
     Undo { id: String },
     /// Run look mode over an existing Claude Code transcript, or over all of them.
@@ -279,6 +282,15 @@ fn run(cli: Cli) -> Result<i32> {
             };
             store::append_flag(&dir, &flag)?;
             println!("Flagged {target}. `rein review` lists all flags.");
+            Ok(0)
+        }
+        Cmd::Status => {
+            // A status line must never show an error: print nothing instead.
+            if let Some(dir) = std::env::var_os("REIN_SESSION_DIR") {
+                if let Ok(entries) = store::read_entries(&PathBuf::from(dir)) {
+                    println!("{}", report::status_line(&entries));
+                }
+            }
             Ok(0)
         }
         Cmd::Review => {

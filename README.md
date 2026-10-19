@@ -32,6 +32,13 @@ rein allow                           # lift one test-guard block (run it yoursel
 rein flag a-2 "summary hid the error" # note that rein got something wrong (a-N, o-N, or session)
 rein review                          # all flags across sessions, with what they point at
 rein sessions                        # list; --prune <days> removes old ones
+rein status                          # one line for the status line (empty outside rein)
+```
+
+To see rein in Claude Code's status line, add this to `~/.claude/settings.json`. It replaces any status line you already have. Outside a rein session it shows nothing.
+
+```json
+"statusLine": { "type": "command", "command": "rein status" }
 ```
 
 Session data: `~/.local/share/rein/sessions/<id>/` (override with `REIN_HOME`).

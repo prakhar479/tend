@@ -129,7 +129,9 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
 - [x] **R1.4** Guard Bash writes to test files (`sed -i`, heredocs, Python): most edits bypass Edit/Write.
   Done (owner: warn): the connector snapshots the test files a Bash write names (`test_write_targets`, `*` in the last component), compares them after the call, and sends `FileChanged`. The guard judges it like an edit and warns in context (look mode: logs). New ledger event kind `file_changed` (additive). Owner's data: 206 of 1024 Bash writes name a test file; a sample of 14 were all real test edits. Not seen: writes that name no file, or paths after `cd $VAR`.
 - [ ] **R1.5** Faithful handling of large file views (51% of Bash output). Measure first.
+  Measured 2026-10-19 (owner's transcripts, 341 view calls, 250k tokens): views over 8k chars are 25 calls, 32% of view tokens. Repeated lines and extra blank lines inside them: ~4.6k tokens (5% of large views, 0.5% of Bash output). Exact re-reads of the same view: 0. **Not worth building now**; re-measure after real use.
 - [ ] **R1.6** Group large search output by file.
+  Measured 2026-10-19: search calls over 8k chars are 14 of 1201, 12% of search tokens. Grouping by file with the first 5 hits each would save ~47k tokens (~5% of Bash output), all from those 14 calls, and hides hits behind `rein show`. **Deferred** until real use shows how often the agent re-opens such summaries (R2.4).
 
 **R2. Learn from real use**
 - [x] **R2.1** `rein flag <id> "note"` and `rein review`.
@@ -146,7 +148,8 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
   Done (launcher part): the closing line says what rein did, e.g. `rein: session … ended · 41 tool calls · shaped 3 outputs, saved 9.2k tokens · 1 guard flag · \`rein report\` for details`. The `SessionEnd` hook itself moves to R3.3: Claude Code shows its output to no one ("exit code 0 - command completes successfully"), and the launcher already stops the daemon. Only a plugin, with no launcher, needs it.
 - [ ] **R3.3** Spike: ship as a Claude Code plugin instead of the launcher.
 - [ ] **R3.4** Spike: `http` hooks instead of the shim process.
-- [ ] **R3.5** `rein status` for the Claude Code statusline.
+- [x] **R3.5** `rein status` for the Claude Code statusline.
+  Done: `rein status` prints `rein <mode> · <what rein did>` for the session in `REIN_SESSION_DIR`, and nothing outside a rein session (README shows the `statusLine` setting). It does not set the status line itself: that would replace the user's.
 - [ ] **R3.6** Report `systemMessage` not shown on PreToolUse `ask` (`/feedback`).
 - [x] **R3.7** Detect auto-mode denials of wrapped calls (`PermissionDenied` hook) and measure the rate. Live: 1 of 9 wrapped test runs was denied as "[Auto-Mode Bypass]"; the agent then stops. Mitigation in place: a command key whose wrapped run got no result is not wrapped again in the session.
   Done: the `PermissionDenied` hook exists in 2.1.303 ("after auto mode classifier denies a tool call"; input `tool_name`, `tool_input`, `tool_use_id`, `reason`; output `retry: true` tells the model it may retry). Rein hooks it for Bash. A denied call that rein wrapped: the command key is not wrapped again (at once, not at the turn end), and rein answers `retry: true` (new action `retry`, new event `tool_denied`, both additive). The report shows `denied by auto mode: K (X%)` next to wrapped runs. Settings accepted live by 2.1.303. **[Verify]**: the fixture follows the schema in the binary, not a live capture; capture one with `REIN_CAPTURE=1` when a denial happens, and check that the agent retries after `retry: true`.

@@ -303,6 +303,22 @@ pub fn one_line(entries: &[Entry]) -> String {
     parts.join(" · ")
 }
 
+/// `rein status`: "rein look · 12 tool calls · …" (R3.5).
+pub fn status_line(entries: &[Entry]) -> String {
+    let mut mode = None;
+    for e in entries {
+        match &e.body {
+            Body::Event {
+                event: Event::SessionStarted { mode: Some(m), .. },
+            } => mode = Some(*m),
+            Body::ModeChanged { to, .. } => mode = Some(*to),
+            _ => {}
+        }
+    }
+    let mode = mode.map_or("?".to_string(), |m| format!("{m:?}").to_lowercase());
+    format!("rein {mode} · {}", one_line(entries))
+}
+
 /// How often the guard and the loop nudges were right, as far as the ledger shows (R2.3).
 /// `live`: from a session's ledger, where the user could allow a flag (not a retro).
 pub fn precision(t: &Totals, live: bool) -> String {
