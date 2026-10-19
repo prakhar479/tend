@@ -459,3 +459,26 @@ fn large_filter_does_not_block_pings_or_hooks() {
         "hook waited {slowest:?}"
     );
 }
+
+/// R0.6 (D12): the agent closed the pipe (its hook timeout); the shim still exits 0.
+#[test]
+fn shim_exits_zero_when_stdout_is_closed() {
+    use std::io::Write;
+    let dir = tmp("epipe");
+    let (_daemon, sock) = start_daemon(&dir.join("session"), "optimize");
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let mut child = Command::new(bin())
+        .args(["hook", "PostToolUse"])
+        .env("REIN_SOCKET", &sock)
+        .env("REIN_HOOK_TIMEOUT_MS", "5000")
+        .stdin(std::process::Stdio::piped())
+        .stdout(writer)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // A noisy pytest run in optimize mode: the shim has a summary to print.
+    let payload = fs::read(fixture("post_tool_use_bash.json")).unwrap();
+    child.stdin.take().unwrap().write_all(&payload).unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+}

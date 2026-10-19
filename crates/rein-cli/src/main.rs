@@ -141,7 +141,8 @@ fn main() {
     let cli = Cli::parse();
     // The shim must never fail the agent: handle it before anything that can error.
     if let Cmd::Hook { event } = &cli.cmd {
-        shim::run(event);
+        // Exit 0 even if something panics (rule 1).
+        let _ = std::panic::catch_unwind(|| shim::run(event));
         std::process::exit(0);
     }
     if let Cmd::Run { id, sh } = &cli.cmd {

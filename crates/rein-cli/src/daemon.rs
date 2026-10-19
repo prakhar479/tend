@@ -192,6 +192,8 @@ fn serve(stream: UnixStream, state: &Mutex<State>, sock: &Path) -> Result<()> {
 
     reply_to(stream.try_clone()?, &reply)?;
     if shutdown {
+        // Wait for any request that is writing the ledger, then exit (R0.6).
+        let _done = state.lock().unwrap_or_else(|e| e.into_inner());
         let _ = fs::remove_file(sock);
         std::process::exit(0);
     }

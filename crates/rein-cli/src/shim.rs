@@ -28,7 +28,9 @@ pub fn run(event: &str) {
         &input,
         Duration::from_millis(timeout),
     ) {
-        println!("{out}");
+        // The agent may have closed the pipe (its hook timeout). Never fail on that (R0.6).
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), "{out}");
     }
 }
 

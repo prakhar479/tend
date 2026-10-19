@@ -30,9 +30,16 @@ impl Store {
         fs::create_dir_all(dir.join("blobs"))?;
         // Raw payloads hold code and file contents. Keep them only when asked.
         let capture = std::env::var("REIN_CAPTURE").is_ok_and(|v| v == "1");
+        let ledger_path = dir.join("ledger.jsonl");
+        let mut ledger = append_file(&ledger_path)?;
+        // A crash can leave a last line without its newline. End it, so the next entry
+        // is not glued to it (R0.6). Readers skip the torn line.
+        if fs::read(&ledger_path).is_ok_and(|b| b.last().is_some_and(|c| *c != b'\n')) {
+            ledger.write_all(b"\n")?;
+        }
         Ok(Self {
             dir: dir.to_path_buf(),
-            ledger: append_file(&dir.join("ledger.jsonl"))?,
+            ledger,
             hooks: if capture {
                 Some(append_file(&dir.join("hooks.jsonl"))?)
             } else {
@@ -58,12 +65,22 @@ impl Store {
         for b in &d.blobs {
             let p = self.dir.join("blobs").join(&b.hash);
             if !p.exists() {
-                fs::write(&p, &b.content)?;
+                // Temp file + rename: a crash never leaves a truncated blob under its hash.
+                let tmp =
+                    self.dir
+                        .join("blobs")
+                        .join(format!(".{}.{}.tmp", b.hash, std::process::id()));
+                fs::write(&tmp, &b.content)?;
+                fs::rename(&tmp, &p)?;
             }
         }
+        // One write for all lines of a decision: entries never interleave or split.
+        let mut lines = String::new();
         for e in &d.entries {
-            writeln!(self.ledger, "{}", serde_json::to_string(e)?)?;
+            lines.push_str(&serde_json::to_string(e)?);
+            lines.push('\n');
         }
+        self.ledger.write_all(lines.as_bytes())?;
         Ok(())
     }
 }
@@ -137,6 +154,35 @@ mod tests {
         assert_eq!(read_entries(&d2).unwrap().len(), 2);
         let _ = fs::remove_dir_all(d);
         let _ = fs::remove_dir_all(d2);
+    }
+
+    /// R0.6: a torn last line (crash) does not swallow the next entry.
+    #[test]
+    fn torn_last_line_does_not_swallow_the_next_entry() {
+        let d = ledger(
+            "torn",
+            r#"{"seq":0,"ts_ms":0,"body":{"kind":"format","version":1}}"#,
+        );
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(d.join("ledger.jsonl"))
+            .unwrap();
+        f.write_all(br#"{"seq":2,"ts_ms":0,"bo"#).unwrap();
+        drop(f);
+        let mut store = Store::open(&d).unwrap();
+        let entry: Entry = serde_json::from_str(
+            r#"{"seq":3,"ts_ms":0,"body":{"kind":"event","event":{"type":"turn_ended"}}}"#,
+        )
+        .unwrap();
+        store
+            .persist(&Decision {
+                entries: vec![entry],
+                ..Default::default()
+            })
+            .unwrap();
+        let seqs: Vec<u64> = read_entries(&d).unwrap().iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![0, 1, 3], "torn line skipped, the new one kept");
+        let _ = fs::remove_dir_all(d);
     }
 
     #[test]
