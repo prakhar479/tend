@@ -84,8 +84,10 @@ Consolidated 2026-10-19 from the Phase 0/1 results. Owner decisions are marked *
   Note: applies only to ledgers without a `format` entry; it follows action → output → event.
 - [x] **N9. Active loop time.** Leave out idle gaps (default: gaps over 10 min) from loop time.
   Note: config `idle_gap_minutes`. Retro over 35 real transcripts: loop time 4937 → 663 min (one session 3912 → 72 min).
-- [ ] **N10. More re-open signals.** Reading a persisted-output file or re-running the same command right after a summary counts as a re-open.
-- [ ] **N11. Retro and live agree.** Same tool-call counting in retro and live reports.
+- [x] **N10. More re-open signals.** Reading a persisted-output file or re-running the same command right after a summary counts as a re-open.
+  Note: only the re-run signal. rein never shapes persisted outputs (the agent sees a 2 KB preview), so reading that file says nothing about a rein summary. A re-run counts only with no edit in between and only when the summary was applied.
+- [x] **N11. Retro and live agree.** Same tool-call counting in retro and live reports.
+  Note: retro looks only at hooked tools (`HOOKED_TOOLS`); on the captured loop session both now say 7 tool calls.
 - [ ] **N12. Capture script.** `scripts/capture-fixtures` turns a session's `hooks.jsonl` into sanitized fixtures.
 - [ ] **N13. Real pytest and cargo fixtures.** Replace the synthetic ones.
 - [x] **N14. Edge cases.** Claude Code's mid-output cut; persisted preview with no newline in 2000 bytes; the 1 MiB size boundary.

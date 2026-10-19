@@ -141,9 +141,20 @@ pub struct Controller {
     allowed: BTreeMap<EditKey, (String, u64)>,
     /// Bash calls wrapped by `rein run`, by tool use id.
     wrapped: BTreeMap<String, Wrapped>,
+    /// The last summary the agent saw, to spot an immediate re-run of its command.
+    last_summary: Option<LastSummary>,
     /// Active clock for loop time: wall time with idle gaps capped.
     last_ms: Option<u64>,
     active_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct LastSummary {
+    command: String,
+    output_id: String,
+    kind: OutputKind,
+    /// Edit count when the summary was shown.
+    edits: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +183,7 @@ impl Controller {
             last_blocked: None,
             allowed: BTreeMap::new(),
             wrapped: BTreeMap::new(),
+            last_summary: None,
             last_ms: None,
             active_ms: 0,
         }
@@ -318,7 +330,7 @@ impl Controller {
         // Re-open of a summary: the agent needed the full output.
         if let Some(target) = info.show_target.as_deref() {
             if let Some(kind) = self.outputs.get(target).copied() {
-                if let Some(change) = self.session.on_reopen(kind, target) {
+                if let Some(change) = self.session.on_reopen(kind, &format!("re-opened {target}")) {
                     self.adapt(d, now, ev, change);
                 }
             }
@@ -349,6 +361,16 @@ impl Controller {
         hash: String,
         can_replace: bool,
     ) -> Option<String> {
+        // Re-running the same command right after a summary, with no edit in between,
+        // means the summary hid something the agent wanted: treat it as a re-open.
+        if let Some(last) = self.last_summary.take() {
+            if last.command == command && self.loops.edits() == last.edits {
+                let what = format!("re-ran the command behind {} with no edit", last.output_id);
+                if let Some(change) = self.session.on_reopen(last.kind, &what) {
+                    self.adapt(d, now, cause, change);
+                }
+            }
+        }
         let output_id = format!("o-{}", self.next_output);
         self.next_output += 1;
         self.outputs.insert(output_id.clone(), kind);
@@ -447,7 +469,7 @@ impl Controller {
             s.from_tokens
         );
         let action = ActionKind::Shape {
-            output_id,
+            output_id: output_id.clone(),
             from_tokens: s.from_tokens,
             to_tokens: estimate_tokens(&text),
             from_lines: s.from_lines,
@@ -459,6 +481,12 @@ impl Controller {
         if let Some(change) = self.session.on_shaped(kind) {
             self.adapt(d, now, out, change);
         }
+        self.last_summary = Some(LastSummary {
+            command: command.to_string(),
+            output_id,
+            kind,
+            edits: self.loops.edits(),
+        });
         Some(text)
     }
 
@@ -898,6 +926,31 @@ mod tests {
             .iter()
             .any(|e| matches!(&e.body, Body::Adaptation { .. })));
         assert_eq!(c.session().shape_level(OutputKind::Test), DEFAULT_LEVEL - 1);
+    }
+
+    #[test]
+    fn immediate_rerun_loosens_like_a_reopen() {
+        let mut c = ctl(Mode::Optimize);
+        c.handle(bash("pytest -v", PYTEST), 0);
+        let d = c.handle(bash("pytest -v", PYTEST), 1);
+        assert!(d.entries.iter().any(|e| matches!(
+            &e.body,
+            Body::Adaptation { reason, .. } if reason.contains("re-ran the command behind o-1")
+        )));
+        assert_eq!(c.session().shape_level(OutputKind::Test), DEFAULT_LEVEL - 1);
+
+        // After an edit, a re-run is a normal retry, not a re-open.
+        let mut c = ctl(Mode::Optimize);
+        c.handle(bash("pytest -v", PYTEST), 0);
+        c.handle(edited("src/app.py", "h1"), 1);
+        c.handle(bash("pytest -v", PYTEST), 2);
+        assert_eq!(c.session().shape_level(OutputKind::Test), DEFAULT_LEVEL);
+
+        // In look mode the agent saw the full output: nothing to re-open.
+        let mut c = ctl(Mode::Look);
+        c.handle(bash("pytest -v", PYTEST), 0);
+        c.handle(bash("pytest -v", PYTEST), 1);
+        assert_eq!(c.session().shape_level(OutputKind::Test), DEFAULT_LEVEL);
     }
 
     #[test]

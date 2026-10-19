@@ -13,6 +13,10 @@ use super::Connector;
 
 const EDIT_TOOLS: [&str; 3] = ["Edit", "MultiEdit", "Write"];
 
+/// Tools rein hooks (see `settings`). Retro looks at the same tools, so its numbers
+/// match a live session's.
+pub const HOOKED_TOOLS: [&str; 4] = ["Bash", "Edit", "MultiEdit", "Write"];
+
 #[derive(Default)]
 pub struct ClaudeCode {
     started: bool,
@@ -297,7 +301,8 @@ pub fn settings(exe: &Path) -> Value {
         }
         json!([m])
     };
-    let tools = "Bash|Edit|MultiEdit|Write";
+    let tools = HOOKED_TOOLS.join("|");
+    let tools = tools.as_str();
     json!({
         "hooks": {
             "SessionStart": entry("SessionStart", None),

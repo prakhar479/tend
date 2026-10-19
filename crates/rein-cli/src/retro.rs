@@ -16,7 +16,7 @@ use rein_core::text::sha256_hex;
 use rein_core::{Capabilities, Controller, Entry, Event, Mode};
 use serde_json::Value;
 
-use crate::connector::claude_code::extract_output;
+use crate::connector::claude_code::{extract_output, HOOKED_TOOLS};
 use crate::report;
 
 pub fn run(transcript: &Path) -> Result<String> {
@@ -65,6 +65,10 @@ pub fn analyze(transcript: &Path) -> Result<Vec<Entry>> {
                 Some("tool_use") => {
                     let id = item["id"].as_str().unwrap_or("").to_string();
                     let name = item["name"].as_str().unwrap_or("").to_string();
+                    // Live hooks never see other tools (Read, Grep, …).
+                    if !HOOKED_TOOLS.contains(&name.as_str()) {
+                        continue;
+                    }
                     let input = item["input"].clone();
                     if name == "Edit" || name == "MultiEdit" {
                         let ev = Event::EditProposed {
@@ -296,7 +300,8 @@ mod tests {
         assert!(out.contains("Loops (13 s in loops): 1"), "{out}");
         assert!(out.contains("[would steer] after 13 s:"), "{out}");
         assert!(out.contains("would steer"), "{out}");
-        assert!(out.contains("Bash 4"), "{out}");
+        // The live session of this transcript reported "Tool calls: 7 (Bash 4)".
+        assert!(out.contains("Tool calls: 7 (Bash 4)"), "{out}");
         assert!(
             out.contains("180.5k prompt (169.3k cache read, 93%)"),
             "{out}"

@@ -82,7 +82,8 @@ impl SessionModel {
     }
 
     /// Call when the agent re-opens a summary. Loosens that kind one level.
-    pub fn on_reopen(&mut self, kind: OutputKind, output_id: &str) -> Option<Change> {
+    /// `what` completes "the agent …", for example "re-opened o-4".
+    pub fn on_reopen(&mut self, kind: OutputKind, what: &str) -> Option<Change> {
         self.unreopened.insert(kind, 0);
         let from = self.shape_level(kind);
         if from == 0 {
@@ -95,10 +96,7 @@ impl SessionModel {
             knob: format!("shape_level.{}", kind.label()),
             from: from.to_string(),
             to: to.to_string(),
-            reason: format!(
-                "{verb} {} summaries: the agent re-opened {output_id}.",
-                kind.label()
-            ),
+            reason: format!("{verb} {} summaries: the agent {what}.", kind.label()),
         })
     }
 }
@@ -122,7 +120,7 @@ mod tests {
     fn reopen_loosens_and_resets_count() {
         let mut s = SessionModel::new(Mode::Optimize, 2);
         s.on_shaped(OutputKind::Test);
-        let c = s.on_reopen(OutputKind::Test, "o-4").unwrap();
+        let c = s.on_reopen(OutputKind::Test, "re-opened o-4").unwrap();
         assert!(c.reason.contains("o-4"));
         assert_eq!(s.shape_level(OutputKind::Test), 1);
         assert!(s.on_shaped(OutputKind::Test).is_none());
