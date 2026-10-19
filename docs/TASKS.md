@@ -120,9 +120,12 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
   Done: `<session>/control.token` (0600). Raises the bar; the agent runs as the same user, so it is not a security boundary.
 
 **R1. Coverage gaps from the data**
-- [ ] **R1.1** Wrap behind `source …/activate &&` and env assignments (74% of test runs are refused today).
-- [ ] **R1.2** Failure from output text, not `is_error` (0.9% vs 34.7%).
-- [ ] **R1.3** Normalized command keys for loops and re-runs (exact repeats: 0).
+- [x] **R1.1** Wrap behind `source …/activate &&` and env assignments (74% of test runs are refused today).
+  Done: only cd/pushd/popd refuse; a leading `cd DIR &&` stays in the agent's shell; here-doc bodies skipped; every program must be a real executable. Core-rule coverage on the owner's transcripts: 21% → 97% (upper bound).
+- [x] **R1.2** Failure from output text, not `is_error` (0.9% vs 34.7%).
+  Done: pytest `E` lines, summary-only lines, `grep -n` prefixes. Pytest runs with failure text but no parsed failure: 20 → 0.
+- [x] **R1.3** Normalized command keys for loops and re-runs (exact repeats: 0).
+  Done: `command_key`; loops count fix attempts (edit then failing run), and Bash writes count as edits. Retro loops: 17 (raw edit counts, mostly false) → 4.
 - [ ] **R1.4** Guard Bash writes to test files (`sed -i`, heredocs, Python): most edits bypass Edit/Write.
 - [ ] **R1.5** Faithful handling of large file views (51% of Bash output). Measure first.
 - [ ] **R1.6** Group large search output by file.
@@ -140,6 +143,7 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
 - [ ] **R3.4** Spike: `http` hooks instead of the shim process.
 - [ ] **R3.5** `rein status` for the Claude Code statusline.
 - [ ] **R3.6** Report `systemMessage` not shown on PreToolUse `ask` (`/feedback`).
+- [ ] **R3.7** Detect auto-mode denials of wrapped calls (`PermissionDenied` hook) and measure the rate. Live: 1 of 9 wrapped test runs was denied as "[Auto-Mode Bypass]"; the agent then stops. Mitigation in place: a command key whose wrapped run got no result is not wrapped again in the session.
 
 **Owner decisions:** the name (collides with `pegasi-ai/reins`), positioning (loops and honesty first), the Bash-write guard (warn or snapshot and undo), and plugin distribution. See analysis §7.
 
