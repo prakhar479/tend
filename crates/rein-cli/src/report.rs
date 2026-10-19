@@ -1,13 +1,13 @@
 //! Session report, `why` cause chains, and output lookup. Reads ledger entries only.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
-use rein_core::perception::classify;
+use rein_core::perception::{classify, writes_files, OutputKind};
 use rein_core::record::SteerTrigger;
 use rein_core::text::truncate_chars;
 use rein_core::{ActionKind, Body, Config, Entry, Event};
@@ -109,7 +109,7 @@ fn status(applied: bool, done: &str, would: &str) -> String {
 }
 
 /// Session numbers that retro over many sessions compares.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Totals {
     pub bash_tokens: u64,
     /// Tokens a faithful summary would remove, including output the agent cannot replace.
@@ -117,13 +117,30 @@ pub struct Totals {
     pub loops: u64,
     /// First occurrence to steer, summed over loops.
     pub loop_ms: u64,
+    /// Bash output tokens by output kind.
+    pub by_kind: BTreeMap<OutputKind, u64>,
+    pub test_runs: u64,
+    /// Test runs rein wrapped (or would wrap, in look mode or retro).
+    pub wrapped: u64,
+    /// Edits through Edit/Write (the test guard sees these).
+    pub tool_edits: u64,
+    /// Bash calls that write files (`sed -i`, heredocs): the guard does not see these.
+    pub bash_writes: u64,
 }
 
 pub fn totals(entries: &[Entry]) -> Totals {
     let mut t = Totals::default();
     for e in entries {
         match &e.body {
-            Body::Output { tokens, .. } => t.bash_tokens += *tokens as u64,
+            Body::Output {
+                tokens,
+                output_kind,
+                ..
+            } => {
+                t.bash_tokens += *tokens as u64;
+                *t.by_kind.entry(*output_kind).or_default() += *tokens as u64;
+                t.test_runs += u64::from(*output_kind == OutputKind::Test);
+            }
             Body::Action {
                 action:
                     ActionKind::Shape {
@@ -144,10 +161,64 @@ pub fn totals(entries: &[Entry]) -> Totals {
                 t.loops += 1;
                 t.loop_ms += duration_ms.unwrap_or(0);
             }
+            Body::Action {
+                action: ActionKind::Wrap { .. },
+                unsupported: false,
+                reason,
+                ..
+            } if !reason.starts_with("Not wrapped") => t.wrapped += 1,
+            Body::Event {
+                event: Event::FileEdited { .. },
+            } => t.tool_edits += 1,
+            Body::Event {
+                event: Event::ToolCompleted { tool, input, .. },
+            } if tool == "Bash" => {
+                let cmd = input.get("command").and_then(Value::as_str).unwrap_or("");
+                t.bash_writes += u64::from(writes_files(cmd));
+            }
             _ => {}
         }
     }
     t
+}
+
+/// Where Bash output goes, how many test runs rein wraps, and which edits the guard sees.
+pub fn coverage(
+    by_kind: &BTreeMap<OutputKind, u64>,
+    test_runs: u64,
+    wrapped: u64,
+    tool_edits: u64,
+    bash_writes: u64,
+) -> String {
+    let mut out = String::new();
+    if by_kind.values().any(|n| *n > 0) {
+        let _ = writeln!(out, "Bash output by kind: {}", kind_shares(by_kind));
+    }
+    if test_runs > 0 {
+        let _ = writeln!(
+            out,
+            "Test runs: {test_runs} · wrapped (or would be, in auto mode): {wrapped} ({}%)",
+            pct(wrapped, test_runs)
+        );
+    }
+    if tool_edits + bash_writes > 0 {
+        let _ = writeln!(
+            out,
+            "Edits: {tool_edits} through Edit/Write (the test guard sees these) · {bash_writes} Bash writes (it does not)"
+        );
+    }
+    out
+}
+
+/// "view 51% · search 18% · test 8%": shares of Bash output by kind, largest first.
+pub fn kind_shares(by_kind: &BTreeMap<OutputKind, u64>) -> String {
+    let total: u64 = by_kind.values().sum();
+    let mut v: Vec<(&OutputKind, &u64)> = by_kind.iter().filter(|(_, n)| **n > 0).collect();
+    v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    v.iter()
+        .map(|(k, n)| format!("{} {}%", k.label(), pct(**n, total)))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 pub fn render(label: &str, entries: &[Entry]) -> String {
@@ -349,6 +420,17 @@ pub fn render(label: &str, entries: &[Entry]) -> String {
             "Not shapeable: {unshapeable} outputs (the agent cannot replace failed-call output)"
         );
     }
+    let _ = write!(
+        out,
+        "{}",
+        coverage(
+            &t.by_kind,
+            t.test_runs,
+            t.wrapped,
+            t.tool_edits,
+            t.bash_writes
+        )
+    );
     let _ = writeln!(out, "Re-opens: {reopens}");
     let loop_title = if t.loop_ms > 0 {
         format!("Loops ({} in loops)", minutes(t.loop_ms))

@@ -116,7 +116,7 @@ pub fn extract_output(v: &Value) -> String {
 /// uses plain bash, so a name that exists only as a function or alias in the agent's
 /// shell snapshot (`conda activate`, a custom `t`) would fail there (R0.4). A
 /// `source X/bin/activate` adds X/bin to the PATH searched for later programs (R1.1).
-fn runner_is_executable(command: &str, cwd: &str) -> bool {
+pub fn runner_is_executable(command: &str, cwd: &str) -> bool {
     use rein_core::perception::shell;
     use std::os::unix::fs::PermissionsExt;
     if rein_core::perception::runner_segment(command).is_none() {

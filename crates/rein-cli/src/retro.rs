@@ -16,7 +16,7 @@ use rein_core::text::sha256_hex;
 use rein_core::{Capabilities, Controller, Entry, Event, Mode};
 use serde_json::Value;
 
-use crate::connector::claude_code::{extract_output, HOOKED_TOOLS};
+use crate::connector::claude_code::{extract_output, runner_is_executable, HOOKED_TOOLS};
 use crate::report;
 
 pub fn run(transcript: &Path) -> Result<String> {
@@ -49,10 +49,15 @@ pub fn analyze(transcript: &Path) -> Result<Vec<Entry>> {
     );
 
     let mut now = 0u64;
+    let mut cwd = String::new();
+    let mut seen = std::collections::HashSet::new();
     for line in BufReader::new(f).lines().map_while(Result::ok) {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        if let Some(c) = v["cwd"].as_str() {
+            cwd = c.to_string();
+        }
         // Keep time monotonic even if a line has no timestamp or goes backwards.
         if let Some(t) = v["timestamp"].as_str().and_then(parse_rfc3339_ms) {
             now = now.max(t);
@@ -64,12 +69,29 @@ pub fn analyze(transcript: &Path) -> Result<Vec<Entry>> {
             match item["type"].as_str() {
                 Some("tool_use") => {
                     let id = item["id"].as_str().unwrap_or("").to_string();
+                    // One API message can appear on several transcript lines with the same
+                    // content blocks: handle each tool call once.
+                    if !seen.insert(id.clone()) {
+                        continue;
+                    }
                     let name = item["name"].as_str().unwrap_or("").to_string();
                     // Live hooks never see other tools (Read, Grep, …).
                     if !HOOKED_TOOLS.contains(&name.as_str()) {
                         continue;
                     }
                     let input = item["input"].clone();
+                    if name == "Bash" {
+                        // What PreToolUse would have seen, assuming auto mode: lets the
+                        // report say how many test runs rein would wrap.
+                        let cmd = input["command"].as_str().unwrap_or("");
+                        let ev = Event::ToolRequested {
+                            tool_use_id: id.clone(),
+                            tool: name.clone(),
+                            input: input.clone(),
+                            rewrite_ok: runner_is_executable(cmd, &cwd),
+                        };
+                        entries.extend(ctl.handle(ev, now).entries);
+                    }
                     if name == "Edit" || name == "MultiEdit" {
                         let ev = Event::EditProposed {
                             tool_use_id: id.clone(),
@@ -186,6 +208,23 @@ pub fn run_all(root: &Path, top: usize) -> Result<String> {
         sum(|r| r.totals.loops),
         report::minutes(sum(|r| r.totals.loop_ms)),
     );
+    let mut by_kind = std::collections::BTreeMap::new();
+    for r in &rows {
+        for (k, n) in &r.totals.by_kind {
+            *by_kind.entry(*k).or_insert(0u64) += n;
+        }
+    }
+    let _ = write!(
+        out,
+        "{}",
+        report::coverage(
+            &by_kind,
+            sum(|r| r.totals.test_runs),
+            sum(|r| r.totals.wrapped),
+            sum(|r| r.totals.tool_edits),
+            sum(|r| r.totals.bash_writes),
+        )
+    );
 
     // Ties break on the label, so the order is stable.
     rows.sort_by(|a, b| {
@@ -264,6 +303,10 @@ mod tests {
         let out = run_all(&root, 5).unwrap();
         let _ = fs::remove_dir_all(&root);
         assert!(out.contains("Retro over 2 transcripts"), "{out}");
+        assert!(
+            out.contains("Test runs: 8 · wrapped (or would be, in auto mode): 8 (100%)"),
+            "{out}"
+        );
         assert!(out.contains("360.9k prompt tokens"), "{out}");
         assert!(out.contains("2 loops (27 s in loops)"), "{out}");
         let by_loop = out.split("Top 5 by loop time:\n").nth(1).unwrap();
@@ -274,6 +317,23 @@ mod tests {
                 "  13 s in 1 loops · -home-dev-shop/s1.jsonl"
             ]
         );
+    }
+
+    /// Claude Code repeats a message's content blocks on several lines.
+    #[test]
+    fn repeated_lines_count_once() {
+        let fixture = format!(
+            "{}/../../fixtures/transcripts/loop_session.jsonl",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = fs::read_to_string(&fixture).unwrap();
+        let doubled: String = text.lines().flat_map(|l| [l, "\n", l, "\n"]).collect();
+        let path = std::env::temp_dir().join(format!("rein-dup-{}.jsonl", std::process::id()));
+        fs::write(&path, doubled).unwrap();
+        let (a, b) = (run(Path::new(&fixture)).unwrap(), run(&path).unwrap());
+        let _ = fs::remove_file(&path);
+        let body = |s: &str| s.lines().skip(1).collect::<Vec<_>>().join("\n");
+        assert_eq!(body(&a), body(&b));
     }
 
     #[test]
@@ -300,6 +360,13 @@ mod tests {
         assert!(out.contains("Loops (13 s in loops): 1"), "{out}");
         assert!(out.contains("[would steer] after 13 s:"), "{out}");
         assert!(out.contains("would steer"), "{out}");
+        // R2.2: coverage lines.
+        assert!(out.contains("Bash output by kind: test 100%"), "{out}");
+        assert!(
+            out.contains("Test runs: 4 · wrapped (or would be, in auto mode): 4 (100%)"),
+            "{out}"
+        );
+        assert!(out.contains("Edits: 3 through Edit/Write"), "{out}");
         // The live session of this transcript reported "Tool calls: 7 (Bash 4)".
         assert!(out.contains("Tool calls: 7 (Bash 4)"), "{out}");
         assert!(

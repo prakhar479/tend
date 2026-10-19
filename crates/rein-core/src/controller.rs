@@ -1144,6 +1144,21 @@ mod tests {
         )));
     }
 
+    /// A large file view is never shaped: the agent asked for that content.
+    #[test]
+    fn file_views_are_not_shaped() {
+        let mut c = ctl(Mode::Optimize);
+        let d = c.handle(bash("cat tests/test_api_output.txt", PYTEST), 0);
+        assert_eq!(d.response.replace_output, None);
+        assert!(!d.entries.iter().any(|e| matches!(
+            &e.body,
+            Body::Action {
+                action: ActionKind::Shape { .. },
+                ..
+            }
+        )));
+    }
+
     #[test]
     fn reopen_loosens_shape_level() {
         let mut c = ctl(Mode::Optimize);

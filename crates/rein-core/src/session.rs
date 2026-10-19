@@ -34,9 +34,20 @@ impl SessionModel {
         Self {
             mode,
             guard: GuardDecision::Ask,
+            // File views start off: summarizing code the agent asked to read would hide
+            // what it needs (R1.5 will decide what is safe).
             levels: OutputKind::ALL
                 .iter()
-                .map(|k| (*k, DEFAULT_LEVEL))
+                .map(|k| {
+                    (
+                        *k,
+                        if *k == OutputKind::View {
+                            0
+                        } else {
+                            DEFAULT_LEVEL
+                        },
+                    )
+                })
                 .collect(),
             unreopened: BTreeMap::new(),
             tighten_after,

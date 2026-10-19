@@ -12,16 +12,19 @@ pub enum OutputKind {
     Install,
     Git,
     Search,
+    /// File views (`cat`, `head`, `sed -n`): the agent asked for this content.
+    View,
     Other,
 }
 
 impl OutputKind {
-    pub const ALL: [OutputKind; 6] = [
+    pub const ALL: [OutputKind; 7] = [
         OutputKind::Test,
         OutputKind::Build,
         OutputKind::Install,
         OutputKind::Git,
         OutputKind::Search,
+        OutputKind::View,
         OutputKind::Other,
     ];
 
@@ -32,6 +35,7 @@ impl OutputKind {
             OutputKind::Install => "install",
             OutputKind::Git => "git",
             OutputKind::Search => "search",
+            OutputKind::View => "view",
             OutputKind::Other => "other",
         }
     }
@@ -63,6 +67,8 @@ pub fn classify(command: &str) -> CommandInfo {
     let runner = detect_runner(command);
     let kind = if runner.is_some() {
         OutputKind::Test
+    } else if is_view(command) {
+        OutputKind::View
     } else if re!(BUILD).is_match(command) {
         OutputKind::Build
     } else if re!(INSTALL).is_match(command) {
@@ -84,6 +90,25 @@ pub fn classify(command: &str) -> CommandInfo {
 const BUILD: &str = r"\bcargo\s+(build|check|clippy)\b|\btsc\b|\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\bgo\s+(build|vet)\b|\bmake\b|\b(mvn|gradle|gradlew)\b|\b(webpack|next\s+build)\b|\bvite\s+build\b|\b(gcc|g\+\+|clang)\b";
 
 const INSTALL: &str = r"\b(npm|pnpm|yarn|bun)\s+(install|i|add|ci)\b|\b(pip|pip3)\s+install\b|\buv\s+(sync|pip\s+install|add)\b|\bpoetry\s+install\b|\bcargo\s+(install|fetch)\b|\b(apt|apt-get|brew)\s+install\b|\bgo\s+(get|mod\s+download)\b";
+
+/// The first command (after a leading cd) prints file content: `cat`, `head`, `tail`,
+/// `less`, `bat`, `nl`, or `sed` without `-i`.
+fn is_view(command: &str) -> bool {
+    let (prefix, _) = shell::leading_cd(command);
+    let line = shell::parse(&command[prefix..]);
+    let Some(seg) = line.segments.first() else {
+        return false;
+    };
+    let w = shell::program_words(seg);
+    let Some(first) = w.first() else {
+        return false;
+    };
+    match shell::program_name(first) {
+        "cat" | "head" | "tail" | "less" | "more" | "bat" | "nl" => true,
+        "sed" => !w.iter().any(|x| x.starts_with("-i")),
+        _ => false,
+    }
+}
 
 /// The runner of a simple command, from its program words (command position only:
 /// `git commit -m "fix pytest"` runs git, not pytest).
@@ -262,6 +287,20 @@ mod tests {
         ] {
             assert!(!writes_files(cmd), "{cmd}");
         }
+    }
+
+    #[test]
+    fn file_views() {
+        for cmd in [
+            "sed -n '1,80p' src/app.py",
+            "cat README.md",
+            "head -50 build.log",
+            "cd /app && cat -n src/app.py | head -100",
+        ] {
+            assert_eq!(classify(cmd).kind, OutputKind::View, "{cmd}");
+        }
+        assert_eq!(classify("pytest -q | tail -20").kind, OutputKind::Test);
+        assert_eq!(classify("sed -i 's/a/b/' x.py").kind, OutputKind::Other);
     }
 
     /// R1.3: variants of one test run share a key; other targets do not.
