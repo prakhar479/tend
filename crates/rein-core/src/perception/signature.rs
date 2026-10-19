@@ -55,7 +55,10 @@ pub fn signature_of(test: Option<&str>, message: &str) -> String {
 /// Find failures in tool output. Runner-specific patterns first, generic errors as fallback.
 /// The order of the result follows the output. Duplicates (same signature) are removed.
 pub fn extract_failures(output: &str) -> Vec<Failure> {
-    let lines = clean_lines(output);
+    let lines: Vec<String> = clean_lines(output)
+        .into_iter()
+        .map(|l| strip_grep_prefix(&l).to_string())
+        .collect();
     let panics = cargo_panics(&lines);
     let mut found: Vec<(Option<String>, String)> = Vec::new();
 
@@ -97,11 +100,32 @@ pub fn extract_failures(output: &str) -> Vec<Failure> {
     if found.is_empty() {
         for line in &lines {
             let l = line.trim();
-            if re!(r"^\w+(Error|Exception): .+|^error(\[E\d+\])?: .+|\berror TS\d+: .+|:\d+:\d+: error: .+")
+            // pytest's `E   KeyError: 'total'` detail lines, when the agent cut the summary.
+            let l = match l.strip_prefix("E ") {
+                Some(rest) if re!(r"^\s*(\w+(Error|Exception)\b|assert\b)").is_match(rest) => {
+                    rest.trim()
+                }
+                _ => l,
+            };
+            if re!(r"^\w+(Error|Exception)(: .+)?$|^assert\b.+|^error(\[E\d+\])?: .+|\berror TS\d+: .+|:\d+:\d+: error: .+")
                 .is_match(l)
             {
                 found.push((None, l.to_string()));
             }
+        }
+    }
+    // Only a summary line is left (`… | tail -1`). It still says the run failed, and the
+    // same counts after an edit are the same failure (R1.2).
+    if found.is_empty() {
+        let summary = lines
+            .iter()
+            .rev()
+            .map(|l| l.trim().trim_matches('=').trim())
+            .find(|l| {
+                re!(r"^\d+ failed\b|^Tests:\s+\d+ failed\b|^test result: FAILED\b").is_match(l)
+            });
+        if let Some(l) = summary {
+            found.push((None, l.to_string()));
         }
     }
 
@@ -200,6 +224,25 @@ fn jest_message(lines: &[String], i: usize) -> String {
         }
     }
     parts.join("; ")
+}
+
+/// `grep -n` output: `83:--- FAIL: TestX`. Drop the line number when a known failure
+/// line follows it.
+fn strip_grep_prefix(line: &str) -> &str {
+    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 || !matches!(line.as_bytes().get(digits), Some(b':' | b'-')) {
+        return line;
+    }
+    let rest = &line[digits + 1..];
+    let t = rest.trim_start();
+    let known = [
+        "--- FAIL", "FAILED ", "ERROR ", "FAIL", "test ", "● ", "E ", "thread '",
+    ];
+    if known.iter().any(|k| t.starts_with(k)) {
+        rest
+    } else {
+        line
+    }
 }
 
 fn next_nonempty(lines: &[String], i: usize) -> Option<String> {
@@ -344,6 +387,39 @@ mod tests {
             pairs(&extract_failures(old)),
             vec![("a::b", "'boom', src/x.rs:1:2")]
         );
+    }
+
+    /// R1.2: the agent trims test output (99% of runs). Failures still count.
+    #[test]
+    fn trimmed_outputs() {
+        let e_lines = include_str!("../../../../fixtures/outputs/pytest_grep_e_lines.txt");
+        assert_eq!(
+            pairs(&extract_failures(e_lines)),
+            vec![("", "assert 500 == 200"), ("", "KeyError: 'total'")]
+        );
+        let summary = include_str!("../../../../fixtures/outputs/pytest_summary_only.txt");
+        assert_eq!(
+            pairs(&extract_failures(summary)),
+            vec![("", "2 failed, 300 passed in 0.14s")]
+        );
+        // The same counts in another run are the same failure; other counts are not.
+        assert_eq!(
+            signature_of(None, "2 failed, 300 passed in 0.14s"),
+            signature_of(None, "2 failed, 300 passed in 3.91s")
+        );
+        let grep_n = include_str!("../../../../fixtures/outputs/go_test_grep_n.txt");
+        let found = extract_failures(grep_n);
+        let tests: Vec<&str> = found.iter().filter_map(|f| f.test.as_deref()).collect();
+        assert_eq!(
+            tests,
+            vec!["TestTotalWithTax", "TestFind/id=42", "TestPanics"]
+        );
+        // A bare exception after a traceback (`raise AssertionError`).
+        let bare = "Traceback (most recent call last):\n  File \"t.py\", line 3\nAssertionError\n";
+        assert_eq!(pairs(&extract_failures(bare)), vec![("", "AssertionError")]);
+        // A passing summary is not a failure.
+        assert!(extract_failures("300 passed in 0.14s").is_empty());
+        assert!(extract_failures("test result: ok. 2 passed; 0 failed; 0 ignored").is_empty());
     }
 
     #[test]

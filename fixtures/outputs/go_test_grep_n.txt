@@ -1,0 +1,6 @@
+83:--- FAIL: TestTotalWithTax (0.00s)
+89:--- FAIL: TestFind (0.00s)
+92:    --- FAIL: TestFind/id=42 (0.00s)
+94:--- FAIL: TestPanics (0.00s)
+111:FAIL	example.com/shop	0.004s
+112:FAIL
