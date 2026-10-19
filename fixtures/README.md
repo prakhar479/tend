@@ -9,7 +9,7 @@
 | `outputs/vitest_fail.txt` | vitest 2.1 `--reporter=verbose`: 3 failed, 30 passed | Captured 2026-10-19 |
 | `outputs/repeated_traces.txt` | Python worker: the same traceback 50 times | Captured 2026-10-19 |
 | `claude_code/*.json` | Claude Code hook payloads | Captured 2026-10-19, Claude Code 2.1.303 (TASKS.md S1) |
-| `transcripts/loop_session.jsonl` | Claude Code transcript: 4 failing runs, 3 edits | Captured 2026-10-19 (TASKS.md S5). Only user/assistant lines and the fields winnow reads |
+| `transcripts/loop_session.jsonl` | Claude Code transcript: 4 failing runs, 3 edits | Captured 2026-10-19 (TASKS.md S5). Only user/assistant lines and the fields rein reads |
 
 Rules:
 

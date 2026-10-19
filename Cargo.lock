@@ -251,6 +251,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "rein-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "rein-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rein-core"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -358,28 +380,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
-]
-
-[[package]]
-name = "winnow"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "libc",
- "serde",
- "serde_json",
- "winnow-core",
-]
-
-[[package]]
-name = "winnow-core"
-version = "0.1.0"
-dependencies = [
- "regex",
- "serde",
- "serde_json",
- "sha2",
 ]
 
 [[package]]

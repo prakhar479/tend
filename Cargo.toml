@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/winnow-core", "crates/winnow"]
+members = ["crates/rein-core", "crates/rein-cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,7 +8,7 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
-winnow-core = { path = "crates/winnow-core" }
+rein-core = { path = "crates/rein-core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
