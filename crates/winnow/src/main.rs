@@ -15,7 +15,7 @@ mod store;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use winnow_core::Mode;
 
@@ -50,6 +50,13 @@ enum Cmd {
     Mode {
         #[arg(value_enum)]
         mode: ModeArg,
+        #[arg(long)]
+        session: Option<PathBuf>,
+    },
+    /// Allow one edit the test guard blocked (the latest, or action a-N). Run it yourself,
+    /// for example with `! winnow allow` in Claude Code; the agent may not.
+    Allow {
+        id: Option<String>,
         #[arg(long)]
         session: Option<PathBuf>,
     },
@@ -147,6 +154,14 @@ fn run(cli: Cli) -> Result<i32> {
             let dir = paths::resolve_session(session)?;
             let req = ipc::Request::SetMode { mode: mode.into() };
             let reply = ipc::send(&paths::socket_path(&dir), &req, Duration::from_secs(1))?;
+            println!("{}", reply.message.unwrap_or_default());
+            Ok(0)
+        }
+        Cmd::Allow { id, session } => {
+            let dir = paths::resolve_session(session)?;
+            let req = ipc::Request::Allow { action: id };
+            let reply = ipc::send(&paths::socket_path(&dir), &req, Duration::from_secs(1))
+                .with_context(|| format!("session {} is not live", dir.display()))?;
             println!("{}", reply.message.unwrap_or_default());
             Ok(0)
         }

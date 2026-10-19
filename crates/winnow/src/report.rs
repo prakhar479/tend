@@ -163,6 +163,11 @@ pub fn render(label: &str, entries: &[Entry]) -> String {
     let mut config = Vec::new();
     let defaults = Config::default().fields();
 
+    let overrides: HashSet<u64> = entries
+        .iter()
+        .filter(|e| matches!(e.body, Body::Override { .. }))
+        .map(|e| e.seq)
+        .collect();
     for e in entries {
         match &e.body {
             Body::Event { event } => match event {
@@ -191,6 +196,7 @@ pub fn render(label: &str, entries: &[Entry]) -> String {
                 _ => {}
             },
             Body::Output { .. } | Body::Format { .. } => {}
+            Body::Override { action } => guards.push(format!("[user allowed] {action} once")),
             Body::Judgment { .. } => judgments += 1,
             Body::Action {
                 action,
@@ -222,6 +228,14 @@ pub fn render(label: &str, entries: &[Entry]) -> String {
                         }
                         SteerTrigger::Cycle { .. } => cycles.push(format!("{st} {text}")),
                     }
+                }
+                ActionKind::BlockCommand { command } => guards.push(format!(
+                    "{} the agent's `{}`: {reason}",
+                    status(*applied, "blocked", "would block"),
+                    truncate_chars(command, 60)
+                )),
+                ActionKind::Guard { .. } if e.causes.iter().any(|c| overrides.contains(c)) => {
+                    guards.push(format!("[allowed] {reason}"));
                 }
                 ActionKind::Guard { decision, .. } => {
                     let d = format!("{decision:?}").to_lowercase();
@@ -348,6 +362,7 @@ fn describe(e: &Entry) -> String {
                 ActionKind::Shape { .. } => "shape",
                 ActionKind::Steer { .. } => "steer",
                 ActionKind::Guard { .. } => "guard",
+                ActionKind::BlockCommand { .. } => "block",
             };
             let state = match (applied, unsupported) {
                 (true, _) => "applied",
@@ -386,6 +401,7 @@ fn describe(e: &Entry) -> String {
         Body::ModeChanged { from, to } => format!("mode {from:?} → {to:?}"),
         Body::Config { overrides } => format!("config {overrides:?}"),
         Body::Format { version } => format!("ledger format {version}"),
+        Body::Override { action } => format!("user allowed {action} once"),
         Body::Event { event } => {
             format!(
                 "event {}",
@@ -484,6 +500,38 @@ mod tests {
         );
         assert!(r.contains("Shaping: 1 outputs · 4.0k → 1.0k tokens · saves 3.0k (30% of Bash output) [would apply]"), "{r}");
         assert!(r.contains("Not shapeable: 1 outputs"), "{r}");
+    }
+
+    #[test]
+    fn allowed_edit_is_shown_as_allowed() {
+        let guard = |id: &str, applied: bool| Body::Action {
+            id: id.into(),
+            action: ActionKind::Guard {
+                path: "tests/t.py".into(),
+                decision: winnow_core::guard::GuardDecision::Deny,
+            },
+            reason: format!("reason {id}"),
+            applied,
+            unsupported: false,
+        };
+        let mut allowed = entry(2, guard("a-2", false));
+        allowed.causes = vec![1];
+        let r = render(
+            "t",
+            &[
+                entry(0, guard("a-1", true)),
+                entry(
+                    1,
+                    Body::Override {
+                        action: "a-1".into(),
+                    },
+                ),
+                allowed,
+            ],
+        );
+        assert!(r.contains("[deny] reason a-1"), "{r}");
+        assert!(r.contains("[user allowed] a-1 once"), "{r}");
+        assert!(r.contains("[allowed] reason a-2"), "{r}");
     }
 
     #[test]

@@ -34,7 +34,9 @@ fn fake_agent(dir: &Path) -> PathBuf {
          echo \"$@\" > '{d}/args.txt'\n\
          winnow hook PostToolUse < '{post}' > '{d}/post-out.json'\n\
          winnow hook PreToolUse < '{pre}' > '{d}/pre-out.json'\n\
-         winnow hook PostToolUseFailure < '{fail}' > '{d}/fail-out.json'\n",
+         winnow hook PostToolUseFailure < '{fail}' > '{d}/fail-out.json'\n\
+         winnow allow > '{d}/allow-out.txt' 2>&1\n\
+         winnow hook PreToolUse < '{pre}' > '{d}/retry-out.json'\n",
         d = dir.display(),
         post = fixture("post_tool_use_bash.json").display(),
         pre = fixture("pre_tool_use_edit_test.json").display(),
@@ -112,7 +114,12 @@ fn look_mode_records_and_changes_nothing() {
     );
     assert!(report.contains("Shaping: 1 outputs"), "{report}");
     assert!(report.contains("[would apply]"), "{report}");
-    assert!(report.contains("Test guard: 1"), "{report}");
+    // Look mode blocks nothing, so the retry is flagged again and there is nothing to allow.
+    assert!(report.contains("Test guard: 2"), "{report}");
+    assert!(report.contains("[would deny]"), "{report}");
+    assert!(fs::read_to_string(dir.join("allow-out.txt"))
+        .unwrap()
+        .contains("No edit was blocked"));
     assert!(report.contains("Not shapeable: 1 outputs"), "{report}");
     assert!(socket_gone(&session), "daemon must stop with the session");
 }
@@ -131,7 +138,17 @@ fn optimize_mode_shapes_and_guards() {
 
     let pre: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(dir.join("pre-out.json")).unwrap()).unwrap();
-    assert_eq!(pre["hookSpecificOutput"]["permissionDecision"], "ask");
+    // S6: Claude Code's ask prompt hides the reason, so the guard denies with it.
+    assert_eq!(pre["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(pre["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap()
+        .contains("winnow allow"));
+    let retry = fs::read_to_string(dir.join("retry-out.json")).unwrap();
+    assert_eq!(retry, "", "allowed once by the user: no response on retry");
+    assert!(fs::read_to_string(dir.join("allow-out.txt"))
+        .unwrap()
+        .contains("Allowed once"));
 
     let original: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(fixture("post_tool_use_bash.json")).unwrap())

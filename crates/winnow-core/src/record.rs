@@ -73,6 +73,10 @@ pub enum Body {
         from: Mode,
         to: Mode,
     },
+    /// The user allowed, once, the edit that guard action `action` blocked.
+    Override {
+        action: String,
+    },
     /// Config values that differ from the defaults, recorded at session start.
     Config {
         overrides: BTreeMap<String, String>,
@@ -96,6 +100,10 @@ pub enum ActionKind {
     Guard {
         path: String,
         decision: GuardDecision,
+    },
+    /// A command the agent may not run (it would lift a guard).
+    BlockCommand {
+        command: String,
     },
 }
 

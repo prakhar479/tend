@@ -22,12 +22,14 @@ impl Capabilities {
     /// Claude Code. `replace_output` uses PostToolUse `updatedToolOutput` in the shape of
     /// `tool_response` (S2). PostToolUseFailure ignores `updatedToolOutput` but passes
     /// `additionalContext` (S2), so failed runs can be steered but not shaped.
+    /// `ask` is false: the interactive prompt shows neither user nor agent the reason (S6),
+    /// so the guard downgrades to deny, which the agent sees with its reason.
     pub const CLAUDE_CODE: Self = Self {
         replace_output: true,
         replace_failed_output: false,
         rewrite_input: true,
         deny: true,
-        ask: true,
+        ask: false,
         inject_context: true,
         continue_turn: true,
         block_compaction: true,

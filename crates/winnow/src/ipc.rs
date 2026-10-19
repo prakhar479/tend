@@ -21,6 +21,10 @@ pub enum Request {
     SetMode {
         mode: Mode,
     },
+    /// Allow one blocked edit (the latest if `action` is None).
+    Allow {
+        action: Option<String>,
+    },
     Ping,
     Shutdown,
 }

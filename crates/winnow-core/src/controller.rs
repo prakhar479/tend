@@ -6,6 +6,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+/// An edit, by path and content hashes. A blocked edit is allowed by this key.
+type EditKey = (String, String, String);
+
 use crate::broker::{Answer, Broker, Question};
 use crate::capability::Capabilities;
 use crate::event::{Event, Mode};
@@ -121,6 +124,11 @@ pub struct Controller {
     next_output: u64,
     next_action: u64,
     outputs: HashMap<String, OutputKind>,
+    /// Blocked guard actions, by action id, and the most recent one.
+    blocked: BTreeMap<String, EditKey>,
+    last_blocked: Option<String>,
+    /// Edits the user allowed once, with the action id and the override entry seq.
+    allowed: BTreeMap<EditKey, (String, u64)>,
 }
 
 impl Controller {
@@ -135,7 +143,36 @@ impl Controller {
             next_output: 1,
             next_action: 1,
             outputs: HashMap::new(),
+            blocked: BTreeMap::new(),
+            last_blocked: None,
+            allowed: BTreeMap::new(),
         }
+    }
+
+    /// The user allows one blocked edit (the latest one if `action` is None).
+    /// Err is a message for the user.
+    pub fn allow(&mut self, action: Option<&str>, now_ms: u64) -> Result<Decision, String> {
+        let id = match action {
+            Some(a) => a.to_string(),
+            None => self
+                .last_blocked
+                .clone()
+                .ok_or("No edit was blocked in this session.")?,
+        };
+        let key = self
+            .blocked
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| format!("{id} is not a blocked edit."))?;
+        let mut d = Decision::default();
+        let seq = self.push(
+            &mut d,
+            now_ms,
+            vec![],
+            Body::Override { action: id.clone() },
+        );
+        self.allowed.insert(key, (id, seq));
+        Ok(d)
     }
 
     pub fn mode(&self) -> Mode {
@@ -185,6 +222,7 @@ impl Controller {
                     self.push(&mut d, now_ms, vec![ev], Body::Config { overrides });
                 }
             }
+            Event::ToolRequested { .. } => self.on_tool_requested(&mut d, event, now_ms),
             other => {
                 self.push(&mut d, now_ms, vec![], Body::Event { event: other });
             }
@@ -346,6 +384,29 @@ impl Controller {
         }
     }
 
+    /// Only the user may lift a guard. Block the agent's own `winnow allow`.
+    /// The match is on the command text, so a determined agent can get around it;
+    /// the guard is advisory and every allow is in the ledger.
+    fn on_tool_requested(&mut self, d: &mut Decision, event: Event, now: u64) {
+        let command = match &event {
+            Event::ToolRequested { tool, input, .. } if tool == "Bash" => input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            _ => String::new(),
+        };
+        let ev = self.push(d, now, vec![], Body::Event { event });
+        if !re!(r"\bwinnow\s+allow\b").is_match(&command) {
+            return;
+        }
+        let message = "winnow: only the user can allow a blocked edit. Ask the user to run `! winnow allow`, then retry the edit.".to_string();
+        let action = ActionKind::BlockCommand { command };
+        if self.act(d, now, ev, action, message.clone()) {
+            d.response.permission = Some(Permission::Deny(message));
+        }
+    }
+
     fn on_edit_proposed(&mut self, d: &mut Decision, event: Event, now: u64) {
         let Event::EditProposed {
             tool_use_id,
@@ -357,6 +418,7 @@ impl Controller {
             return;
         };
         let (old_hash, new_hash) = (sha256_hex(&old_text), sha256_hex(&new_text));
+        let key: EditKey = (path.clone(), old_hash.clone(), new_hash.clone());
         let stored = Event::EditProposed {
             tool_use_id,
             path: path.clone(),
@@ -400,12 +462,43 @@ impl Controller {
         };
 
         let decision = self.effective_guard(self.session.guard);
-        let message = format!(
-            "winnow: this edit may weaken tests in {path}: {}.",
-            reasons.join("; ")
-        );
+        if let Some((id, override_seq)) = self.allowed.remove(&key) {
+            let reason = format!("Allowed once by the user (`winnow allow {id}`).");
+            let action = ActionKind::Guard { path, decision };
+            let a = self.next_action_id();
+            self.push(
+                d,
+                now,
+                vec![j, override_seq],
+                Body::Action {
+                    id: a,
+                    action,
+                    reason,
+                    applied: false,
+                    unsupported: false,
+                },
+            );
+            return;
+        }
+        let blocking = decision != GuardDecision::Warn;
+        let message = if blocking {
+            format!(
+                "winnow: this edit may weaken tests in {path}: {}. If the user wants it anyway, they can run `! winnow allow` and you can retry the same edit.",
+                reasons.join("; ")
+            )
+        } else {
+            format!(
+                "winnow: this edit may weaken tests in {path}: {}.",
+                reasons.join("; ")
+            )
+        };
         let action = ActionKind::Guard { path, decision };
+        let id = format!("a-{}", self.next_action);
         if self.act(d, now, j, action, message.clone()) {
+            if blocking {
+                self.blocked.insert(id.clone(), key);
+                self.last_blocked = Some(id);
+            }
             match decision {
                 GuardDecision::Ask => d.response.permission = Some(Permission::Ask(message)),
                 GuardDecision::Deny => d.response.permission = Some(Permission::Deny(message)),
@@ -446,8 +539,15 @@ impl Controller {
         }
     }
 
+    fn next_action_id(&mut self) -> String {
+        let id = format!("a-{}", self.next_action);
+        self.next_action += 1;
+        id
+    }
+
     fn supports(&self, action: &ActionKind) -> bool {
         match action {
+            ActionKind::BlockCommand { .. } => self.caps.deny,
             ActionKind::Shape { .. } => self.caps.replace_output,
             ActionKind::Steer { .. } => self.caps.inject_context,
             ActionKind::Guard { decision, .. } => match decision {
@@ -482,8 +582,7 @@ impl Controller {
         supported: bool,
     ) -> bool {
         let applied = self.session.mode == Mode::Optimize && supported;
-        let id = format!("a-{}", self.next_action);
-        self.next_action += 1;
+        let id = self.next_action_id();
         self.push(
             d,
             now,
@@ -679,19 +778,66 @@ mod tests {
         }
     }
 
+    fn weakening() -> Event {
+        Event::EditProposed {
+            tool_use_id: "x".into(),
+            path: "tests/test_api.py".into(),
+            old_text: "assert a == 1\nassert b == 2\n".into(),
+            new_text: "assert a == 1\n".into(),
+        }
+    }
+
     #[test]
-    fn guard_asks_on_weakened_test_in_claude_code() {
+    fn guard_denies_with_reason_in_claude_code() {
         let mut c = ctl(Mode::Optimize);
-        let d = c.handle(
-            Event::EditProposed {
-                tool_use_id: "x".into(),
-                path: "tests/test_api.py".into(),
-                old_text: "assert a == 1\nassert b == 2\n".into(),
-                new_text: "assert a == 1\n".into(),
-            },
-            0,
+        let d = c.handle(weakening(), 0);
+        match d.response.permission {
+            Some(Permission::Deny(m)) => {
+                assert!(m.contains("assertions removed (2 → 1)"), "{m}");
+                assert!(m.contains("! winnow allow"), "{m}");
+            }
+            p => panic!("want deny, got {p:?}"),
+        }
+    }
+
+    #[test]
+    fn user_allows_a_blocked_edit_once() {
+        let mut c = ctl(Mode::Optimize);
+        c.handle(weakening(), 0);
+        assert!(c.allow(Some("a-9"), 1).is_err(), "unknown action");
+        let d = c.allow(None, 1).expect("allow the latest");
+        assert!(matches!(&d.entries[0].body, Body::Override { action } if action == "a-1"));
+        let override_seq = d.entries[0].seq;
+
+        let d = c.handle(weakening(), 2);
+        assert_eq!(d.response.permission, None, "allowed once");
+        assert!(d.entries.iter().any(|e| matches!(
+            &e.body,
+            Body::Action { applied: false, reason, .. } if reason.contains("winnow allow a-1")
+        ) && e.causes.contains(&override_seq)));
+
+        let d = c.handle(weakening(), 3);
+        assert!(
+            matches!(d.response.permission, Some(Permission::Deny(_))),
+            "only once"
         );
-        assert!(matches!(d.response.permission, Some(Permission::Ask(_))));
+    }
+
+    #[test]
+    fn agent_cannot_allow_itself() {
+        let mut c = ctl(Mode::Optimize);
+        let req = |cmd: &str| Event::ToolRequested {
+            tool_use_id: "b".into(),
+            tool: "Bash".into(),
+            input: json!({ "command": cmd }),
+        };
+        let d = c.handle(req("cd /x && winnow allow a-1"), 0);
+        assert!(matches!(d.response.permission, Some(Permission::Deny(_))));
+        assert!(c.handle(req("winnow show o-1"), 1).response.is_empty());
+        assert!(ctl(Mode::Look)
+            .handle(req("winnow allow"), 0)
+            .response
+            .is_empty());
     }
 
     #[test]

@@ -106,6 +106,19 @@ fn serve(stream: UnixStream, state: &Mutex<State>, sock: &Path) -> Result<()> {
                     message: Some(format!("mode: {mode:?}").to_lowercase()),
                 }
             }
+            Request::Allow { action } => {
+                let message = match st.controller.allow(action.as_deref(), now_ms()) {
+                    Ok(d) => {
+                        st.store.persist(&d)?;
+                        "Allowed once. The agent can retry the edit now.".to_string()
+                    }
+                    Err(m) => m,
+                };
+                Reply {
+                    output: None,
+                    message: Some(message),
+                }
+            }
             Request::Ping => Reply {
                 output: None,
                 message: Some("pong".into()),

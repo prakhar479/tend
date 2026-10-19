@@ -275,7 +275,8 @@ pub fn settings(exe: &Path) -> Value {
     json!({
         "hooks": {
             "SessionStart": entry("SessionStart", None),
-            "PreToolUse": entry("PreToolUse", Some("Edit|MultiEdit|Write")),
+            // Bash too: the agent may not run `winnow allow` (see Controller::on_tool_requested).
+            "PreToolUse": entry("PreToolUse", Some(tools)),
             "PostToolUse": entry("PostToolUse", Some(tools)),
             "PostToolUseFailure": entry("PostToolUseFailure", Some(tools)),
             "UserPromptSubmit": entry("UserPromptSubmit", None),
