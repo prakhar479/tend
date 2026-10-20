@@ -1,0 +1,36 @@
+[package]
+name = "tend-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tend-core = { path = "../crates/tend-core" }
+
+# Not part of the main workspace: it needs nightly (`cargo +nightly fuzz run <target>`).
+[workspace]
+
+[[bin]]
+name = "shell"
+path = "fuzz_targets/shell.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "output"
+path = "fuzz_targets/output.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "guard"
+path = "fuzz_targets/guard.rs"
+test = false
+doc = false
+bench = false

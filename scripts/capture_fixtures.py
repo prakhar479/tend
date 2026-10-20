@@ -87,6 +87,11 @@ def cmd_hooks(a):
     if len(hits) != 1:
         sys.exit(f"{len(hits)} payloads match --event {a.event} --match {a.match!r}; need exactly 1")
     p = hits[0]["payload"]
+    # --replace OLD=NEW, applied to the raw payload first: for paths the sanitizer cannot
+    # know, such as the tend binary inside a wrapped command.
+    for r in a.replace or []:
+        old_text, _, new_text = r.partition("=")
+        p = json.loads(json.dumps(p).replace(old_text, new_text))
     if "session_id" in p:
         p["session_id"] = SESSION_ID
     if "prompt_id" in p:
@@ -138,6 +143,7 @@ def main():
     h.add_argument("--event", required=True)
     h.add_argument("--match", default="", help="text the payload must contain")
     h.add_argument("--tool-use", type=int, default=1, help="N for the toolu_0N id")
+    h.add_argument("--replace", action="append", metavar="OLD=NEW", help="replace text in the raw payload first (repeatable)")
     h.add_argument("--out", required=True)
     t = sub.add_parser("transcript", help="a sanitized transcript")
     t.add_argument("src")

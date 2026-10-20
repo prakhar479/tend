@@ -1,0 +1,17 @@
+{
+  "cwd": "/home/dev/shop",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "auto",
+  "prompt_id": "9b1d6f2e-0000-4000-8000-000000000001",
+  "session_id": "9b1d6f2e-0000-4000-8000-000000000001",
+  "tool_input": {
+    "command": "python3 -m pytest -v tests",
+    "description": "Run test suite verbosely"
+  },
+  "tool_name": "Bash",
+  "tool_use_id": "toolu_01",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-shop/9b1d6f2e-0000-4000-8000-000000000001.jsonl"
+}

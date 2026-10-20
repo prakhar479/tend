@@ -631,6 +631,40 @@ mod tests {
         }
     }
 
+    /// T8: real captures from Claude Code 2.1.304 (conformance run): a PreToolUse Bash
+    /// payload in auto mode, and the PostToolUseFailure of a wrapped test run, whose
+    /// error text is tend's summary.
+    #[test]
+    fn real_auto_mode_and_wrapped_failure_payloads() {
+        let mut c = ClaudeCode {
+            started: true,
+            ..Default::default()
+        };
+        let pre = fixture("pre_tool_use_bash_auto.json");
+        assert_eq!(pre["permission_mode"], "auto");
+        let evs = c.map("PreToolUse", &pre);
+        assert!(
+            matches!(&evs[..], [Event::ToolRequested { tool, input, .. }]
+                if tool == "Bash" && input["command"] == "python3 -m pytest -v tests"),
+            "{evs:?}"
+        );
+        let post = fixture("post_tool_use_failure_wrapped.json");
+        let evs = c.map("PostToolUseFailure", &post);
+        let Some(Event::ToolCompleted {
+            failed,
+            output,
+            input,
+            ..
+        }) = evs.last()
+        else {
+            panic!("{evs:?}")
+        };
+        assert!(*failed);
+        assert!(input["command"].as_str().unwrap().contains(" run --id "));
+        assert!(output.contains("full output: tend show o-1"), "{output}");
+        assert!(output.contains("FAILED tests/test_api.py::test_total_empty"));
+    }
+
     /// R3.7: payload shape from the 2.1.303 hook schema (not yet captured live).
     #[test]
     fn permission_denied_maps_and_encodes_retry() {

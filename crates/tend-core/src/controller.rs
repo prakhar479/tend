@@ -1628,6 +1628,26 @@ mod tests {
         assert!(c.undelivered(&[], 4).entries.is_empty());
     }
 
+    /// T3: a summary that never reached the agent does not make the next run a re-open,
+    /// and an undelivered deny cannot be allowed by id.
+    #[test]
+    fn undelivered_actions_leave_no_state_behind() {
+        let mut c = ctl(Mode::Optimize);
+        let shaped = c.handle(bash("pytest", PYTEST), 0);
+        assert!(shaped.response.replace_output.is_some());
+        c.undelivered(&[shaped], 1);
+        let d = c.handle(bash("pytest", PYTEST), 2);
+        assert!(
+            !d.entries
+                .iter()
+                .any(|e| matches!(&e.body, Body::Adaptation { .. })),
+            "not a re-open: the agent never saw a summary"
+        );
+        let deny = c.handle(weakening(), 3);
+        c.undelivered(&[deny], 4);
+        assert!(c.allow(Some("a-2"), 5).is_err() && c.allow(None, 5).is_err());
+    }
+
     #[test]
     fn guard_denies_with_reason_in_claude_code() {
         let mut c = ctl(Mode::Optimize);

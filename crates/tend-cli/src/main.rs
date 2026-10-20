@@ -1,5 +1,10 @@
 //! tend CLI: launcher, hook shim, session daemon, and inspection commands.
 
+// Unix sockets, process groups, and signals throughout: say so instead of a page of
+// errors (I5, X1).
+#[cfg(not(unix))]
+compile_error!("tend supports Unix (Linux, macOS) only for now");
+
 mod config;
 mod connector;
 mod daemon;

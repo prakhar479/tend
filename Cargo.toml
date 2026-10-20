@@ -5,6 +5,8 @@ members = ["crates/tend-core", "crates/tend-cli"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# std::io::pipe (tend run) needs 1.87.
+rust-version = "1.87"
 publish = false
 
 [workspace.dependencies]

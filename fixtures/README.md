@@ -10,6 +10,10 @@
 | `outputs/vitest_fail.txt` | vitest 2.1 `--reporter=verbose`: 3 failed, 30 passed | Captured 2026-10-19 |
 | `outputs/repeated_traces.txt` | Python worker: the same traceback 50 times | Captured 2026-10-19 |
 | `claude_code/*.json` | Claude Code hook payloads | Captured 2026-10-19, Claude Code 2.1.303 (TASKS.md S1) |
+| `claude_code/pre_tool_use_bash_auto.json` | PreToolUse Bash in auto mode (`python3 -m pytest -v tests`) | Captured 2026-10-20, Claude Code 2.1.304 (conformance run) |
+| `claude_code/post_tool_use_failure_wrapped.json` | PostToolUseFailure of a test run tend wrapped: the error text is tend's summary | Captured 2026-10-20, Claude Code 2.1.304; tend's path replaced with `/usr/local/bin/tend` |
+| `claude_code/permission_denied_bash.json` | PermissionDenied for a wrapped Bash call | **Synthetic**, from the 2.1.303 hook schema; replace with a capture when a denial happens (R3.7) |
+| `outputs/pytest_grep_e_lines.txt`, `outputs/pytest_summary_only.txt`, `outputs/go_test_grep_n.txt` | Output as an agent trims it (`grep -E`, `tail -1`, `grep -n`) | **Hand-made** from the captured runs above |
 | `transcripts/loop_session.jsonl` | Claude Code transcript: 4 failing runs, 3 edits | Captured 2026-10-19 (TASKS.md S5). Only user/assistant lines and the fields tend reads |
 
 Rules:

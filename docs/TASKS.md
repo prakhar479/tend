@@ -232,7 +232,24 @@ Review after the checkpoint: about 60 findings, most of them confirmed. Batches 
   - U9: README.
   - U6–U8, U11: see I1.
   - Tests: huge-output streaming (e2e) and no blobs for non-test edits.
-- [ ] **I5. Tests and CI:** T3, T5–T9, X1.
+- [x] **I5. Tests and CI:** T3, T5–T9, X1.
+  Done:
+  - T3: the daemon's hook decision is `decide_hook` with an injected clock; tests cover on time, late before handling, the reply margin, late after handling, and no deadline. A controller test checks that undelivered actions leave no re-open or allow state.
+  - T5: `fuzz/` has the targets shell, output, and guard (nightly). 60 s each found nothing.
+  - T6: the busy-daemon test times direct socket requests against an idle baseline and asserts at least one sample. The orphan test polls instead of sleeping.
+  - T7: e2e resolves the socket by the daemon's rule and waits for a ping.
+    - Found on the way: the daemon's socket file appeared before it listened (bind before listen), so an early client got "connection refused". The I1 launcher's faster start made this flake about 1 run in 3. The daemon now binds under a temporary name and renames, and 0 of 24 runs flaked, 9 of them under 3× parallel load.
+  - T8:
+    - Real captures from Claude Code 2.1.304: PreToolUse Bash in auto mode, and the PostToolUseFailure of a wrapped run. `capture_fixtures.py --replace` handles the tend path.
+    - `fixtures/README.md` lists the synthetic and hand-made fixtures.
+    - The conformance prompt now runs the Bash write before the edit that gets denied: on 2.1.304 the agent stopped after the denial.
+    - `conformance.py --replay`.
+    - 2.1.304: all 9 checks pass.
+  - T9:
+    - CI pins Rust 1.95.0.
+    - Jobs: an MSRV job (1.87, the new `rust-version`); a latency job (an ignored e2e test, p95 < 20 ms in release); a 60 s fuzz smoke job; `py_compile`; and a manual conformance job (`workflow_dispatch`, needs `ANTHROPIC_API_KEY`).
+    - CI still needs a remote (C5).
+  - X1: `compile_error!` on non-Unix.
 - [ ] **I6. Later:** F6, F8 + P1, R3, R4, L7, U10, U11, simplifications.
 
 ## Phase 2 — Optimize + Codex (not started)

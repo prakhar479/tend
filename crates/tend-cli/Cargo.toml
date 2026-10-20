@@ -3,6 +3,7 @@ name = "tend-cli"
 description = "Local supervisor for command-line coding agents."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 publish.workspace = true
 
 [[bin]]

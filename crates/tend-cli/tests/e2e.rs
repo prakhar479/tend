@@ -85,9 +85,23 @@ fn tend(args: &[&str], session: &Path) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
+/// The session socket, by the daemon's rule (`paths::socket_path`): a long session path
+/// falls back to `<tmp>/tend-<uid>/<hash>.sock` (I5, T7).
+fn socket_of(session: &Path) -> PathBuf {
+    let p = session.join("tendd.sock");
+    if p.as_os_str().len() <= 100 {
+        return p;
+    }
+    let hash = tend_core::text::sha256_hex(&session.to_string_lossy());
+    let uid = unsafe { libc::getuid() };
+    std::env::temp_dir()
+        .join(format!("tend-{uid}"))
+        .join(format!("{}.sock", &hash[..16]))
+}
+
 fn socket_gone(session: &Path) -> bool {
     for _ in 0..50 {
-        if !session.join("tendd.sock").exists() {
+        if !socket_of(session).exists() {
             return true;
         }
         thread::sleep(Duration::from_millis(20));
@@ -189,13 +203,8 @@ fn concurrent_hooks_keep_the_ledger_ordered_and_whole() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let sock = session.join("tendd.sock");
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    let sock = socket_of(&session);
+    wait_for_daemon(&sock);
 
     let calls = [
         ("PostToolUse", "post_tool_use_bash.json"),
@@ -255,6 +264,24 @@ impl Drop for Daemon {
     }
 }
 
+/// Wait until the daemon answers a ping: a socket file alone may not listen yet.
+fn wait_for_daemon(sock: &Path) {
+    use std::io::{BufRead, BufReader, Write};
+    for _ in 0..500 {
+        if let Ok(mut s) = std::os::unix::net::UnixStream::connect(sock) {
+            let mut line = String::new();
+            if writeln!(s, r#"{{"type":"ping"}}"#).is_ok()
+                && BufReader::new(s).read_line(&mut line).is_ok()
+                && line.contains("pong")
+            {
+                return;
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("daemon at {} did not answer", sock.display());
+}
+
 /// Start a daemon for a session dir. Returns the guard and its socket.
 fn start_daemon(session: &Path, mode: &str) -> (Daemon, PathBuf) {
     fs::create_dir_all(session).unwrap();
@@ -266,13 +293,8 @@ fn start_daemon(session: &Path, mode: &str) -> (Daemon, PathBuf) {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    let sock = session.join("tendd.sock");
-    for _ in 0..100 {
-        if sock.exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    let sock = socket_of(session);
+    wait_for_daemon(&sock);
     (Daemon(child), sock)
 }
 
@@ -377,30 +399,42 @@ fn failing_test_run_is_summarized_through_tend_run() {
 /// so far and leaves no process behind.
 #[test]
 fn stopped_tend_run_prints_partial_output_and_leaves_no_orphans() {
+    use std::io::{BufRead, BufReader, Read};
     let marker = format!("sleep 37.{}", std::process::id());
-    let child = Command::new(bin())
+    let mut child = Command::new(bin())
         .args(["run", "--id", "t", "--sh"])
         .arg(format!("echo started; {marker}; echo never"))
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    thread::sleep(Duration::from_millis(500));
+    // `tend run` prints only when the command ends; poll for the sleep instead of
+    // guessing how long the start takes (I5, T6).
+    let running = || {
+        let out = Command::new("pgrep")
+            .args(["-f", &marker])
+            .output()
+            .unwrap();
+        !out.stdout.is_empty()
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !running() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(running(), "the command did not start");
     // SAFETY: signals the child we spawned.
     unsafe { libc_kill(child.id() as i32, 15) };
-    let out = child.wait_with_output().unwrap();
-    let shown = String::from_utf8_lossy(&out.stdout);
+    let mut shown = String::new();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    stdout.read_line(&mut shown).unwrap();
+    stdout.read_to_string(&mut shown).unwrap();
+    let status = child.wait().unwrap();
     assert!(shown.starts_with("started\n"), "{shown}");
-    assert_eq!(out.status.code(), Some(128 + 15));
-    thread::sleep(Duration::from_millis(200));
-    let left = Command::new("pgrep")
-        .args(["-f", &marker])
-        .output()
-        .unwrap();
-    assert!(
-        left.stdout.is_empty(),
-        "orphan: {}",
-        String::from_utf8_lossy(&left.stdout)
-    );
+    assert_eq!(status.code(), Some(128 + 15));
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while running() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!running(), "orphan: {marker}");
 }
 
 extern "C" {
@@ -429,6 +463,22 @@ fn large_filter_does_not_block_pings_or_hooks() {
     )
     .unwrap()
     .repeat(300);
+    // Time hook requests straight on the socket, without a shim process to spawn, and
+    // compare with the same requests on an idle daemon (I5, T6).
+    let mut ls = pre.clone();
+    ls["tool_input"]["command"] = "ls".into();
+    ls["tool_use_id"] = "toolu_02".into();
+    let direct = |sock: &Path| {
+        use std::io::{BufRead, BufReader, Write};
+        let t = std::time::Instant::now();
+        let mut s = std::os::unix::net::UnixStream::connect(sock).unwrap();
+        let req = serde_json::json!({ "type": "hook", "event": "PreToolUse", "payload": ls });
+        writeln!(s, "{req}").unwrap();
+        let mut line = String::new();
+        BufReader::new(s).read_line(&mut line).unwrap();
+        t.elapsed()
+    };
+    let baseline = (0..5).map(|_| direct(&sock)).max().unwrap();
     let filter = {
         let sock = sock.clone();
         thread::spawn(move || {
@@ -442,16 +492,11 @@ fn large_filter_does_not_block_pings_or_hooks() {
             line
         })
     };
-    thread::sleep(Duration::from_millis(100));
-    let mut slowest = Duration::ZERO;
-    let mut ls = pre.clone();
-    ls["tool_input"]["command"] = "ls".into();
-    ls["tool_use_id"] = "toolu_02".into();
+    let (mut slowest, mut samples) = (Duration::ZERO, 0);
     while !filter.is_finished() {
-        let t = std::time::Instant::now();
-        hook(&sock, "PreToolUse", &ls);
-        slowest = slowest.max(t.elapsed());
-        thread::sleep(Duration::from_millis(20));
+        slowest = slowest.max(direct(&sock));
+        samples += 1;
+        thread::sleep(Duration::from_millis(5));
     }
     let reply = filter.join().unwrap();
     assert!(
@@ -459,10 +504,10 @@ fn large_filter_does_not_block_pings_or_hooks() {
         "{}",
         &reply[..reply.len().min(200)]
     );
-    // A hook call spawns the shim process; allow for that, but not for the filter.
+    assert!(samples > 0, "the filter finished before any hook was timed");
     assert!(
-        slowest < Duration::from_millis(250),
-        "hook waited {slowest:?}"
+        slowest < baseline + Duration::from_millis(150),
+        "hook waited {slowest:?} (idle: {baseline:?}) over {samples} samples"
     );
 }
 
@@ -965,4 +1010,38 @@ fn huge_output_streams_without_the_daemon() {
         listener.accept().is_err(),
         "no filter request for a huge output"
     );
+}
+
+/// Rule 7: hook latency p95 under 20 ms, shim process included. Timing depends on the
+/// machine, so it runs on demand and in CI's release job:
+/// `cargo test --release -p tend-cli --test e2e -- --ignored shim_latency`.
+#[test]
+#[ignore]
+fn shim_latency_budget() {
+    let dir = tmp("latency");
+    let session = dir.join("session");
+    let (_daemon, sock) = start_daemon(&session, "optimize");
+    let mut pre: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("pre_tool_use_bash_auto.json")).unwrap())
+            .unwrap();
+    pre["tool_input"]["command"] = "ls -la".into();
+    let post = serde_json::from_str::<serde_json::Value>(
+        &fs::read_to_string(fixture("post_tool_use_bash.json")).unwrap(),
+    )
+    .unwrap();
+    let mut times = Vec::new();
+    for i in 0..200 {
+        let (event, payload) = if i % 2 == 0 {
+            ("PreToolUse", &pre)
+        } else {
+            ("PostToolUse", &post)
+        };
+        let t = std::time::Instant::now();
+        hook(&sock, event, payload);
+        times.push(t.elapsed());
+    }
+    times.sort();
+    let p95 = times[times.len() * 95 / 100];
+    eprintln!("shim p50 {:?} p95 {:?}", times[times.len() / 2], p95);
+    assert!(p95 < Duration::from_millis(20), "p95 {p95:?}");
 }
