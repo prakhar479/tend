@@ -246,42 +246,77 @@ fn early_returns(code: &str) -> usize {
         .count()
 }
 
-/// A tolerance keyword whose largest value grew (`rel=1e-6` → `rel=0.1`), or a digits
-/// argument that shrank (`toBeCloseTo(x, 5)` → `toBeCloseTo(x, 1)`, `places=7` → `2`).
+/// An assertion whose tolerance grew (`rel=1e-6` → `rel=0.1`) or whose digits argument
+/// shrank (`toBeCloseTo(x, 5)` → `toBeCloseTo(x, 1)`, `places=7` → `2`). Assertions are
+/// paired by their text with the numbers taken out, so a new assertion with a wide
+/// tolerance is not a loosened old one (whole files, as Write and Bash writes give).
+/// `a` without one copy of each value in `b`.
+fn minus(a: &[f64], b: &[f64]) -> Vec<f64> {
+    let mut rest: Vec<f64> = b.to_vec();
+    a.iter()
+        .filter(|x| match rest.iter().position(|y| y == *x) {
+            Some(i) => {
+                rest.swap_remove(i);
+                false
+            }
+            None => true,
+        })
+        .copied()
+        .collect()
+}
+
 fn looser_tolerance(old: &str, new: &str) -> Option<String> {
     let tol = re!(
         r"\b(rel|abs|rel_tol|abs_tol|atol|rtol|delta|epsilon|tol|tolerance)\s*=\s*([0-9][0-9._eE+-]*)"
     );
-    let digits = re!(r"\btoBeCloseTo\([^,()]+,\s*(\d+)\s*\)|\bplaces\s*=\s*(\d+)");
-    let max_by_key = |s: &str| {
-        let mut m: std::collections::BTreeMap<String, f64> = Default::default();
-        for c in tol.captures_iter(s) {
-            if let Ok(v) = c[2].replace('_', "").parse::<f64>() {
-                let e = m.entry(c[1].to_string()).or_insert(v);
-                *e = e.max(v);
+    let digits = re!(r"\b(toBeCloseTo)\([^,()]+,\s*(\d+)\s*\)|\b(places)\s*=\s*(\d+)");
+    let num = |s: &str| s.replace('_', "").parse::<f64>().ok();
+    // (line with numbers masked, keyword) → value. A digits argument is stored negated:
+    // fewer digits is looser, so "grew" means looser for both.
+    let values = |text: &str| {
+        let mut m: std::collections::BTreeMap<(String, String), Vec<f64>> = Default::default();
+        for line in text.lines() {
+            let masked = re!(r"[0-9][0-9._eE+-]*")
+                .replace_all(line.trim(), "#")
+                .to_string();
+            for c in tol.captures_iter(line) {
+                if let Some(v) = num(&c[2]) {
+                    m.entry((masked.clone(), c[1].to_string()))
+                        .or_default()
+                        .push(v);
+                }
+            }
+            for c in digits.captures_iter(line) {
+                let (k, v) = match (c.get(1), c.get(2), c.get(3), c.get(4)) {
+                    (Some(k), Some(v), _, _) | (_, _, Some(k), Some(v)) => (k, v),
+                    _ => continue,
+                };
+                if let Some(v) = num(v.as_str()) {
+                    m.entry((masked.clone(), k.as_str().to_string()))
+                        .or_default()
+                        .push(-v);
+                }
             }
         }
         m
     };
-    let (o, n) = (max_by_key(old), max_by_key(new));
-    for (k, nv) in &n {
-        if let Some(ov) = o.get(k) {
-            if nv > ov {
-                return Some(format!("tolerance raised ({k}: {ov} → {nv})"));
+    // Loosened: a value of the old text is gone and a larger one took its place. An old
+    // assertion that stays, next to a new one with a wider tolerance, is not loosened.
+    let (o, n) = (values(old), values(new));
+    n.iter().find_map(|(key, nvs)| {
+        let ovs = o.get(key)?;
+        let gone: Vec<f64> = minus(ovs, nvs);
+        let came: Vec<f64> = minus(nvs, ovs);
+        let ov = gone.iter().copied().fold(f64::NAN, f64::max);
+        let nv = came.iter().copied().fold(f64::NAN, f64::max);
+        (nv > ov).then(|| {
+            if nv <= 0.0 {
+                format!("precision lowered ({} → {} digits)", -ov, -nv)
+            } else {
+                format!("tolerance raised ({}: {ov} → {nv})", key.1)
             }
-        }
-    }
-    let min_digits = |s: &str| {
-        digits
-            .captures_iter(s)
-            .filter_map(|c| c.get(1).or(c.get(2)))
-            .filter_map(|m| m.as_str().parse::<u32>().ok())
-            .min()
-    };
-    match (min_digits(old), min_digits(new)) {
-        (Some(o), Some(n)) if n < o => Some(format!("precision lowered ({o} → {n} digits)")),
-        _ => None,
-    }
+        })
+    })
 }
 
 #[cfg(test)]
@@ -598,6 +633,16 @@ mod tests {
             );
         }
         let neutral = [
+            // A new assertion with its own, wider tolerance loosens nothing (found on a
+            // real repo: whole-file diffs compared the largest value per keyword).
+            (
+                "    assert m == pytest.approx(50.0 - 15.0, abs=5.0)\n",
+                "    assert m == pytest.approx(50.0 - 15.0, abs=5.0)\n    assert m == pytest.approx(50.0 - 90.0, abs=20.0)\n",
+            ),
+            (
+                "    assert a == pytest.approx(1.0, abs=1.0)\n",
+                "    assert a == pytest.approx(1.0, abs=1.0)\n    assert b == pytest.approx(-40.0, abs=20.0)\n",
+            ),
             // Refactors, rewording, imports.
             (
                 "from pandas.testing import assert_frame_equal\nassert_frame_equal(a, b)\n",
