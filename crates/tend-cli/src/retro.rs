@@ -202,7 +202,7 @@ struct Row {
 /// Retro over every transcript: a total, then the top sessions by noise and by loop time.
 /// Subagent transcripts count too, on their own line. Projects under `/tmp` are left out
 /// unless `include_tmp`.
-pub fn run_all(root: &Path, top: usize, include_tmp: bool) -> Result<String> {
+pub fn run_all(root: &Path, top: usize, include_tmp: bool, summary: bool) -> Result<String> {
     let mut rows = Vec::new();
     let (mut skipped, mut tmp) = (0, 0);
     for path in transcripts(root) {
@@ -240,10 +240,14 @@ pub fn run_all(root: &Path, top: usize, include_tmp: bool) -> Result<String> {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "Retro over {} transcripts ({} sessions, {subagents} subagents) in {}{}",
+        "Retro over {} transcripts ({} sessions, {subagents} subagents){}{}",
         rows.len(),
         rows.len() - subagents,
-        root.display(),
+        if summary {
+            String::new()
+        } else {
+            format!(" in {}", root.display())
+        },
         if notes.is_empty() {
             String::new()
         } else {
@@ -301,6 +305,10 @@ pub fn run_all(root: &Path, top: usize, include_tmp: bool) -> Result<String> {
     };
     let _ = write!(out, "{}", report::precision(&all, false));
 
+    // A summary is for sharing: no session names or project paths.
+    if summary {
+        return Ok(out);
+    }
     // Ties break on the label, so the order is stable.
     rows.sort_by(|a, b| {
         b.totals
@@ -379,8 +387,8 @@ mod tests {
             root.join("-home-dev-api/s1/subagents/agent-a.jsonl"),
         )
         .unwrap();
-        let out = run_all(&root, 5, false).unwrap();
-        let with_tmp = run_all(&root, 5, true).unwrap();
+        let out = run_all(&root, 5, false, false).unwrap();
+        let with_tmp = run_all(&root, 5, true, false).unwrap();
         let _ = fs::remove_dir_all(&root);
         assert!(
             out.contains("Retro over 3 transcripts (2 sessions, 1 subagents)"),

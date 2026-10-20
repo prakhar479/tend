@@ -10,6 +10,7 @@ mod config;
 mod connector;
 mod daemon;
 mod doctor;
+mod export;
 mod ipc;
 mod launcher;
 mod paths;
@@ -112,6 +113,16 @@ enum Cmd {
     Review,
     /// Check the install: which tend runs, the Claude Code version, the data dir, config.
     Doctor,
+    /// One session as a sanitized JSON bundle (paths, home, user name, and secrets
+    /// replaced), to attach to a bug report.
+    Export {
+        /// An id, a prefix, `-N`, or a path (default: the newest session started here).
+        #[arg(long, allow_hyphen_values = true)]
+        session: Option<String>,
+        /// Leave out the stored tool outputs (keep only the ledger).
+        #[arg(long)]
+        no_outputs: bool,
+    },
     /// Delete recorded sessions (their ledgers and stored outputs). Live sessions are
     /// kept.
     Purge {
@@ -161,6 +172,9 @@ enum Cmd {
         /// For one transcript: every section, including empty ones.
         #[arg(long)]
         full: bool,
+        /// With --all: totals only, no paths or session names, safe to share.
+        #[arg(long, requires = "all")]
+        summary: bool,
     },
     /// List recorded sessions.
     Sessions {
@@ -465,6 +479,14 @@ fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Cmd::Export {
+            session,
+            no_outputs,
+        } => {
+            let dir = sessions::resolve(session.as_deref(), false)?;
+            println!("{}", export::export(&dir, !no_outputs)?);
+            Ok(0)
+        }
         Cmd::Purge {
             session,
             all,
@@ -511,12 +533,13 @@ fn run(cli: Cli) -> Result<i32> {
             projects,
             include_tmp,
             full,
+            summary,
         } => {
             match transcript {
                 Some(t) if !all => print!("{}", retro::run(&t, full)?),
                 _ => {
                     let root = projects.unwrap_or_else(paths::claude_projects_dir);
-                    print!("{}", retro::run_all(&root, 5, include_tmp)?);
+                    print!("{}", retro::run_all(&root, 5, include_tmp, summary)?);
                 }
             }
             Ok(0)

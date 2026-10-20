@@ -475,15 +475,72 @@ pub fn write_targets_where(cmd: &str, keep: impl Fn(&str) -> bool) -> Vec<String
 /// `pytest --snapshot-update`, `--force-regen`, `go test -update`, `UPDATE_GOLDEN=1`.
 /// Returns the part that matched.
 pub fn snapshot_update(cmd: &str) -> Option<String> {
-    let runner_flag =
-        re!(r"\b(jest|vitest)\b[^|;&]*?\s(-u|--update(Snapshot)?|--updateSnapshot)\b");
-    let other = re!(
-        r"--update-snapshots?\b|--updateSnapshot\b|--snapshot-update\b|--force-regen\b|--update-goldens?\b|\binsta\s+(accept|review)\b|\bcargo\s+insta\s+test\b[^|;&]*--accept\b|\bINSTA_UPDATE=(always|new)\b|\bUPDATE_(GOLDEN|GOLDENS|SNAPSHOT|SNAPSHOTS|EXPECT)=\S+|\bgo\s+test\b[^|;&]*\s-update\b"
-    );
-    runner_flag
-        .find(cmd)
-        .or_else(|| other.find(cmd))
-        .map(|m| m.as_str().trim().to_string())
+    // Words of real commands only: here-doc bodies and quoted strings (a test that
+    // mentions `jest -u`, a script that writes one) are not runs.
+    for seg in shell::parse(cmd).segments {
+        let w = shell::program_words(&seg);
+        let Some(first) = w.first().map(|f| shell::program_name(f)) else {
+            continue;
+        };
+        let flag = |name: &str| {
+            w.iter()
+                .any(|a| a == name || a.starts_with(&format!("{name}=")))
+        };
+        let named = |names: &[&str]| {
+            w.iter()
+                .take(4)
+                .any(|x| names.contains(&shell::program_name(x)))
+        };
+        if named(&["jest", "vitest"]) && (flag("-u") || flag("--update")) {
+            return Some(format!(
+                "{} -u",
+                if named(&["jest"]) { "jest" } else { "vitest" }
+            ));
+        }
+        // Only a test runner, a package manager, or a snapshot tool takes these flags; a
+        // search for them is not a run.
+        if matches!(
+            first,
+            "grep" | "rg" | "ag" | "ack" | "echo" | "printf" | "cat" | "sed" | "find" | "git"
+        ) {
+            continue;
+        }
+        for f in [
+            "--updateSnapshot",
+            "--update-snapshots",
+            "--update-snapshot",
+            "--snapshot-update",
+            "--force-regen",
+            "--update-goldens",
+            "--update-golden",
+        ] {
+            if flag(f) {
+                return Some(f.to_string());
+            }
+        }
+        let arg = |i: usize| w.get(i).map(String::as_str);
+        if (first == "cargo"
+            && arg(1) == Some("insta")
+            && matches!(arg(2), Some("accept" | "review")))
+            || (first == "insta" && matches!(arg(1), Some("accept" | "review")))
+        {
+            return Some("cargo insta accept".into());
+        }
+        if first == "cargo" && arg(1) == Some("insta") && flag("--accept") {
+            return Some("cargo insta test --accept".into());
+        }
+        if first == "go" && arg(1) == Some("test") && (flag("-update") || flag("--update")) {
+            return Some("go test -update".into());
+        }
+        let env = seg.iter().take_while(|x| shell::is_assignment(x)).find(|x| {
+            re!(r"^(UPDATE_(GOLDEN|GOLDENS|SNAPSHOT|SNAPSHOTS|EXPECT)=|INSTA_UPDATE=(always|new)$)")
+                .is_match(x)
+        });
+        if let Some(e) = env {
+            return Some(e.clone());
+        }
+    }
+    None
 }
 
 /// The first simple command that runs a test runner, and its words.
@@ -709,6 +766,11 @@ mod tests {
             "pytest -q",
             "cargo update",
             "apt-get update",
+            // Mentions, not runs: a here-doc body, a quoted string, a search.
+            "python3 - <<'EOF'\nrun('npx jest -u')\nEOF",
+            "echo 'try jest -u'",
+            "grep -rn -- --update-snapshots docs",
+            "rg --update-snapshots src",
         ] {
             assert!(snapshot_update(cmd).is_none(), "{cmd}");
         }

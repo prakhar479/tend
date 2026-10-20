@@ -47,6 +47,8 @@ tend retro --all                     # every past session and subagent, ranked
 tend status                          # one line for the status line (empty outside tend)
 tend doctor                          # check the install: binary, Claude Code version, data dir, config
 tend purge --older-than 7             # delete stored sessions (also --session ID, --all)
+tend export --session -1 > s.json     # one session, sanitized (paths, user, secrets), for a bug report
+tend retro --all --summary           # totals only, no paths: safe to share
 tend audit main...HEAD               # experimental: what a diff did to tests and checks (--format markdown|json)
 ```
 
