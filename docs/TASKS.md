@@ -149,7 +149,7 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
   Done: `scripts/conformance.py [--record]` runs one scripted session under `tend claude --tend-mode optimize` in auto mode, in a throwaway project, and checks 9 facts: hook payload fields, PostToolUseFailure on exit codes, the wrap, `updatedInput` without a decision applied, the agent seeing the summary, the guard deny reaching the agent and stopping the edit, the Bash-write warning reaching the agent, and settings with `PermissionDenied` loading. 2.1.303: all pass (`docs/conformance/2.1.303.md`). This was the first live check of R1.4. It also found a guard gap: `assert True` in place of a real assertion was neutral; now flagged as "assertion that always passes added".
 - [x] **R3.2** `SessionEnd` hook: stop the daemon, print a one-line report.
   Done (launcher part): the closing line says what tend did, e.g. `tend: session … ended · 41 tool calls · shaped 3 outputs, saved 9.2k tokens · 1 guard flag · \`tend report\` for details`. The `SessionEnd` hook itself moves to R3.3: Claude Code shows its output to no one ("exit code 0 - command completes successfully"), and the launcher already stops the daemon. Only a plugin, with no launcher, needs it.
-- [ ] **R3.3** Spike: ship as a Claude Code plugin instead of the launcher.
+- [x] **R3.3** Spike: ship as a Claude Code plugin instead of the launcher. Done as E6 (`plugin/`).
 - [ ] **R3.4** Spike: `http` hooks instead of the shim process.
 - [x] **R3.5** `tend status` for the Claude Code statusline.
   Done: `tend status` prints `tend <mode> · <what tend did>` for the session in `TEND_SESSION_DIR`, and nothing outside a tend session (README shows the `statusLine` setting). It does not set the status line itself: that would replace the user's.
@@ -167,7 +167,7 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
   Done: this repo's dev session went from 2 false loop nudges to 0. The scripted loop session still steers.
 - [x] **C3** `retro --all` counts subagent transcripts (a line each for main sessions and subagents) and leaves out projects under `/tmp` unless `--include-tmp`.
 - [x] **C4** Corrected the R2.3 figures above.
-- [ ] **C5** Add a git remote so CI runs (owner decision).
+- [x] **C5** Add a git remote so CI runs. Remote: github.com/prakhar479/tend; CI green on ubuntu and macOS since 8c59d33.
 
 ## Improvements I (from `docs/improvements-2026-10-19.md`)
 
@@ -298,7 +298,7 @@ Review after the checkpoint: about 60 findings, most of them confirmed. Batches 
 
 ## Phase 3 — Protect (not started)
 
-- [ ] Guard rules: expected value changed to last actual; tolerance increased.
+- [x] Guard rules: expected value changed to last actual (E4); tolerance increased (I2).
 - [ ] Snapshots as private git refs; `tend undo`.
 - [ ] Guard overrides feed strictness.
 

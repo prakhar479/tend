@@ -10,6 +10,15 @@ Prototype. Claude Code only (tested with 2.1.303). Look mode, the default, recor
 
 ## Install
 
+Prebuilt (Linux x86_64/aarch64, macOS arm64/x86_64), from the [releases](https://github.com/prakhar479/tend/releases):
+
+```sh
+curl -L https://github.com/prakhar479/tend/releases/latest/download/tend-<version>-<target>.tar.gz | tar xz
+mv tend-*/tend ~/.local/bin/        # any directory on PATH
+```
+
+From source:
+
 ```sh
 cargo install --path crates/tend-cli   # Rust 1.87 or newer; installs `tend` into ~/.cargo/bin
 ```
