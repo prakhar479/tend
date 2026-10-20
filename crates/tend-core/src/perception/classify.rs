@@ -41,6 +41,10 @@ impl OutputKind {
         }
     }
 
+    pub fn from_label(label: &str) -> Option<OutputKind> {
+        OutputKind::ALL.into_iter().find(|k| k.label() == label)
+    }
+
     /// Kinds tend summarizes by default. The others hold what the agent asked to read
     /// (code, diffs, search hits), and the owner's data shows they are mostly file reads
     /// that a summary would cut (checkpoint C1).

@@ -60,6 +60,10 @@ impl SessionModel {
         self.levels.get(&kind).copied().unwrap_or(0)
     }
 
+    pub fn set_level(&mut self, kind: OutputKind, level: u8) {
+        self.levels.insert(kind, level);
+    }
+
     pub fn levels(&self) -> &BTreeMap<OutputKind, u8> {
         &self.levels
     }

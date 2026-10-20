@@ -415,6 +415,45 @@ impl Controller {
         &mut self.broker
     }
 
+    /// What this session learned that the next one in the same project can start from:
+    /// the shape level of each kind (E9).
+    pub fn learned_levels(&self) -> BTreeMap<String, u8> {
+        self.session
+            .levels()
+            .iter()
+            .map(|(k, v)| (k.label().to_string(), *v))
+            .collect()
+    }
+
+    /// Start from what earlier sessions in this project learned. Only kinds shaped by
+    /// default can be carried over (C1: code reads and diffs are never shaped).
+    pub fn restore_levels(&mut self, levels: &BTreeMap<String, u8>, now_ms: u64) -> Decision {
+        let mut d = Decision::default();
+        for (label, level) in levels {
+            let Some(kind) = OutputKind::from_label(label).filter(|k| k.shaped_by_default()) else {
+                continue;
+            };
+            let from = self.session.shape_level(kind);
+            let to = (*level).min(crate::session::MAX_LEVEL);
+            if to == from {
+                continue;
+            }
+            self.session.set_level(kind, to);
+            self.push(
+                &mut d,
+                now_ms,
+                vec![],
+                Body::Adaptation {
+                    knob: format!("shape_level.{label}"),
+                    from: from.to_string(),
+                    to: to.to_string(),
+                    reason: "Carried over from earlier sessions in this project.".into(),
+                },
+            );
+        }
+        d
+    }
+
     /// The repo's `.tend.toml`: extra test paths and protected paths for the guard.
     pub fn set_policy(&mut self, policy: crate::policy::Policy) {
         self.policy = policy;

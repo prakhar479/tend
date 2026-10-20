@@ -1049,3 +1049,24 @@ fn repo_policy_protects_paths_and_adds_tests() {
         .permission
         .is_none());
 }
+
+/// E9: carried-over levels apply only to kinds shaped by default (C1).
+#[test]
+fn restored_levels_respect_the_allow_list() {
+    let mut c = ctl(Mode::Optimize);
+    let levels: BTreeMap<String, u8> = [("test".to_string(), 1), ("view".to_string(), 3)]
+        .into_iter()
+        .collect();
+    let d = c.restore_levels(&levels, 0);
+    assert_eq!(c.session().shape_level(OutputKind::Test), 1);
+    assert_eq!(
+        c.session().shape_level(OutputKind::View),
+        0,
+        "code reads stay unshaped"
+    );
+    assert!(d
+        .entries
+        .iter()
+        .any(|e| matches!(&e.body, Body::Adaptation { knob, .. } if knob == "shape_level.test")));
+    assert_eq!(c.learned_levels()["test"], 1);
+}

@@ -208,6 +208,7 @@ fn concurrent_hooks_keep_the_ledger_ordered_and_whole() {
         .args(["daemon", "--session-dir"])
         .arg(&session)
         .args(["--mode", "optimize"])
+        .env("TEND_HOME", dir.join("home"))
         .env("TEND_CAPTURE", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -299,6 +300,8 @@ fn start_daemon(session: &Path, mode: &str) -> (Daemon, PathBuf) {
         .args(["daemon", "--session-dir"])
         .arg(session)
         .args(["--mode", mode])
+        // Never the user's data dir (per-project memory, plugin maps).
+        .env("TEND_HOME", session.parent().unwrap().join("home"))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -1286,4 +1289,34 @@ fn plugin_hooks_run_a_session_without_the_launcher() {
     assert!(socket_gone(&session), "SessionEnd stops the daemon");
     let report = tend(&["report"], &session);
     assert!(report.contains("Test guard: 1"), "{report}");
+}
+
+/// E9: what a session learns (a summary kind loosened after a re-open) carries over to
+/// the next session in the same project.
+#[test]
+fn learned_shape_levels_carry_over_to_the_next_session() {
+    let dir = tmp("memory");
+    let repo = dir.join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let mut post: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("post_tool_use_bash.json")).unwrap())
+            .unwrap();
+    post["cwd"] = repo.display().to_string().into();
+    let mut reopen = post.clone();
+    reopen["tool_input"]["command"] = "tend show o-1".into();
+    reopen["tool_use_id"] = "toolu_02".into();
+    {
+        let (_daemon, sock) = start_daemon(&dir.join("s1"), "optimize");
+        hook(&sock, "PostToolUse", &post);
+        hook(&sock, "PostToolUse", &reopen);
+    }
+    let memory: Vec<_> = fs::read_dir(dir.join("home/projects")).unwrap().collect();
+    assert_eq!(memory.len(), 1);
+    let (_daemon, sock) = start_daemon(&dir.join("s2"), "optimize");
+    hook(&sock, "UserPromptSubmit", &post);
+    let report = tend(&["report"], &dir.join("s2"));
+    assert!(
+        report.contains("Carried over from earlier sessions in this project"),
+        "{report}"
+    );
 }

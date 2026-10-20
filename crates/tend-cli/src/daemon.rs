@@ -28,6 +28,8 @@ struct State {
     controller: Controller,
     connector: Box<dyn Connector>,
     store: Store,
+    /// Where this project's learned shape levels live (E9), once the session started.
+    memory: Option<PathBuf>,
 }
 
 /// When the daemon last got a request (ms), for the idle exit.
@@ -63,6 +65,7 @@ pub fn run(
         controller,
         connector,
         store,
+        memory: None,
     }));
     eprintln!("tendd: listening on {} (mode {mode:?})", sock.display());
 
@@ -91,6 +94,45 @@ pub fn run(
             }
             Err(e) => eprintln!("tendd: accept: {e}"),
         }
+    }
+    Ok(())
+}
+
+/// Per-project memory (E9): at session start, take up the shape levels earlier sessions
+/// in the project learned; after an adaptation, save them. Kept in
+/// `<home>/projects/<hash of the repo root>.json`.
+fn remember(st: &mut State, decisions: &[tend_core::Decision]) -> Result<()> {
+    for e in decisions.iter().flat_map(|d| &d.entries) {
+        if let tend_core::Body::Event {
+            event: tend_core::Event::SessionStarted { cwd, .. },
+        } = &e.body
+        {
+            let cwd = Path::new(cwd);
+            let root = crate::audit::repo_root(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+            let key = tend_core::text::sha256_hex(&root.to_string_lossy());
+            let file = crate::paths::home()
+                .join("projects")
+                .join(format!("{}.json", &key[..16]));
+            let levels: std::collections::BTreeMap<String, u8> = fs::read_to_string(&file)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|v| serde_json::from_value(v.get("shape_levels")?.clone()).ok())
+                .unwrap_or_default();
+            let d = st.controller.restore_levels(&levels, now_ms());
+            st.store.persist(&d)?;
+            st.memory = Some(file);
+        }
+    }
+    let adapted = decisions
+        .iter()
+        .flat_map(|d| &d.entries)
+        .any(|e| matches!(e.body, tend_core::Body::Adaptation { .. }));
+    if let (true, Some(file)) = (adapted, &st.memory) {
+        if let Some(dir) = file.parent() {
+            let _ = crate::paths::ensure_private_dir(dir);
+        }
+        let body = serde_json::json!({ "shape_levels": st.controller.learned_levels() });
+        let _ = fs::write(file, body.to_string());
     }
     Ok(())
 }
@@ -285,6 +327,7 @@ fn serve(
                 for d in &decisions {
                     st.store.persist(d)?;
                 }
+                remember(st, &decisions)?;
                 Reply {
                     output: st.connector.encode(&event, &payload, &response),
                     message: None,
