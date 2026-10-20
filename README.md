@@ -34,6 +34,7 @@ tend retro ~/.claude/projects/<project>/<session>.jsonl   # report on a past ses
 tend retro --all                     # every past session and subagent, ranked
 tend status                          # one line for the status line (empty outside tend)
 tend doctor                          # check the install: binary, Claude Code version, data dir, config
+tend purge --older-than 7             # delete stored sessions (also --session ID, --all)
 tend audit main...HEAD               # experimental: what a diff did to tests and checks (--format markdown|json)
 ```
 
@@ -47,7 +48,7 @@ To see tend in Claude Code's status line, add this to `~/.claude/settings.json`.
 "statusLine": { "type": "command", "command": "tend status" }
 ```
 
-Session data: `~/.local/share/tend/sessions/<id>/` (override with `TEND_HOME`). `tend claude` deletes sessions older than `keep_days` (default 30).
+Session data: `~/.local/share/tend/sessions/<id>/` (override with `TEND_HOME`). Stored outputs and the ledger keep a copy of what tools printed; tend replaces secrets it recognizes (API keys and tokens, private keys, passwords in URLs, values of variables named like secrets) with `[redacted]` before writing. `tend claude` deletes sessions older than `keep_days` (default 30).
 
 ## Config
 

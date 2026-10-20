@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
+use tend_core::text::redact;
 use tend_core::{Decision, Entry, LEDGER_FORMAT};
 
 pub struct Store {
@@ -51,11 +52,8 @@ impl Store {
     /// Keep the raw hook payload. Phase 0 spikes and new fixtures come from this file.
     pub fn capture(&mut self, ts_ms: u64, event: &str, payload: &Value) -> Result<()> {
         if let Some(f) = self.hooks.as_mut() {
-            writeln!(
-                f,
-                "{}",
-                json!({ "ts_ms": ts_ms, "event": event, "payload": payload })
-            )?;
+            let line = json!({ "ts_ms": ts_ms, "event": event, "payload": payload }).to_string();
+            writeln!(f, "{}", redact(&line))?;
         }
         Ok(())
     }
@@ -70,14 +68,15 @@ impl Store {
                     self.dir
                         .join("blobs")
                         .join(format!(".{}.{}.tmp", b.hash, std::process::id()));
-                fs::write(&tmp, &b.content)?;
+                // Secrets never reach the disk; the hash still names the original.
+                fs::write(&tmp, redact(&b.content).as_bytes())?;
                 fs::rename(&tmp, &p)?;
             }
         }
         // One write for all lines of a decision: entries never interleave or split.
         let mut lines = String::new();
         for e in &d.entries {
-            lines.push_str(&serde_json::to_string(e)?);
+            lines.push_str(&redact(&serde_json::to_string(e)?));
             lines.push('\n');
         }
         self.ledger.write_all(lines.as_bytes())?;
@@ -168,6 +167,28 @@ mod tests {
         let entry = r#"{"seq":1,"ts_ms":0,"body":{"kind":"event","event":{"type":"turn_ended"}}}"#;
         fs::write(d.join("ledger.jsonl"), format!("{first}\n{entry}\n")).unwrap();
         d
+    }
+
+    /// E8: a secret in an output never reaches the disk; the hash still names it.
+    #[test]
+    fn blobs_and_ledger_are_redacted() {
+        let d = std::env::temp_dir().join(format!("tend-store-redact-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let mut store = Store::open(&d).unwrap();
+        let content = "GITHUB_TOKEN=ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\n".to_string();
+        let hash = tend_core::text::sha256_hex(&content);
+        let decision = Decision {
+            blobs: vec![tend_core::Blob {
+                hash: hash.clone(),
+                content,
+            }],
+            ..Default::default()
+        };
+        store.persist(&decision).unwrap();
+        let written = fs::read_to_string(d.join("blobs").join(&hash)).unwrap();
+        let _ = fs::remove_dir_all(&d);
+        assert_eq!(written, "GITHUB_TOKEN=[redacted]\n");
     }
 
     #[test]

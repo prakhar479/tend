@@ -111,6 +111,19 @@ enum Cmd {
     Review,
     /// Check the install: which tend runs, the Claude Code version, the data dir, config.
     Doctor,
+    /// Delete recorded sessions (their ledgers and stored outputs). Live sessions are
+    /// kept.
+    Purge {
+        /// One session: an id, a prefix, `-N`, or a path.
+        #[arg(long, allow_hyphen_values = true, conflicts_with_all = ["all", "older_than"])]
+        session: Option<String>,
+        /// Every session.
+        #[arg(long)]
+        all: bool,
+        /// Sessions with no activity for this many days.
+        #[arg(long, value_name = "DAYS")]
+        older_than: Option<u64>,
+    },
     /// (Experimental) What a git diff, or a tend session, changed in tests and checks:
     /// assertions and tests, snapshots, suppressions, check config, dependencies.
     Audit {
@@ -421,6 +434,31 @@ fn run(cli: Cli) -> Result<i32> {
                 AuditFormat::Markdown => print!("{}", audit::render_markdown(&report, &title)),
                 AuditFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
             }
+            Ok(0)
+        }
+        Cmd::Purge {
+            session,
+            all,
+            older_than,
+        } => {
+            let root = paths::sessions_dir();
+            let removed = match (session, all, older_than) {
+                (Some(spec), _, _) => {
+                    let dir = sessions::resolve(Some(&spec), false)?;
+                    if sessions::is_live(&dir) {
+                        bail!("session {} is live; end it first", dir.display());
+                    }
+                    std::fs::remove_dir_all(&dir)
+                        .with_context(|| format!("remove {}", dir.display()))?;
+                    vec![dir]
+                }
+                (None, true, _) => sessions::prune(&root, 0, u64::MAX / 2)?,
+                (None, false, Some(days)) => sessions::prune(&root, days, paths::now_ms() / 1000)?,
+                (None, false, None) => {
+                    bail!("say what to purge: --session ID, --older-than DAYS, or --all")
+                }
+            };
+            println!("{} sessions removed", removed.len());
             Ok(0)
         }
         Cmd::Doctor => {

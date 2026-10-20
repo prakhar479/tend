@@ -47,8 +47,94 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
+/// Replace secrets with `[redacted]` before tend writes text to disk (I6 E8): cloud
+/// and API keys and tokens by their shape, private key blocks, passwords in URLs, and
+/// the values of variables named like secrets. JSON stays valid: a replacement never
+/// contains a quote and never swallows one.
+pub fn redact(text: &str) -> std::borrow::Cow<'_, str> {
+    let shaped = re!(concat!(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+        r"|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
+        r"|\bgh[pousr]_[A-Za-z0-9]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{50,}",
+        r"|\bsk-ant-[A-Za-z0-9_-]{20,}|\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}",
+        r"|\bxox[abposr]-[A-Za-z0-9-]{10,}|\bAIza[0-9A-Za-z_-]{35}",
+        r"|\b(?:sk|rk)_live_[0-9a-zA-Z]{20,}|\bglpat-[A-Za-z0-9_-]{20,}",
+        r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+    ));
+    let url_password = re!(r"(\b[a-z][a-z0-9+.-]*://[^:/\s@]+:)([^@\s/]{3,})@");
+    let assignment = re!(
+        r#"(?i)\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)(\s*[=:]\s*)([^\s"'\\,;]{8,})"#
+    );
+    let mut out = std::borrow::Cow::Borrowed(text);
+    if shaped.is_match(&out) {
+        out = std::borrow::Cow::Owned(shaped.replace_all(&out, "[redacted]").into_owned());
+    }
+    if url_password.is_match(&out) {
+        out = std::borrow::Cow::Owned(
+            url_password
+                .replace_all(&out, "${1}[redacted]@")
+                .into_owned(),
+        );
+    }
+    if assignment.is_match(&out) {
+        let replaced = assignment.replace_all(&out, |c: &regex::Captures| {
+            let value = &c[3];
+            // Counts and sizes (`max_tokens=4096`) and already-redacted values stay.
+            if value.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+                || value.starts_with("[redacted")
+            {
+                c[0].to_string()
+            } else {
+                format!("{}{}[redacted]", &c[1], &c[2])
+            }
+        });
+        out = std::borrow::Cow::Owned(replaced.into_owned());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn secrets_are_redacted() {
+        let text = concat!(
+            "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n",
+            "ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz\n",
+            "token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB here\n",
+            "DB_PASSWORD: hunter2hunter2\n",
+            "git clone https://user:s3cretpass@github.com/x/y\n",
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\n",
+            "max_tokens=4096 tokens: 1234567890 passed\n",
+        );
+        let r = redact(text);
+        for secret in [
+            "AKIAIOSFODNN7EXAMPLE",
+            "sk-ant-api03",
+            "ghp_0123",
+            "hunter2",
+            "s3cretpass",
+            "MIIEpAIBAAKCAQEA",
+        ] {
+            assert!(!r.contains(secret), "{secret} left in:\n{r}");
+        }
+        assert!(
+            r.contains("DB_PASSWORD: [redacted]")
+                && r.contains("https://user:[redacted]@github.com")
+        );
+        assert!(
+            r.contains("max_tokens=4096 tokens: 1234567890 passed"),
+            "{r}"
+        );
+        // JSON stays valid.
+        let json = r#"{"command":"export API_KEY=abcdefgh12345678","n":1}"#;
+        let v: serde_json::Value = serde_json::from_str(&redact(json)).unwrap();
+        assert_eq!(v["command"], "export API_KEY=[redacted]");
+        assert!(matches!(
+            redact("nothing here"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
     use super::*;
 
     #[test]
