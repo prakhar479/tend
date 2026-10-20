@@ -158,6 +158,8 @@ pub struct Controller {
     allowed: BTreeMap<EditKey, (String, u64)>,
     /// Bash calls wrapped by `tend run`, by tool use id.
     wrapped: BTreeMap<String, Wrapped>,
+    /// The repo's `.tend.toml` (E7).
+    policy: crate::policy::Policy,
     /// (actual, expected) values the latest failing run of each command showed (E4).
     failure_values: BTreeMap<String, Vec<(String, String)>>,
     /// Claude Code ran a call as written although tend rewrote it: wrap nothing more.
@@ -291,6 +293,7 @@ impl Controller {
             last_blocked: None,
             allowed: BTreeMap::new(),
             wrapped: BTreeMap::new(),
+            policy: crate::policy::Policy::default(),
             failure_values: BTreeMap::new(),
             rewrite_ignored: false,
             no_wrap: std::collections::BTreeSet::new(),
@@ -403,6 +406,11 @@ impl Controller {
 
     pub fn broker_mut(&mut self) -> &mut Broker {
         &mut self.broker
+    }
+
+    /// The repo's `.tend.toml`: extra test paths and protected paths for the guard.
+    pub fn set_policy(&mut self, policy: crate::policy::Policy) {
+        self.policy = policy;
     }
 
     pub fn set_mode(&mut self, mode: Mode, now_ms: u64) -> Decision {
@@ -1072,11 +1080,17 @@ impl Controller {
         old: &str,
         new: &str,
     ) -> Option<(u64, Vec<String>)> {
-        if !guard::judges(path, old, new) {
+        let is_test = guard::judges(path, old, new) || self.policy.is_test(path);
+        let protected = self.policy.protected_by(path).map(str::to_string);
+        if !is_test && protected.is_none() {
             return None;
         }
         let q = Question::TestWeakened { path, old, new };
-        let (answer, source) = self.broker.ask(&q);
+        let (answer, source) = if is_test {
+            self.broker.ask(&q)
+        } else {
+            (Answer::Neutral, crate::broker::Source::Rule)
+        };
         // E4: the edit makes the test expect what the failing run produced.
         let pairs: Vec<(String, String)> =
             self.failure_values.values().flatten().cloned().collect();
@@ -1087,6 +1101,17 @@ impl Controller {
             }
             (_, Some(r)) => Answer::Weakened { reasons: vec![r] },
             (a, None) => a,
+        };
+        // E7: the repo asks for a look at every edit of a protected path.
+        let answer = match (answer, protected) {
+            (a, None) => a,
+            (Answer::Weakened { mut reasons }, Some(pat)) => {
+                reasons.push(format!("the path is protected by .tend.toml (`{pat}`)"));
+                Answer::Weakened { reasons }
+            }
+            (_, Some(pat)) => Answer::Weakened {
+                reasons: vec![format!("the path is protected by .tend.toml (`{pat}`)")],
+            },
         };
         let (name, version) = (q.name(), q.version());
         let j = self.push(

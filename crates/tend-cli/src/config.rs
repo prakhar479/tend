@@ -142,6 +142,29 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// The repo policy for `dir`: the nearest `.tend.toml` in `dir` or above, up to the
+/// git root (a directory with `.git`). Returns the policy (empty if there is none) and
+/// warnings, each naming the file.
+pub fn load_policy(dir: &Path) -> (tend_core::policy::Policy, Vec<String>) {
+    let mut at = Some(dir);
+    while let Some(d) = at {
+        let file = d.join(".tend.toml");
+        if let Ok(text) = fs::read_to_string(&file) {
+            let (p, w) = tend_core::policy::parse(&text, &d.to_string_lossy());
+            let w = w
+                .into_iter()
+                .map(|w| format!("{}: {w}", file.display()))
+                .collect();
+            return (p, w);
+        }
+        if d.join(".git").exists() {
+            break;
+        }
+        at = d.parent();
+    }
+    (tend_core::policy::Policy::default(), Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

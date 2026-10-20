@@ -22,6 +22,8 @@ pub const HOOKED_TOOLS: [&str; 4] = ["Bash", "Edit", "MultiEdit", "Write"];
 #[derive(Default)]
 pub struct ClaudeCode {
     started: bool,
+    /// The repo's `.tend.toml` (E7).
+    policy: tend_core::policy::Policy,
     /// Claude Code's id of the current conversation.
     session_id: String,
     /// Test files a Bash call may write, as they were before it ran (R1.4).
@@ -88,8 +90,16 @@ fn expand(base: &Path, target: &str) -> Vec<PathBuf> {
 
 /// Snapshot the test files a Bash command may write (R1.4). Relative paths start where
 /// the command runs: the hook's cwd, then any leading `cd DIR &&`.
-fn snapshot(command: &str, cwd: &str) -> Vec<(PathBuf, Option<String>)> {
-    let targets = tend_core::perception::code_write_targets(command);
+fn snapshot(command: &str, cwd: &str, policy: &tend_core::policy::Policy) -> Snapshot {
+    let protected = |p: &str| {
+        policy
+            .protected_by(&resolve(cwd, p).to_string_lossy())
+            .is_some()
+    };
+    let mut targets = tend_core::perception::code_write_targets(command);
+    targets.extend(tend_core::perception::write_targets_where(
+        command, protected,
+    ));
     if targets.is_empty() {
         return vec![];
     }
@@ -104,8 +114,11 @@ fn snapshot(command: &str, cwd: &str) -> Vec<(PathBuf, Option<String>)> {
             continue;
         };
         // A source file counts only when it holds tests (Rust unit tests in `src/`).
-        let is_test = tend_core::guard::is_test_path(&path.to_string_lossy())
-            || text.as_deref().is_some_and(tend_core::guard::has_test_code);
+        let shown = path.to_string_lossy();
+        let is_test = tend_core::guard::is_test_path(&shown)
+            || text.as_deref().is_some_and(tend_core::guard::has_test_code)
+            || policy.is_test(&shown)
+            || policy.protected_by(&shown).is_some();
         if is_test {
             files.push((path, text));
         }
@@ -315,6 +328,10 @@ impl Connector for ClaudeCode {
         Capabilities::CLAUDE_CODE
     }
 
+    fn set_policy(&mut self, policy: &tend_core::policy::Policy) {
+        self.policy = policy.clone();
+    }
+
     fn map(&mut self, hook_event: &str, p: &Value) -> Vec<Event> {
         let mut evs = Vec::new();
         let cwd = s(p, "cwd").to_string();
@@ -375,7 +392,7 @@ impl Connector for ClaudeCode {
                         .unwrap_or(false);
                     let command = s(&input, "command");
                     if tool == "Bash" && self.snapshots.len() < MAX_PENDING_SNAPSHOTS {
-                        let files = snapshot(command, &cwd);
+                        let files = snapshot(command, &cwd, &self.policy);
                         if !files.is_empty() {
                             self.snapshots
                                 .insert(tool_use_id.clone(), (now_ms(), files));

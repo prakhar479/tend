@@ -1180,3 +1180,27 @@ fn session_audit_reports_what_the_agent_changed() {
         " M app.py\n M tests/test_a.py\n?? notes.txt\n"
     );
 }
+
+/// E7: the daemon reads `.tend.toml` from the session's directory.
+#[test]
+fn repo_policy_is_loaded_from_the_project() {
+    let dir = tmp("policy");
+    let repo = dir.join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::write(repo.join(".tend.toml"), "protected = [\"migrations/**\"]\n").unwrap();
+    let (_daemon, sock) = start_daemon(&dir.join("session"), "optimize");
+    let mut pre: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("pre_tool_use_edit_test.json")).unwrap())
+            .unwrap();
+    pre["cwd"] = repo.display().to_string().into();
+    pre["tool_input"]["file_path"] = repo
+        .join("migrations/0001.sql")
+        .display()
+        .to_string()
+        .into();
+    pre["tool_input"]["old_string"] = "CREATE TABLE a;".into();
+    pre["tool_input"]["new_string"] = "CREATE TABLE b;".into();
+    let out = hook(&sock, "PreToolUse", &pre);
+    assert!(out.contains("protected by .tend.toml"), "{out}");
+    assert!(out.contains("\"deny\""), "{out}");
+}

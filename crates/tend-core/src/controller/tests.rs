@@ -1008,3 +1008,44 @@ fn snapshot_update_runs_get_a_warning() {
         .iter()
         .any(|e| matches!(&e.body, Body::Action { applied: false, .. })));
 }
+
+/// E7: `.tend.toml` protects paths and adds test paths.
+#[test]
+fn repo_policy_protects_paths_and_adds_tests() {
+    let (policy, w) = crate::policy::parse(
+        "protected = [\"migrations/**\"]\ntest_paths = [\"checks/*.py\"]\n",
+        "/r",
+    );
+    assert!(w.is_empty());
+    let mut c = ctl(Mode::Optimize);
+    c.set_policy(policy);
+    let edit = |path: &str, old: &str, new: &str| Event::EditProposed {
+        tool_use_id: "x".into(),
+        path: path.into(),
+        old_text: old.into(),
+        new_text: new.into(),
+    };
+    let d = c.handle(
+        edit("/r/migrations/0002.sql", "ALTER TABLE a;", "ALTER TABLE b;"),
+        0,
+    );
+    match &d.response.permission {
+        Some(Permission::Deny(m)) => assert!(
+            m.contains("protected by .tend.toml (`migrations/**`)"),
+            "{m}"
+        ),
+        p => panic!("{p:?}"),
+    }
+    // A checks/ file is a test file now: removing its assertion is flagged.
+    let d = c.handle(
+        edit("/r/checks/a.py", "assert a\nassert b\n", "assert a\n"),
+        1,
+    );
+    assert!(matches!(d.response.permission, Some(Permission::Deny(_))));
+    // Elsewhere, nothing changes.
+    assert!(c
+        .handle(edit("/r/src/app.py", "a = 1", "a = 2"), 2)
+        .response
+        .permission
+        .is_none());
+}

@@ -426,7 +426,11 @@ fn run(cli: Cli) -> Result<i32> {
                     let scratch = std::env::temp_dir();
                     let (from, to) = audit::resolve_range(&root, range.as_deref(), &scratch)?;
                     let title = range.unwrap_or_else(|| "HEAD..working tree".into());
-                    (audit::run(&root, &from, &to, &|_| false)?, title)
+                    let policy = config::load_policy(&root).0;
+                    (
+                        audit::run(&root, &from, &to, &|p| policy.audit_ignores(p))?,
+                        title,
+                    )
                 }
             };
             match format {

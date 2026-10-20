@@ -112,6 +112,15 @@ fn decide_hook(
     let unanswered = late(now);
     let mut decisions = Vec::new();
     for ev in connector.map(event, payload) {
+        // The repo's policy, from the session's working directory (E7).
+        if let tend_core::Event::SessionStarted { cwd, .. } = &ev {
+            let (policy, warnings) = crate::config::load_policy(Path::new(cwd));
+            for w in warnings {
+                eprintln!("tendd: {w}");
+            }
+            controller.set_policy(policy.clone());
+            connector.set_policy(&policy);
+        }
         decisions.push(if unanswered {
             controller.handle_unanswered(ev, now)
         } else {

@@ -24,6 +24,7 @@ pub mod event;
 pub mod guard;
 pub mod loops;
 pub mod perception;
+pub mod policy;
 pub mod record;
 pub mod session;
 pub mod shape;

@@ -110,6 +110,11 @@ fn setup(exe: &Path, mode: Mode, user_settings: Option<&str>) -> Result<Session>
     }
     let settings_path = dir.join("claude-settings.json");
     fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+    if let Ok(cwd) = env::current_dir() {
+        for w in crate::config::load_policy(&cwd).1 {
+            eprintln!("tend: {w}");
+        }
+    }
     if crate::config::load().experimental_audit {
         record_audit_base(&dir);
     }
@@ -205,7 +210,8 @@ fn finish_audit(dir: &Path) -> Option<String> {
     let mut lines = base.lines();
     let (root, from) = (PathBuf::from(lines.next()?), lines.next()?.to_string());
     let to = crate::audit::worktree_tree(&root, dir).ok()?;
-    let report = crate::audit::run(&root, &from, &to, &|_| false).ok()?;
+    let policy = crate::config::load_policy(&root).0;
+    let report = crate::audit::run(&root, &from, &to, &|p| policy.audit_ignores(p)).ok()?;
     let _ = fs::write(dir.join("audit.json"), serde_json::to_string(&report).ok()?);
     Some(format!(
         "{}: {} · `tend audit --session` for details",

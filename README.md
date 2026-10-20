@@ -64,6 +64,18 @@ keep_days = 30                  # 0 keeps every session
 experimental_audit = false      # audit each session's changes to tests and checks (under test)
 ```
 
+## Repo policy
+
+A `.tend.toml` at the repo root (committed with the project) adjusts the guard for that repo:
+
+```toml
+test_paths = ["e2e/**", "checks/*.py"]           # also test files
+protected = ["migrations/**", "tests/golden/**"]  # edits are guarded like test weakening
+audit_ignore = ["vendor/**"]                      # left out of `tend audit`
+```
+
+An edit of a protected path is denied in optimize mode (and recorded in look mode) until you run `! tend allow`, like any guard flag. Globs are relative to the repo root; `*` stays within a directory, `**` crosses them, and a pattern without `/` matches a file name anywhere.
+
 ### Audit (experimental)
 
 `tend audit` reads a git diff, or a whole `tend claude` session with `experimental_audit = true`, and lists what changed in the project's checks:

@@ -428,16 +428,17 @@ const MAX_WRITE_TARGETS: usize = 32;
 /// them before the run and compares after, so listing too many costs a read, never a
 /// false flag. A `*` may stand in the last path component; the caller expands it.
 pub fn test_write_targets(cmd: &str) -> Vec<String> {
-    write_targets(cmd, is_test_path)
+    write_targets_where(cmd, is_test_path)
 }
 
 /// Like `test_write_targets`, plus source files, which may hold tests (Rust unit tests
 /// in `src/`, I2 G2). The caller keeps those whose text has test code.
 pub fn code_write_targets(cmd: &str) -> Vec<String> {
-    write_targets(cmd, crate::guard::may_hold_tests)
+    write_targets_where(cmd, crate::guard::may_hold_tests)
 }
 
-fn write_targets(cmd: &str, keep: impl Fn(&str) -> bool) -> Vec<String> {
+/// Files a shell command may write, as it names them, that `keep` accepts.
+pub fn write_targets_where(cmd: &str, keep: impl Fn(&str) -> bool) -> Vec<String> {
     let mut out = std::collections::BTreeSet::new();
     let mut consider = |w: &str| {
         let w = w.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&' || c == '>');
