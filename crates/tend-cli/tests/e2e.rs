@@ -714,3 +714,227 @@ fn late_hook_is_not_recorded_as_applied() {
         "in time: the guard denies"
     );
 }
+
+/// Rule 1 (F1): a hook call tend cannot parse (another tend version wrote the settings)
+/// exits 0. Exit 2 from PreToolUse would block the tool call.
+#[test]
+fn hook_argument_errors_exit_zero() {
+    for args in [
+        &["hook"][..],
+        &["hook", "PreToolUse", "extra"],
+        &["hook", "--bogus", "x"],
+    ] {
+        let mut child = Command::new(bin())
+            .args(args)
+            .env_remove("TEND_SOCKET")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(b"{}").unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+}
+
+/// F1: `tend run` with arguments it does not know still runs the command.
+#[test]
+fn tend_run_with_unknown_arguments_still_runs_the_command() {
+    let out = Command::new(bin())
+        .args(["run", "--new-flag", "--id", "x", "--sh", "echo ran; exit 3"])
+        .env_remove("TEND_SOCKET")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ran\n");
+}
+
+/// A daemon that accepts and never answers (stuck, or not tend at all).
+fn silent_listener(dir: &Path) -> (PathBuf, thread::JoinHandle<()>) {
+    let sock = dir.join("silent.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let handle = thread::spawn(move || {
+        let mut held = Vec::new();
+        for s in listener.incoming().take(1) {
+            held.push(s);
+            thread::sleep(Duration::from_secs(3));
+        }
+    });
+    (sock, handle)
+}
+
+/// T2: the shim and `tend run` fail open against a daemon that never answers: within
+/// their timeouts, with nothing printed (shim) or the raw bytes and exit code (run).
+#[test]
+fn shim_and_run_fail_open_on_a_silent_daemon() {
+    let dir = tmp("silent");
+    let (sock, _h) = silent_listener(&dir);
+    let start = std::time::Instant::now();
+    let mut child = Command::new(bin())
+        .args(["hook", "PreToolUse"])
+        .env("TEND_SOCKET", &sock)
+        .env("TEND_HOOK_TIMEOUT_MS", "200")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let payload = fs::read(fixture("pre_tool_use_edit_test.json")).unwrap();
+        child.stdin.take().unwrap().write_all(&payload).unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty());
+    assert!(
+        start.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        start.elapsed()
+    );
+
+    let dir = tmp("silent-run");
+    let (sock, _h) = silent_listener(&dir);
+    let start = std::time::Instant::now();
+    let out = Command::new(bin())
+        .args(["run", "--id", "t1", "--sh", r"printf 'a\377b'; exit 4"])
+        .env("TEND_SOCKET", &sock)
+        .env("TEND_FILTER_TIMEOUT_MS", "200")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(out.stdout, b"a\xffb");
+    assert!(
+        start.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// F2: when tend cannot set itself up, the agent still runs, without tend's settings.
+#[test]
+fn agent_runs_when_tend_setup_fails() {
+    let dir = tmp("setup-fails");
+    fs::create_dir_all(dir.join("real")).unwrap();
+    std::os::unix::fs::symlink(dir.join("real"), dir.join("home")).unwrap();
+    let agent = dir.join("agent.sh");
+    fs::write(
+        &agent,
+        format!("#!/bin/sh\necho \"$@\" > '{}/args.txt'\n", dir.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(bin())
+        .args(["claude", "-p", "hi"])
+        .env("TEND_HOME", dir.join("home"))
+        .env("TEND_CLAUDE_BIN", &agent)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("without tend"), "{stderr}");
+    assert_eq!(fs::read_to_string(dir.join("args.txt")).unwrap(), "-p hi\n");
+}
+
+/// F3: SIGTERM to `tend claude` stops the agent too, and the exit code says so.
+#[test]
+fn sigterm_to_the_launcher_stops_the_agent() {
+    let dir = tmp("sigterm");
+    let agent = dir.join("agent.sh");
+    let pidfile = dir.join("agent.pid");
+    fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+            pidfile.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut launcher = Command::new(bin())
+        .arg("claude")
+        .env("TEND_HOME", dir.join("home"))
+        .env("TEND_CLAUDE_BIN", &agent)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut agent_pid = None;
+    for _ in 0..250 {
+        if let Some(p) = fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+        {
+            agent_pid = Some(p);
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let agent_pid = agent_pid.expect("agent started");
+    unsafe { libc::kill(launcher.id() as i32, libc::SIGTERM) };
+    let status = launcher.wait().unwrap();
+    assert_eq!(status.code(), Some(128 + libc::SIGTERM));
+    let alive = unsafe { libc::kill(agent_pid, 0) } == 0;
+    assert!(!alive, "the agent must not outlive the launcher");
+}
+
+/// F7: a daemon that stops mid-session is reported at exit.
+#[test]
+fn launcher_reports_a_daemon_that_stopped_early() {
+    let dir = tmp("daemon-died");
+    let agent = dir.join("agent.sh");
+    let script = r#"import json, os, socket
+d = os.environ["TEND_SESSION_DIR"]
+tok = open(os.path.join(d, "control.token")).read().strip()
+s = socket.socket(socket.AF_UNIX)
+s.connect(os.environ["TEND_SOCKET"])
+s.sendall((json.dumps({"type": "shutdown", "token": tok}) + "\n").encode())
+s.recv(1000)
+"#;
+    fs::write(dir.join("stop.py"), script).unwrap();
+    fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\ntend hook UserPromptSubmit < /dev/null\npython3 '{}/stop.py'\nsleep 0.3\n",
+            dir.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(bin())
+        .arg("claude")
+        .env("TEND_HOME", dir.join("home"))
+        .env("TEND_CLAUDE_BIN", &agent)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("the daemon stopped during the session"),
+        "{stderr}"
+    );
+}
+
+/// R1: a run of the agent that starts no conversation (`claude --version`) leaves no
+/// session behind.
+#[test]
+fn launch_without_a_conversation_leaves_no_session() {
+    let dir = tmp("no-conversation");
+    let agent = dir.join("agent.sh");
+    fs::write(&agent, "#!/bin/sh\necho 2.1.303\n").unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(bin())
+        .args(["claude", "--version"])
+        .env("TEND_HOME", dir.join("home"))
+        .env("TEND_CLAUDE_BIN", &agent)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "2.1.303\n");
+    let left = fs::read_dir(dir.join("home/sessions")).unwrap().count();
+    assert_eq!(left, 0);
+}

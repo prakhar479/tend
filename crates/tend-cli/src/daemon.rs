@@ -2,7 +2,7 @@
 //! One thread per connection; one mutex around all session state.
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,10 @@ use crate::store::Store;
 
 /// Time to encode and send a reply. A hook later than its deadline minus this is late.
 const REPLY_MARGIN_MS: u64 = 10;
+/// A client gets this long to send its request line.
+const READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// Larger than any hook payload or filter request (8 MiB of output, JSON-escaped).
+const MAX_REQUEST_BYTES: u64 = 64 << 20;
 
 struct State {
     controller: Controller,
@@ -98,8 +102,16 @@ fn serve(
     sock: &Path,
     token: &Option<String>,
 ) -> Result<()> {
+    // A client that connects and sends nothing must not pin a thread forever (F9).
+    stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let mut line = String::new();
-    BufReader::new(stream.try_clone()?).read_line(&mut line)?;
+    BufReader::new(stream.try_clone()?)
+        .take(MAX_REQUEST_BYTES)
+        .read_line(&mut line)?;
+    // A liveness probe (`is_live`) connects and closes: not an error.
+    if line.is_empty() {
+        return Ok(());
+    }
     let req: Request = serde_json::from_str(&line).context("bad request")?;
     let mut shutdown = false;
 

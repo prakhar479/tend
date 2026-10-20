@@ -173,7 +173,22 @@ Based on a code review, a study of the owner's transcripts, and a check of the C
 
 Review after the checkpoint: about 60 findings, most of them confirmed. Batches in the order of §12 there:
 
-- [ ] **I1. Rule 1:** F1 hook parse errors exit 2 · F2 launcher fails closed · F3 SIGTERM orphans claude · F7 dead daemon unnoticed · F9 socket read timeout · T2 fail-open tests.
+- [x] **I1. Rule 1:** F1 hook parse errors exit 2 · F2 launcher fails closed · F3 SIGTERM orphans claude · F7 dead daemon unnoticed · F9 socket read timeout · T2 fail-open tests.
+  Done:
+  - F1: `tend hook` is handled before clap and always exits 0. `tend run` with arguments it cannot parse still runs `--sh`.
+  - F2: any setup error runs claude without tend, passing the user's `--settings` through.
+  - F3: TERM, HUP, and QUIT are forwarded to claude, and the exit code is 128+sig.
+  - F7: the daemon is reaped, and an early stop is reported at exit.
+  - F9: 2 s read timeout and 64 MiB request cap; an empty probe is silent.
+  - T2: 7 new e2e tests.
+  - Also done here, because the launcher was being rewritten:
+    - F10: the hook command is shell-quoted, and the agent's PATH gets a private `<session>/bin/tend` link instead of tend's install dir.
+    - U6: config warnings reach the user's stderr; bad lines are skipped, not fatal, with "did you mean"; values are bounded.
+    - U7: `--tend-mode` works anywhere, `--help` goes to claude, and a user `--settings` is merged into tend's file.
+    - U8: hidden Phase 2/3 commands.
+    - U11: 2 ms start poll.
+    - R1, in part: the agent binary is checked first; a launch with no conversation leaves no session; the new `keep_days` (default 30) auto-prunes at launch.
+  - Live check with Claude Code 2.1.303: the quoted hooks fire.
 - [ ] **I2. Guard:** G1 comments and strings · G2 inline and other test files · G3 skip forms · G4 deleted tests, early return, swallowed asserts · G5 always-pass variants · G6 + T1 table tests.
 - [ ] **I3. Loops and classification:** L1 errors in passing runs · L2 tee as an edit · L3 key collisions · L4 tail variants · L5 and L6 signatures · S1 build regex · S2 traceback tails · S3 comment newline · T4 property tests.
 - [ ] **I4. Resources and UX:** F4 big Writes · F5 `tend run` streaming · R1 session cleanup · U1–U9.

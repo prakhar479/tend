@@ -35,6 +35,8 @@ pub struct Config {
     pub tighten_after: u32,
     /// Loop time counts at most this much of any gap between events (idle time).
     pub idle_gap_minutes: u64,
+    /// `tend claude` deletes sessions with no activity for this many days (0: never).
+    pub keep_days: u64,
 }
 
 impl Default for Config {
@@ -45,6 +47,7 @@ impl Default for Config {
             loop_threshold: 3,
             tighten_after: 5,
             idle_gap_minutes: 10,
+            keep_days: 30,
         }
     }
 }
@@ -54,6 +57,7 @@ impl Config {
     pub fn fields(&self) -> BTreeMap<String, String> {
         [
             ("idle_gap_minutes", self.idle_gap_minutes.to_string()),
+            ("keep_days", self.keep_days.to_string()),
             ("loop_threshold", self.loop_threshold.to_string()),
             ("max_summary_ratio", self.max_summary_ratio.to_string()),
             (

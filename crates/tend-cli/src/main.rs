@@ -33,7 +33,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Start Claude Code under tend. Arguments after the options go to `claude`.
+    /// Start Claude Code under tend. Other arguments, `--help` included, go to `claude`.
+    /// `--tend-mode` may come anywhere.
+    #[command(disable_help_flag = true)]
     Claude {
         #[arg(long = "tend-mode", value_enum, default_value = "look")]
         mode: ModeArg,
@@ -41,11 +43,13 @@ enum Cmd {
         args: Vec<String>,
     },
     /// Start Codex under tend (Phase 2).
+    #[command(hide = true)]
     Codex {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Install stable hooks for an agent once (Phase 2: codex).
+    #[command(hide = true)]
     Init { agent: String },
     /// Change the mode of a live session.
     Mode {
@@ -93,6 +97,7 @@ enum Cmd {
     /// Prints nothing outside a tend session.
     Status,
     /// Reverse an action (Phase 3).
+    #[command(hide = true)]
     Undo { id: String },
     /// Run look mode over an existing Claude Code transcript, or over all of them.
     Retro {
@@ -156,13 +161,29 @@ impl From<ModeArg> for Mode {
 }
 
 fn main() {
-    let cli = Cli::parse();
-    // The shim must never fail the agent: handle it before anything that can error.
-    if let Cmd::Hook { event } = &cli.cmd {
-        // Exit 0 even if something panics (rule 1).
-        let _ = std::panic::catch_unwind(|| shim::run(event));
+    let argv: Vec<String> = std::env::args().collect();
+    // The shim must never fail the agent: handle it before clap, whose errors exit 2, and
+    // exit 2 from a PreToolUse hook blocks the tool call. Extra or missing arguments (a
+    // newer settings file, an older binary) still exit 0 (rule 1).
+    if argv.get(1).map(String::as_str) == Some("hook") {
+        let event = argv.get(2).cloned().unwrap_or_default();
+        // Exit 0 even if something panics.
+        let _ = std::panic::catch_unwind(|| shim::run(&event));
         std::process::exit(0);
     }
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // `tend run` stands in for the agent's command: if its other arguments do not
+            // parse, still run the command, unfiltered.
+            if argv.get(1).map(String::as_str) == Some("run") {
+                if let Some(sh) = arg_value(&argv, "--sh") {
+                    std::process::exit(run::run("", &sh));
+                }
+            }
+            e.exit()
+        }
+    };
     if let Cmd::Run { id, sh } = &cli.cmd {
         std::process::exit(run::run(id, sh));
     }
@@ -173,6 +194,18 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// The value of `--name value` or `--name=value` in raw arguments.
+fn arg_value(argv: &[String], name: &str) -> Option<String> {
+    let eq = format!("{name}=");
+    argv.iter().enumerate().find_map(|(i, a)| {
+        if a == name {
+            argv.get(i + 1).cloned()
+        } else {
+            a.strip_prefix(&eq).map(str::to_string)
+        }
+    })
 }
 
 /// Every flag, grouped by session, with the flagged entry and how to look closer.

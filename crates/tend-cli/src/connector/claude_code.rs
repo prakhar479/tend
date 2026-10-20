@@ -467,7 +467,9 @@ impl Connector for ClaudeCode {
 /// Settings file the launcher passes with `claude --settings <file>`.
 /// S3: these hooks merge with user, project, and local hooks.
 pub fn settings(exe: &Path) -> Value {
-    let cmd = |event: &str| format!("\"{}\" hook {event}", exe.display());
+    // Quoted for the shell Claude Code runs hooks with: a path may hold `"` or `$`.
+    let exe = crate::run::sh_quote(&exe.to_string_lossy());
+    let cmd = |event: &str| format!("{exe} hook {event}");
     let entry = |event: &str, matcher: Option<&str>| {
         let mut m =
             json!({ "hooks": [{ "type": "command", "command": cmd(event), "timeout": 5 }] });
