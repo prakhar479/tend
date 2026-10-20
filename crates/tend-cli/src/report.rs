@@ -38,6 +38,25 @@ impl Usage {
     }
 }
 
+/// The transcript at `path`, or the file of the same name in another project dir: a
+/// conversation resumed after its folder moved (or renamed) still writes to the old one.
+pub fn find_transcript(path: &Path) -> std::path::PathBuf {
+    if path.exists() {
+        return path.to_path_buf();
+    }
+    let (Some(name), Some(projects)) = (path.file_name(), path.parent().and_then(Path::parent))
+    else {
+        return path.to_path_buf();
+    };
+    std::fs::read_dir(projects)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path().join(name))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
 pub fn usage_from_transcript(path: &Path) -> Option<Usage> {
     let f = File::open(path).ok()?;
     usage_from_lines(BufReader::new(f).lines().map_while(Result::ok))
@@ -583,7 +602,7 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
     // One transcript per conversation (`/clear` and `/resume` start another, R3).
     let usage = transcripts
         .iter()
-        .filter_map(|t| usage_from_transcript(Path::new(t)))
+        .filter_map(|t| usage_from_transcript(&find_transcript(Path::new(t))))
         .reduce(|mut a, b| {
             a.add(&b);
             a
@@ -808,6 +827,19 @@ pub fn why(entries: &[Entry], id: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A resumed conversation whose project folder was renamed: the reported path does
+    /// not exist, the same file under another project dir does.
+    #[test]
+    fn transcript_is_found_in_another_project_dir() {
+        let root = std::env::temp_dir().join(format!("tend-moved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("-old")).unwrap();
+        std::fs::write(root.join("-old/s.jsonl"), "{}").unwrap();
+        let found = find_transcript(&root.join("-new/s.jsonl"));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(found, root.join("-old/s.jsonl"));
+    }
 
     fn entry(seq: u64, body: Body) -> Entry {
         Entry {

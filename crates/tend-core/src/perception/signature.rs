@@ -137,7 +137,11 @@ pub fn extract_failures(output: &str) -> Vec<Failure> {
                 }
                 _ => l,
             };
-            if re!(r"^\w+(Error|Exception)(: .+)?$|^assert\s.+|^error(\[E\d+\])?: .+|\berror TS\d+: .+|:\d+:\d+: error: .+")
+            // Cargo's closing lines (`could not compile …`, `aborting due to …`) only
+            // count the errors above them: as a signature they would make every build
+            // failure look like the same one.
+            let summary = re!(r"^error: (could not compile|aborting due to)\b").is_match(l);
+            if !summary && re!(r"^\w+(Error|Exception)(: .+)?$|^assert\s.+|^error(\[E\d+\])?: .+|\berror TS\d+: .+|:\d+:\d+: error: .+")
                 .is_match(l)
             {
                 found.push((None, l.to_string()));
@@ -480,6 +484,17 @@ mod tests {
         // A passing summary is not a failure.
         assert!(extract_failures("300 passed in 0.14s").is_empty());
         assert!(extract_failures("test result: ok. 2 passed; 0 failed; 0 ignored").is_empty());
+    }
+
+    /// Cargo's summary lines are not failures: two different compile errors stay two.
+    #[test]
+    fn cargo_summary_lines_are_not_failures() {
+        let a = "error[E0425]: cannot find value `x` in this scope\nerror: could not compile `app` (bin \"app\") due to 1 previous error\n";
+        let b = "error[E0308]: mismatched types\nerror: could not compile `app` (bin \"app\") due to 1 previous error\n";
+        let (fa, fb) = (extract_failures(a), extract_failures(b));
+        assert_eq!(fa.len(), 1, "{fa:?}");
+        assert_ne!(fa[0].signature, fb[0].signature);
+        assert!(extract_failures("error: aborting due to 2 previous errors\n").is_empty());
     }
 
     /// I3, L1: a passing run that logs an error is not a failure.
