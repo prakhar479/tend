@@ -1,0 +1,38 @@
+# tend audit (experimental) as a GitHub Action: what a pull request or push changed in
+# the project's tests and checks, written to the job summary. It reports; it never
+# fails the job. The feature is under test: its output may change.
+#
+#   - uses: actions/checkout@v5
+#     with: { fetch-depth: 0 }          # the audit needs the base commit
+#   - uses: prakhar479/tend@main
+name: tend audit (experimental)
+description: What a change did to tests and checks (assertions, skips, suppressions, check config). Experimental.
+inputs:
+  range:
+    description: "Git range to audit. Default: the PR's base...HEAD, or the pushed range."
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Build tend
+      shell: bash
+      run: cargo install --locked --quiet --path "${{ github.action_path }}/crates/tend-cli" --root "$RUNNER_TEMP/tend"
+    - name: Audit
+      shell: bash
+      env:
+        RANGE: ${{ inputs.range }}
+        PR_BASE: ${{ github.event.pull_request.base.sha }}
+        PUSH_BEFORE: ${{ github.event.before }}
+      run: |
+        if [ -z "$RANGE" ]; then
+          if [ -n "$PR_BASE" ]; then
+            RANGE="$PR_BASE...HEAD"
+          elif [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            RANGE="$PUSH_BEFORE..HEAD"
+          else
+            RANGE="HEAD~1..HEAD"
+          fi
+        fi
+        "$RUNNER_TEMP/tend/bin/tend" audit "$RANGE" --format markdown | tee -a "$GITHUB_STEP_SUMMARY" \
+          || echo "::warning::tend audit could not run on $RANGE"

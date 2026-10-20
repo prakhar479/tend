@@ -217,41 +217,76 @@ fn is_dependency_manifest(path: &str) -> bool {
         .is_match(path)
 }
 
-/// Suppression markers, with a name for each.
-fn suppression_kind(line: &str) -> Option<&'static str> {
-    let kinds: [(&'static str, &regex::Regex); 13] = [
-        ("noqa", re!(r"#\s*noqa\b")),
-        ("type: ignore", re!(r"#\s*type:\s*ignore\b")),
-        ("pyright: ignore", re!(r"#\s*pyright:\s*ignore\b")),
-        ("pylint: disable", re!(r"#\s*pylint:\s*disable\b")),
+/// The language family of a path, for which suppressions apply.
+fn language(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit_once('.').map(|(_, e)| e)?;
+    Some(match ext {
+        "py" | "pyi" => "py",
+        "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts" | "vue" | "svelte" => "js",
+        "rs" => "rs",
+        "go" => "go",
+        "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" => "c",
+        "java" | "kt" | "kts" | "scala" => "jvm",
+        "rb" => "rb",
+        _ => return None,
+    })
+}
+
+/// A line without the contents of its string literals: a marker inside a string
+/// (a regex, a test fixture, a message) suppresses nothing.
+fn without_strings(line: &str) -> std::borrow::Cow<'_, str> {
+    re!(r##"r#+"[^"]*"#+|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'"##).replace_all(line, "\"\"")
+}
+
+/// The suppression on a line of a file in `lang`, if any. Markers count only in the
+/// languages they act in (`# noqa` in Python, `eslint-disable` in JS/TS, …).
+fn suppression_kind(lang: &str, line: &str) -> Option<&'static str> {
+    let kinds: [(&'static str, &[&str], &regex::Regex); 13] = [
+        ("noqa", &["py"], re!(r"#\s*noqa\b")),
+        ("type: ignore", &["py"], re!(r"#\s*type:\s*ignore\b")),
+        ("pyright: ignore", &["py"], re!(r"#\s*pyright:\s*ignore\b")),
+        ("pylint: disable", &["py"], re!(r"#\s*pylint:\s*disable\b")),
+        ("fmt: off", &["py"], re!(r"#\s*fmt:\s*off\b")),
         (
             "no cover",
+            &["py", "js"],
             re!(r"pragma:\s*no\s*cover\b|istanbul ignore|c8 ignore"),
         ),
-        ("eslint-disable", re!(r"eslint-disable")),
-        ("ts-ignore", re!(r"@ts-(ignore|expect-error|nocheck)\b")),
-        ("rust allow", re!(r"#!?\[(allow|expect)\(")),
-        ("nolint", re!(r"//\s*(nolint|NOLINT)\b")),
-        ("SuppressWarnings", re!(r"@SuppressWarnings\b|@Suppress\(")),
-        ("rubocop:disable", re!(r"rubocop:disable\b")),
-        ("noinspection", re!(r"noinspection\b")),
-        ("fmt: off", re!(r"#\s*fmt:\s*off\b")),
+        ("eslint-disable", &["js"], re!(r"eslint-disable")),
+        (
+            "ts-ignore",
+            &["js"],
+            re!(r"@ts-(ignore|expect-error|nocheck)\b"),
+        ),
+        ("rust allow", &["rs"], re!(r"^\s*#!?\[(allow|expect)\(")),
+        ("nolint", &["go", "c"], re!(r"//\s*(nolint|NOLINT)\b")),
+        (
+            "SuppressWarnings",
+            &["jvm"],
+            re!(r"@SuppressWarnings\b|@Suppress\("),
+        ),
+        ("rubocop:disable", &["rb"], re!(r"rubocop:disable\b")),
+        ("noinspection", &["jvm", "js", "py"], re!(r"noinspection\b")),
     ];
+    let line = without_strings(line);
     kinds
         .iter()
-        .find(|(_, re)| re.is_match(line))
-        .map(|(k, _)| *k)
+        .find(|(_, langs, re)| langs.contains(&lang) && re.is_match(&line))
+        .map(|(k, _, _)| *k)
 }
 
 /// Lines with a suppression in `new` that `old` did not have (one per added copy).
 fn suppressions_added(path: &str, old: &str, new: &str) -> Vec<Suppression> {
+    let Some(lang) = language(path) else {
+        return Vec::new();
+    };
     let mut before: std::collections::HashMap<&str, usize> = Default::default();
-    for l in old.lines().filter(|l| suppression_kind(l).is_some()) {
+    for l in old.lines().filter(|l| suppression_kind(lang, l).is_some()) {
         *before.entry(l.trim()).or_default() += 1;
     }
     let mut out = Vec::new();
     for (i, l) in new.lines().enumerate() {
-        let Some(kind) = suppression_kind(l) else {
+        let Some(kind) = suppression_kind(lang, l) else {
             continue;
         };
         match before.get_mut(l.trim()) {
@@ -396,13 +431,35 @@ mod tests {
                 ("type: ignore", 4, false)
             ]
         );
-        let rs = run(&[change(
-            "src/lib.rs",
-            Some(""),
-            Some("#[allow(clippy::too_many_arguments)]\n#[expect(dead_code, reason = \"used by tests only\")]\n// eslint-disable-next-line no-console -- debugging aid for the CLI\n"),
-        )]);
+        let rs = run(&[
+            change(
+                "src/lib.rs",
+                Some(""),
+                Some("#[allow(clippy::too_many_arguments)]\n#[expect(dead_code, reason = \"used by tests only\")]\n"),
+            ),
+            change(
+                "src/cli.ts",
+                Some(""),
+                Some("// eslint-disable-next-line no-console -- debugging aid for the CLI\n"),
+            ),
+        ]);
         let got: Vec<bool> = rs.suppressions.iter().map(|s| s.has_reason).collect();
         assert_eq!(got, [false, true, true]);
+    }
+
+    /// Mentions are not suppressions: docs, strings, markers of another language.
+    #[test]
+    fn mentions_are_not_suppressions() {
+        let r = run(&[
+            change("README.md", Some(""), Some("Lists `# noqa` and `eslint-disable`.\n")),
+            change(
+                "src/audit.rs",
+                Some(""),
+                Some("//! counts `# noqa`\nlet re = r\"#\\s*noqa\";\nlet s = \"x  # type: ignore\";\n"),
+            ),
+            change("tests/t.py", Some(""), Some("assert f(\"a # noqa\") == 1\n")),
+        ]);
+        assert!(r.suppressions.is_empty(), "{:?}", r.suppressions);
     }
 
     #[test]
