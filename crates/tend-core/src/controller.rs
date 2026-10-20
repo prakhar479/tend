@@ -44,6 +44,8 @@ pub struct Config {
     pub experimental_audit: bool,
     /// The mode of sessions the Claude Code plugin starts (no `--tend-mode` there).
     pub plugin_mode: Mode,
+    /// A desktop notification when tend steers a loop or blocks an edit (unattended runs).
+    pub notify: bool,
 }
 
 impl Default for Config {
@@ -57,6 +59,7 @@ impl Default for Config {
             keep_days: 30,
             experimental_audit: false,
             plugin_mode: Mode::Look,
+            notify: false,
         }
     }
 }
@@ -68,6 +71,7 @@ impl Config {
             ("idle_gap_minutes", self.idle_gap_minutes.to_string()),
             ("experimental_audit", self.experimental_audit.to_string()),
             ("keep_days", self.keep_days.to_string()),
+            ("notify", self.notify.to_string()),
             (
                 "plugin_mode",
                 format!("{:?}", self.plugin_mode).to_lowercase(),

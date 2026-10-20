@@ -30,6 +30,8 @@ struct State {
     store: Store,
     /// Where this project's learned shape levels live (E9), once the session started.
     memory: Option<PathBuf>,
+    /// Desktop notifications are on (`notify = true`).
+    notify: bool,
 }
 
 /// When the daemon last got a request (ms), for the idle exit.
@@ -66,6 +68,7 @@ pub fn run(
         connector,
         store,
         memory: None,
+        notify: crate::config::load().notify,
     }));
     eprintln!("tendd: listening on {} (mode {mode:?})", sock.display());
 
@@ -135,6 +138,66 @@ fn remember(st: &mut State, decisions: &[tend_core::Decision]) -> Result<()> {
         let _ = fs::write(file, body.to_string());
     }
     Ok(())
+}
+
+/// What deserves a desktop notification (E11): a loop (steered or not) and an edit tend
+/// blocked, which waits for the user. Warnings do not: the agent sees them.
+fn notifications(decisions: &[tend_core::Decision]) -> Vec<String> {
+    use tend_core::{ActionKind, Body};
+    let mut out = Vec::new();
+    for e in decisions.iter().flat_map(|d| &d.entries) {
+        if let Body::Action {
+            action, applied, ..
+        } = &e.body
+        {
+            match action {
+                ActionKind::Steer { text, .. } => out.push(tend_core::text::truncate_chars(
+                    text.trim_start_matches("tend: "),
+                    180,
+                )),
+                ActionKind::Guard {
+                    path,
+                    decision:
+                        tend_core::guard::GuardDecision::Deny | tend_core::guard::GuardDecision::Ask,
+                } if *applied => out.push(format!(
+                    "Blocked an edit of {path}. If it is intended, run `! tend allow`."
+                )),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Show notifications without waiting: `notify-send` (Linux) or `osascript` (macOS).
+/// At most one a minute; a missing tool is ignored.
+fn notify(messages: &[String]) {
+    static LAST_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let Some(msg) = messages.first() else {
+        return;
+    };
+    let now = now_ms();
+    if now.saturating_sub(LAST_MS.load(std::sync::atomic::Ordering::Relaxed)) < 60_000 {
+        return;
+    }
+    LAST_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+    let mut cmd = if cfg!(target_os = "macos") {
+        let quoted = msg.replace('\\', "\\\\").replace('"', "\\\"");
+        let mut c = std::process::Command::new("osascript");
+        c.arg("-e").arg(format!(
+            "display notification \"{quoted}\" with title \"tend\""
+        ));
+        c
+    } else {
+        let mut c = std::process::Command::new("notify-send");
+        c.arg("tend").arg(msg);
+        c
+    };
+    let _ = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Plugin mode has no launcher to watch: exit after a long quiet spell. A later hook
@@ -328,6 +391,9 @@ fn serve(
                     st.store.persist(d)?;
                 }
                 remember(st, &decisions)?;
+                if st.notify {
+                    notify(&notifications(&decisions));
+                }
                 Reply {
                     output: st.connector.encode(&event, &payload, &response),
                     message: None,
@@ -419,6 +485,17 @@ mod tests {
         ds.iter()
             .flat_map(|d| &d.entries)
             .any(|e| matches!(e.body, Body::Undelivered { .. }))
+    }
+
+    #[test]
+    fn blocked_edits_and_loops_are_worth_a_notification() {
+        let (ds, _) = decide(Some(1_000), &[100, 200]);
+        let n = notifications(&ds);
+        assert_eq!(n.len(), 1);
+        assert!(n[0].contains("tend allow"), "{n:?}");
+        // Late: nothing was blocked, nothing to say.
+        let (ds, _) = decide(Some(1_000), &[2_000]);
+        assert!(notifications(&ds).is_empty());
     }
 
     #[test]

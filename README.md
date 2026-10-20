@@ -76,6 +76,8 @@ tighten_after = 5               # summaries without a re-open before tend summar
 idle_gap_minutes = 10           # loop time leaves out gaps longer than this
 keep_days = 30                  # 0 keeps every session
 experimental_audit = false      # audit each session's changes to tests and checks (under test)
+plugin_mode = look              # mode of sessions the Claude Code plugin starts
+notify = false                  # desktop notification when tend steers a loop or blocks an edit
 ```
 
 ## Repo policy

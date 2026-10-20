@@ -1,5 +1,7 @@
 # tend: CI fix, new measurements, and extensions (2026-10-20)
 
+**Status:** E1–E11 are built (see `docs/TASKS.md`, Extensions E). The audit (E1–E3) stays experimental and opt-in by owner decision; Tier 3 (E12–E16) is not started.
+
 ## 1. The CI failure
 
 The first CI run on GitHub (run 39410338352, commit 9da2596) failed `make check` on ubuntu and macOS. The cause was `large_filter_does_not_block_pings_or_hooks`:

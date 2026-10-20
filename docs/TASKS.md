@@ -269,12 +269,25 @@ Review after the checkpoint: about 60 findings, most of them confirmed. Batches 
 ## Extensions E (from `docs/extensions-2026-10-20.md`)
 
 - [x] **CI fix.** An e2e test needed a pytest on PATH. Added `make check-clean`; the temporary socket name now fits the path limit; checkout@v5. Also fixed the guard's tolerance false positive on whole files, found by the polaris prototype.
-- [ ] **E1** `tend audit [BASE[..HEAD]]`: what a diff changed in tests, suppressions, check config, and dependencies (text, json, markdown).
-- [ ] **E2** Session audit: a base tree at SessionStart (temp index + write-tree), E1 at exit, in the exit line and report.
-- [ ] **E3** GitHub Action: the audit in the job summary or a PR comment; dogfood on this repo.
-- [ ] **E4** Expected value changed to the last failure's actual value.
-- [ ] **E5** Snapshot and golden updates (`jest -u`, `insta accept`, `*.snap`).
-- [ ] **E6–E11** Plugin, `.tend.toml`, secret redaction, per-project memory, `tend export`, notifications.
+- [x] **E1** `tend audit [BASE[..HEAD]]`: what a diff changed in tests, suppressions, check config, and dependencies (text, json, markdown).
+- [x] **E2** Session audit: a base tree at SessionStart (temp index + write-tree), E1 at exit, in the exit line and report.
+- [x] **E3** GitHub Action: the audit in the job summary or a PR comment; dogfood on this repo.
+- [x] **E4** Expected value changed to the last failure's actual value.
+- [x] **E5** Snapshot and golden updates (`jest -u`, `insta accept`, `*.snap`).
+- [x] **E6–E11** Plugin, `.tend.toml`, secret redaction, per-project memory, `tend export`, notifications.
+  Done 2026-10-20 (owner: build them, but the audit stays experimental, opt-in, and is not the product's lead yet):
+  - E1/E2/E5: `tend audit` and the opt-in session audit (`experimental_audit = true`), labelled experimental everywhere.
+    - Dogfooding found false suppressions (mentions in docs, strings, other languages); fixed by language and string-aware matching.
+    - It also found a tolerance false positive on whole files; fixed by pairing assertions.
+  - E3: `action.yml`, run on this repo's CI only; not published until the audit leaves "experimental".
+  - E4: expected value changed to the failing run's actual value.
+  - E5: snapshot-rewriting commands get a warning; matched on parsed command words, after the retro showed matches inside here-docs.
+  - E6: the `plugin/` Claude Code plugin with a marketplace entry; validated, live-checked; `plugin_mode` in config.
+  - E7: `.tend.toml` with `test_paths`, `protected` (guarded like test weakening, owner decision), and `audit_ignore`.
+  - E8: secret redaction before writing; `tend purge`.
+  - E9: per-project memory of shape levels.
+  - E10: `tend export`; `retro --all --summary`.
+  - E11: opt-in desktop notifications (`notify = true`).
 - [ ] **E12–E16** Other agents, MCP server, `tend bench`, HTML report, deciders.
 
 ## Phase 2 — Optimize + Codex (not started)
