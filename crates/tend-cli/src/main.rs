@@ -5,6 +5,7 @@
 #[cfg(not(unix))]
 compile_error!("tend supports Unix (Linux, macOS) only for now");
 
+mod audit;
 mod config;
 mod connector;
 mod daemon;
@@ -110,6 +111,19 @@ enum Cmd {
     Review,
     /// Check the install: which tend runs, the Claude Code version, the data dir, config.
     Doctor,
+    /// (Experimental) What a git diff, or a tend session, changed in tests and checks:
+    /// assertions and tests, snapshots, suppressions, check config, dependencies.
+    Audit {
+        /// `A..B`, `A...B` (from the merge base), or `A` (to the working tree).
+        /// Default: HEAD to the working tree.
+        range: Option<String>,
+        #[arg(long, value_enum, default_value = "text")]
+        format: AuditFormat,
+        /// The audit of a tend session (with `experimental_audit = true`): an id, a
+        /// prefix, or `-N`; alone, the newest.
+        #[arg(long, num_args = 0..=1, default_missing_value = "-1", allow_hyphen_values = true)]
+        session: Option<String>,
+    },
     /// One line for the Claude Code status line: mode and what tend did so far.
     /// Prints nothing outside a tend session.
     Status,
@@ -163,6 +177,13 @@ enum Cmd {
         #[arg(long, default_value = "claude-code")]
         agent: String,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum AuditFormat {
+    Text,
+    Markdown,
+    Json,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -310,6 +331,16 @@ fn run(cli: Cli) -> Result<i32> {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
             print!("{}", report::render(&label, &entries, true, full));
+            if let Some(a) = std::fs::read_to_string(dir.join("audit.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str::<tend_core::audit::Report>(&t).ok())
+            {
+                println!(
+                    "{}: {} (`tend audit --session`)",
+                    audit::LABEL,
+                    a.one_line()
+                );
+            }
             let flags = store::read_flags(&dir);
             if full || !flags.is_empty() {
                 println!("Flags: {}", flags.len());
@@ -354,6 +385,41 @@ fn run(cli: Cli) -> Result<i32> {
                 if let Ok(entries) = store::read_entries(&PathBuf::from(dir)) {
                     println!("{}", report::status_line(&entries));
                 }
+            }
+            Ok(0)
+        }
+        Cmd::Audit {
+            range,
+            format,
+            session,
+        } => {
+            let (report, title) = match session {
+                Some(spec) => {
+                    let dir = sessions::resolve(Some(&spec), false)?;
+                    let text = std::fs::read_to_string(dir.join("audit.json")).with_context(|| {
+                        format!(
+                            "no audit in session {} (set `experimental_audit = true` in the config)",
+                            dir.display()
+                        )
+                    })?;
+                    let id = dir.file_name().map(|n| n.to_string_lossy().to_string());
+                    (
+                        serde_json::from_str(&text)?,
+                        format!("session {}", id.unwrap_or_default()),
+                    )
+                }
+                None => {
+                    let root = audit::repo_root(&std::env::current_dir()?)?;
+                    let scratch = std::env::temp_dir();
+                    let (from, to) = audit::resolve_range(&root, range.as_deref(), &scratch)?;
+                    let title = range.unwrap_or_else(|| "HEAD..working tree".into());
+                    (audit::run(&root, &from, &to, &|_| false)?, title)
+                }
+            };
+            match format {
+                AuditFormat::Text => print!("{}", audit::render_text(&report, &title)),
+                AuditFormat::Markdown => print!("{}", audit::render_markdown(&report, &title)),
+                AuditFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
             }
             Ok(0)
         }

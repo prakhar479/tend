@@ -16,6 +16,7 @@ macro_rules! re {
     }};
 }
 
+pub mod audit;
 pub mod broker;
 pub mod capability;
 pub mod controller;

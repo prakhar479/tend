@@ -133,15 +133,35 @@ fn count(re: &regex::Regex, s: &str) -> usize {
     re.find_iter(s).count()
 }
 
+/// Assertion calls, not mentions: `assert x`, `assert(`, `assertEqual(`, `assert_eq!(`,
+/// `assert.Equal(`, `expect(`, `.should`, Go's `t.Error`, testify's `require.X(`.
+fn assert_pattern() -> &'static regex::Regex {
+    re!(
+        r"\bassert\s|\bassert\w*\s*[(!]|\bassert\.\w+\s*\(|\bexpect\s*\(|\.should\b|\bt\.(Error|Errorf|Fatal|Fatalf)\(|\brequire\.\w+\(|\bself\.fail\("
+    )
+}
+
+/// Test definitions: `def test_…(`, `#[test]`, `func Test…(`, `@Test`, `it(`, `test(`.
+fn test_def_pattern() -> &'static regex::Regex {
+    re!(
+        r"\bdef\s+test\w*\s*\(|#\[(tokio::)?test\b|\bfunc\s+Test\w*\s*\(|@Test\b|(^|[^.\w])(it|test)(\.\w+)*\s*\("
+    )
+}
+
+/// Assertions and test definitions in a text, comments and strings left out.
+pub fn counts(text: &str) -> (usize, usize) {
+    let code = code_only(text);
+    (
+        count(assert_pattern(), &code),
+        count(test_def_pattern(), &code),
+    )
+}
+
 /// Compare the old and new text of an edit to a test file.
 pub fn assess(old: &str, new: &str) -> Answer {
     let (old, new) = (code_only(old), code_only(new));
     let (old, new) = (old.as_str(), new.as_str());
-    // Assertion calls, not mentions: `assert x`, `assert(`, `assertEqual(`, `assert_eq!(`,
-    // `assert.Equal(`, `expect(`, `.should`, Go's `t.Error`, testify's `require.X(`.
-    let assert_re = re!(
-        r"\bassert\s|\bassert\w*\s*[(!]|\bassert\.\w+\s*\(|\bexpect\s*\(|\.should\b|\bt\.(Error|Errorf|Fatal|Fatalf)\(|\brequire\.\w+\(|\bself\.fail\("
-    );
+    let assert_re = assert_pattern();
     let skip_re = re!(
         r"\bmark\.(skip|skipif|xfail)\b|\bpytest\.(skip|xfail)\(|@(unittest\.)?skip(If|Unless)?\b|\bexpectedFailure\b|\bskipTest\(|\bSkipTest\b|\b(it|test|describe)\.(skip|todo|fails|skipIf)\b|\bx(it|describe|test)\(|#\[ignore\b|\bt\.Skip(Now|f)?\(|@(Disabled|Ignore)\b"
     );
@@ -149,9 +169,7 @@ pub fn assess(old: &str, new: &str) -> Answer {
     let focus_re = re!(r"\b(it|test|describe)\.only\b|\bf(it|describe)\(");
     let panic_re = re!(r"#\[should_panic\b");
     let true_re = re!(r"\|\|\s*true\b");
-    let def_re = re!(
-        r"\bdef\s+test\w*\s*\(|#\[(tokio::)?test\b|\bfunc\s+Test\w*\s*\(|@Test\b|(^|[^.\w])(it|test)(\.\w+)*\s*\("
-    );
+    let def_re = test_def_pattern();
     // A handler that turns a failed assertion into a pass.
     let swallow_re = re!(r"\bexcept\s*(\(\s*)?AssertionError\b|\bexcept\s*:");
 

@@ -40,6 +40,8 @@ pub struct Config {
     pub idle_gap_minutes: u64,
     /// `tend claude` deletes sessions with no activity for this many days (0: never).
     pub keep_days: u64,
+    /// `tend claude` audits what the session changed in tests and checks (experimental).
+    pub experimental_audit: bool,
 }
 
 impl Default for Config {
@@ -51,6 +53,7 @@ impl Default for Config {
             tighten_after: 5,
             idle_gap_minutes: 10,
             keep_days: 30,
+            experimental_audit: false,
         }
     }
 }
@@ -60,6 +63,7 @@ impl Config {
     pub fn fields(&self) -> BTreeMap<String, String> {
         [
             ("idle_gap_minutes", self.idle_gap_minutes.to_string()),
+            ("experimental_audit", self.experimental_audit.to_string()),
             ("keep_days", self.keep_days.to_string()),
             ("loop_threshold", self.loop_threshold.to_string()),
             ("max_summary_ratio", self.max_summary_ratio.to_string()),

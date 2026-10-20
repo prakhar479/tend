@@ -9,6 +9,7 @@
 //! tighten_after = 5
 //! idle_gap_minutes = 10
 //! keep_days = 30            # tend claude deletes older sessions; 0 keeps all
+//! experimental_audit = false  # audit what each session changed in tests and checks
 //! ```
 
 use std::env;
@@ -54,13 +55,14 @@ pub fn load() -> Config {
     c
 }
 
-const KEYS: [&str; 6] = [
+const KEYS: [&str; 7] = [
     "shape_threshold_tokens",
     "max_summary_ratio",
     "loop_threshold",
     "tighten_after",
     "idle_gap_minutes",
     "keep_days",
+    "experimental_audit",
 ];
 
 fn parse(text: &str) -> (Config, Vec<String>) {
@@ -113,6 +115,13 @@ fn apply(c: &mut Config, line: &str, seen: &mut std::collections::BTreeSet<Strin
         "tighten_after" => c.tighten_after = int(1, 1000)? as u32,
         "idle_gap_minutes" => c.idle_gap_minutes = int(1, 24 * 60)?,
         "keep_days" => c.keep_days = int(0, 36_500)?,
+        "experimental_audit" => {
+            c.experimental_audit = match value {
+                "true" => true,
+                "false" => false,
+                v => bail!("{key} must be true or false, got {v}"),
+            }
+        }
         _ => unreachable!("checked against KEYS"),
     }
     Ok(())

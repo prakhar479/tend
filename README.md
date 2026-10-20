@@ -34,6 +34,7 @@ tend retro ~/.claude/projects/<project>/<session>.jsonl   # report on a past ses
 tend retro --all                     # every past session and subagent, ranked
 tend status                          # one line for the status line (empty outside tend)
 tend doctor                          # check the install: binary, Claude Code version, data dir, config
+tend audit main...HEAD               # experimental: what a diff did to tests and checks (--format markdown|json)
 ```
 
 `--session` takes an id or a unique prefix of one (as `tend sessions` prints it), `-1` for the newest, `-2`, and so on, or a path.
@@ -59,7 +60,19 @@ loop_threshold = 3              # fix attempts before an unchanged failure is a 
 tighten_after = 5               # summaries without a re-open before tend summarizes harder
 idle_gap_minutes = 10           # loop time leaves out gaps longer than this
 keep_days = 30                  # 0 keeps every session
+experimental_audit = false      # audit each session's changes to tests and checks (under test)
 ```
+
+### Audit (experimental)
+
+`tend audit` reads a git diff, or a whole `tend claude` session with `experimental_audit = true`, and lists what changed in the project's checks:
+
+- test files: assertions and tests before and after, and anything that may weaken them (removed tests, skips, looser tolerances, always-true asserts);
+- snapshot and golden files that were rewritten;
+- suppressions added (`# noqa`, `# type: ignore`, `eslint-disable`, `#[allow]`, …), and whether each one gives a reason;
+- check config (CI workflows, coverage thresholds, strictness) and dependency files.
+
+It only reports; it never blocks. It reads the working tree through a temporary index, so your index, branch, and files are untouched. The feature is under test: its output may change.
 
 A bad line is skipped with a warning when `tend claude` starts; the other lines still apply.
 

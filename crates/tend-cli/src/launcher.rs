@@ -110,6 +110,9 @@ fn setup(exe: &Path, mode: Mode, user_settings: Option<&str>) -> Result<Session>
     }
     let settings_path = dir.join("claude-settings.json");
     fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+    if crate::config::load().experimental_audit {
+        record_audit_base(&dir);
+    }
     let sock = paths::socket_path(&dir);
     let mut daemon = start_daemon(exe, &dir, mode)?;
     if !wait_for(&sock) {
@@ -161,10 +164,14 @@ fn finish(s: &mut Session) {
         return;
     }
     let summary = crate::report::one_line(&entries);
+    let audit = finish_audit(&s.dir);
     eprintln!(
         "tend: session {} ended · {summary} · `tend report` for details",
         s.id
     );
+    if let Some(line) = audit {
+        eprintln!("tend: {line}");
+    }
     if let Some(status) = died {
         let when = entries
             .last()
@@ -175,6 +182,36 @@ fn finish(s: &mut Session) {
             s.dir.join("daemon.log").display()
         );
     }
+}
+
+/// The session audit (experimental): the working tree's state before the agent starts,
+/// as a git tree, in `<session>/audit-base` ("root\ntree"). Nothing in the repo changes.
+fn record_audit_base(dir: &Path) {
+    let base = env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::audit::repo_root(&cwd).ok())
+        .and_then(|root| {
+            let tree = crate::audit::worktree_tree(&root, dir).ok()?;
+            Some(format!("{}\n{tree}\n", root.display()))
+        });
+    if let Some(base) = base {
+        let _ = fs::write(dir.join("audit-base"), base);
+    }
+}
+
+/// Audit the session against its base: write `audit.json`, return the line to print.
+fn finish_audit(dir: &Path) -> Option<String> {
+    let base = fs::read_to_string(dir.join("audit-base")).ok()?;
+    let mut lines = base.lines();
+    let (root, from) = (PathBuf::from(lines.next()?), lines.next()?.to_string());
+    let to = crate::audit::worktree_tree(&root, dir).ok()?;
+    let report = crate::audit::run(&root, &from, &to, &|_| false).ok()?;
+    let _ = fs::write(dir.join("audit.json"), serde_json::to_string(&report).ok()?);
+    Some(format!(
+        "{}: {} · `tend audit --session` for details",
+        crate::audit::LABEL,
+        report.one_line()
+    ))
 }
 
 /// Claude Code versions with a conformance record, baked in at build time (build.rs).

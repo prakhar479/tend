@@ -1098,3 +1098,85 @@ fn hard_killed_tend_run_leaves_no_orphans() {
     }
     assert!(!running(), "orphan after SIGKILL: {marker}");
 }
+
+/// E2 (experimental): with `experimental_audit = true`, the session ends with what it
+/// changed in tests and checks, and `tend audit --session` shows it.
+#[test]
+fn session_audit_reports_what_the_agent_changed() {
+    let dir = tmp("audit");
+    let repo = dir.join("repo");
+    fs::create_dir_all(repo.join("tests")).unwrap();
+    fs::write(
+        repo.join("tests/test_a.py"),
+        "def test_a():\n    assert 1 + 1 == 2\n\n\ndef test_b():\n    assert 2 * 2 == 4\n",
+    )
+    .unwrap();
+    fs::write(repo.join("app.py"), "import os\n").unwrap();
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(["-c", "user.email=t@example.com", "-c", "user.name=t"])
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "base"]);
+    // Uncommitted work before the session is part of the base, not the session's doing.
+    fs::write(repo.join("notes.txt"), "mine\n").unwrap();
+    let agent = dir.join("agent.sh");
+    fs::write(
+        &agent,
+        "#!/bin/sh\n[ \"$1\" = --version ] && echo '2.1.304 (Claude Code)' && exit 0\n\
+         echo '{}' | tend hook UserPromptSubmit\n\
+         printf 'def test_a():\\n    assert 1 + 1 == 2\\n' > tests/test_a.py\n\
+         printf 'import os  # noqa: F401\\n' > app.py\n",
+    )
+    .unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = dir.join("config.toml");
+    fs::write(&config, "experimental_audit = true\n").unwrap();
+    let out = Command::new(bin())
+        .arg("claude")
+        .current_dir(&repo)
+        .env("TEND_HOME", dir.join("home"))
+        .env("TEND_CLAUDE_BIN", &agent)
+        .env("TEND_CONFIG", &config)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(
+            "tend audit (experimental): 1 test file changed, 1 test removed (1 may weaken tests) · 1 suppression added"
+        ),
+        "{stderr}"
+    );
+    let session = fs::read_dir(dir.join("home/sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let shown = tend(&["audit"], &session);
+    assert!(
+        shown.contains("! tests/test_a.py (modified): assertions 2 → 1, tests 2 → 1"),
+        "{shown}"
+    );
+    assert!(shown.contains("noqa app.py:1 (no reason given)"), "{shown}");
+    assert!(!shown.contains("notes.txt"), "{shown}");
+    // The user's own git state is untouched.
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout),
+        " M app.py\n M tests/test_a.py\n?? notes.txt\n"
+    );
+}
