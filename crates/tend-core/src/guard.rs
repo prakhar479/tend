@@ -23,6 +23,11 @@ pub fn is_test_path(path: &str) -> bool {
         .is_match(&p)
 }
 
+/// A file that is a test, or source code that may hold tests (Rust unit tests in `src/`).
+pub fn may_hold_tests(path: &str) -> bool {
+    is_test_path(path) || re!(r"\.(rs|py|go|[cm]?[jt]sx?|java|kt|cs|rb)$").is_match(path)
+}
+
 /// The text of an edit holds test code, wherever the file is: Rust unit tests live in
 /// `src/`, Go and Python tests can too (G2).
 pub fn has_test_code(text: &str) -> bool {

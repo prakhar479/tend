@@ -14,7 +14,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use tend_core::text::sha256_hex;
 
 pub fn home() -> PathBuf {
@@ -154,19 +154,6 @@ pub fn list_sessions() -> Vec<PathBuf> {
         .unwrap_or_default();
     dirs.sort();
     dirs
-}
-
-/// Explicit path, then $TEND_SESSION_DIR (set inside a tend session), then the latest session.
-pub fn resolve_session(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(p) = explicit {
-        return Ok(p);
-    }
-    if let Some(p) = env::var_os("TEND_SESSION_DIR") {
-        return Ok(PathBuf::from(p));
-    }
-    list_sessions()
-        .pop()
-        .ok_or_else(|| anyhow!("no sessions in {}", sessions_dir().display()))
 }
 
 #[cfg(test)]

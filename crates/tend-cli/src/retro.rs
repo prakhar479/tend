@@ -19,13 +19,13 @@ use tend_core::{Capabilities, Controller, Entry, Event, Mode};
 use crate::connector::claude_code::{extract_output, runner_is_executable, HOOKED_TOOLS};
 use crate::report;
 
-pub fn run(transcript: &Path) -> Result<String> {
+pub fn run(transcript: &Path, full: bool) -> Result<String> {
     let entries = analyze(transcript)?;
     let label = transcript
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    Ok(report::render(&label, &entries, false))
+    Ok(report::render(&label, &entries, false, full))
 }
 
 /// Ledger entries look mode would have written for this transcript.
@@ -420,7 +420,10 @@ mod tests {
         let doubled: String = text.lines().flat_map(|l| [l, "\n", l, "\n"]).collect();
         let path = std::env::temp_dir().join(format!("tend-dup-{}.jsonl", std::process::id()));
         fs::write(&path, doubled).unwrap();
-        let (a, b) = (run(Path::new(&fixture)).unwrap(), run(&path).unwrap());
+        let (a, b) = (
+            run(Path::new(&fixture), true).unwrap(),
+            run(&path, true).unwrap(),
+        );
         let _ = fs::remove_file(&path);
         let body = |s: &str| s.lines().skip(1).collect::<Vec<_>>().join("\n");
         assert_eq!(body(&a), body(&b));
@@ -446,7 +449,7 @@ mod tests {
             "{}/../../fixtures/transcripts/loop_session.jsonl",
             env!("CARGO_MANIFEST_DIR")
         );
-        let out = run(Path::new(&path)).unwrap();
+        let out = run(Path::new(&path), false).unwrap();
         assert!(out.contains("Loops (13 s in loops): 1"), "{out}");
         assert!(out.contains("[would steer] after 13 s:"), "{out}");
         assert!(out.contains("would steer"), "{out}");

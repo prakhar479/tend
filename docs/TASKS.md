@@ -221,7 +221,17 @@ Review after the checkpoint: about 60 findings, most of them confirmed. Batches 
     - the shell reader never panics.
     It found the redirect-target key bug.
   - Retro (real work): 1 loop. It is the dev session re-running the deliberately failing demo suite while editing tend. It counts as a loop by definition: edits anywhere count as attempts.
-- [ ] **I4. Resources and UX:** F4 big Writes · F5 `tend run` streaming · R1 session cleanup · U1–U9.
+- [x] **I4. Resources and UX:** F4 big Writes · F5 `tend run` streaming · R1 session cleanup · U1–U9.
+  Done:
+  - F4: a Write reads the old file only for files that may hold tests, up to 1 MiB. Edit texts become blobs only when the guard judges them (≤ 1 MiB). Post-edit hashes skip files over 16 MiB.
+  - F5: past 8 MiB, `tend run` hands over its buffer and streams the rest, with no daemon request.
+  - R1: see I1, plus this fix: non-test edits no longer copy file content.
+  - U1/U3/U5: `sessions::resolve`. `--session` takes an id, a prefix, `-N`, or a path. With no `--session`, commands use `TEND_SESSION_DIR`, then the newest session started in this directory, then the newest. `mode` and `allow` look at live sessions only, and ask when two are live.
+  - U2: `tend sessions` shows id, start (UTC), duration, mode, calls, flags, live, and project.
+  - U4: the report leads with "Needs attention" and hides empty sections; `--full` shows all. The report also shows the project.
+  - U9: README.
+  - U6–U8, U11: see I1.
+  - Tests: huge-output streaming (e2e) and no blobs for non-test edits.
 - [ ] **I5. Tests and CI:** T3, T5–T9, X1.
 - [ ] **I6. Later:** F6, F8 + P1, R3, R4, L7, U10, U11, simplifications.
 

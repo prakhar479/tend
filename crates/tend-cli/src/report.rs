@@ -362,8 +362,12 @@ pub fn kind_shares(by_kind: &BTreeMap<OutputKind, u64>) -> String {
 }
 
 /// `live`: a session ledger (not a retro), where the user could act on flags.
-pub fn render(label: &str, entries: &[Entry], live: bool) -> String {
+/// The session report. Without `full`, sections with nothing in them are left out, and
+/// what needs the user's attention (loops, guard actions, undelivered replies) comes
+/// first (I4, U4).
+pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String {
     let mut agent = String::from("?");
+    let mut cwd = String::new();
     let mut mode = String::from("?");
     let mut transcript: Option<String> = None;
     let t = totals(entries);
@@ -409,9 +413,10 @@ pub fn render(label: &str, entries: &[Entry], live: bool) -> String {
                     agent: a,
                     transcript_path,
                     mode: m,
-                    ..
+                    cwd: c,
                 } => {
                     agent = a.clone();
+                    cwd = c.clone();
                     transcript = transcript_path.clone();
                     if let Some(m) = m {
                         mode = format!("{m:?}").to_lowercase();
@@ -508,8 +513,48 @@ pub fn render(label: &str, entries: &[Entry], live: bool) -> String {
 
     let mut out = String::new();
     let _ = writeln!(out, "Session {label} · {agent} · {duration} · mode: {mode}");
+    if !cwd.is_empty() {
+        let _ = writeln!(out, "Project: {cwd}");
+    }
     if !config.is_empty() {
         let _ = writeln!(out, "Config: {}", config.join(" · "));
+    }
+    let loop_title = if t.loop_ms > 0 {
+        format!("Loops ({} in loops)", minutes(t.loop_ms))
+    } else {
+        "Loops".to_string()
+    };
+    let attention = [
+        (loop_title.as_str(), &loops),
+        ("Edit cycles", &cycles),
+        ("Test guard", &guards),
+    ];
+    if !full {
+        let mut parts: Vec<String> = attention
+            .iter()
+            .filter(|(_, items)| !items.is_empty())
+            .map(|(title, items)| {
+                let name = title.split(" (").next().unwrap_or(title).to_lowercase();
+                format!("{} {name}", items.len())
+            })
+            .collect();
+        if undelivered > 0 {
+            parts.push(format!("{undelivered} not delivered"));
+        }
+        let _ = writeln!(
+            out,
+            "Needs attention: {}",
+            if parts.is_empty() {
+                "nothing".to_string()
+            } else {
+                parts.join(" · ")
+            }
+        );
+        for (title, items) in &attention {
+            if !items.is_empty() {
+                write_section(&mut out, title, items);
+            }
+        }
     }
     match transcript
         .as_deref()
@@ -543,14 +588,16 @@ pub fn render(label: &str, entries: &[Entry], live: bool) -> String {
     } else {
         "would apply"
     };
-    let _ = writeln!(
-        out,
-        "Shaping: {shaped} outputs · {} → {} tokens · saves {} ({}% of Bash output) [{verb}]",
-        k(before),
-        k(after),
-        k(saved),
-        pct(saved, t.bash_tokens)
-    );
+    if full || shaped > 0 {
+        let _ = writeln!(
+            out,
+            "Shaping: {shaped} outputs · {} → {} tokens · saves {} ({}% of Bash output) [{verb}]",
+            k(before),
+            k(after),
+            k(saved),
+            pct(saved, t.bash_tokens)
+        );
+    }
     if wrapped > 0 {
         // R3.7: auto mode sometimes denies a wrapped call; each denial is a Retry action.
         let _ = writeln!(
@@ -584,26 +631,29 @@ pub fn render(label: &str, entries: &[Entry], live: bool) -> String {
         );
     }
     let _ = write!(out, "{}", precision(&t, live));
-    let _ = writeln!(out, "Re-opens: {reopens}");
-    let loop_title = if t.loop_ms > 0 {
-        format!("Loops ({} in loops)", minutes(t.loop_ms))
-    } else {
-        "Loops".to_string()
-    };
-    for (title, items) in [
-        (loop_title.as_str(), &loops),
-        ("Edit cycles", &cycles),
-        ("Test guard", &guards),
-        ("Adaptations", &adaptations),
-        ("Mode changes", &modes),
-    ] {
-        let _ = writeln!(out, "{title}: {}", items.len());
-        for i in items.iter() {
-            let _ = writeln!(out, "  - {}", truncate_chars(i, 200));
+    if full || reopens > 0 {
+        let _ = writeln!(out, "Re-opens: {reopens}");
+    }
+    let mut rest = vec![("Adaptations", &adaptations), ("Mode changes", &modes)];
+    if full {
+        rest.splice(0..0, attention);
+    }
+    for (title, items) in rest {
+        if full || !items.is_empty() {
+            write_section(&mut out, title, items);
         }
     }
-    let _ = writeln!(out, "Judgments recorded: {judgments}");
+    if full {
+        let _ = writeln!(out, "Judgments recorded: {judgments}");
+    }
     out
+}
+
+fn write_section(out: &mut String, title: &str, items: &[String]) {
+    let _ = writeln!(out, "{title}: {}", items.len());
+    for i in items {
+        let _ = writeln!(out, "  - {}", truncate_chars(i, 200));
+    }
 }
 
 pub fn find_output_blob(entries: &[Entry], id: &str) -> Option<String> {
@@ -769,7 +819,7 @@ mod tests {
             entry(3, shape("a-2", 5000, 1000, false, true)),
             entry(4, output("o-3", 1000)),
         ];
-        let r = render("t", &entries, true);
+        let r = render("t", &entries, true, true);
         assert!(
             r.contains("Bash output: 10.0k tokens (est.) · noise 70% (est.)"),
             "{r}"
@@ -805,6 +855,7 @@ mod tests {
                 allowed,
             ],
             true,
+            false,
         );
         assert!(r.contains("[deny] reason a-1"), "{r}");
         assert!(r.contains("[user allowed] a-1 once"), "{r}");
@@ -831,14 +882,14 @@ mod tests {
         };
         let mut old = chain(0, true);
         old.extend(chain(3, false));
-        let r = render("t", &old, true);
+        let r = render("t", &old, true, true);
         assert!(r.contains("Shaping: 1 outputs"), "{r}");
         assert!(r.contains("Not shapeable: 1 outputs"), "{r}");
 
         // A versioned ledger is trusted as written.
         let mut new = vec![entry(100, Body::Format { version: 1 })];
         new.extend(chain(0, true));
-        assert!(render("t", &new, true).contains("Shaping: 1 outputs"));
+        assert!(render("t", &new, true, true).contains("Shaping: 1 outputs"));
     }
 
     /// R2.3: guard flags the user allowed, and loops whose failure stopped after the nudge.
@@ -952,6 +1003,7 @@ mod tests {
             "t",
             &[entry(0, steer(Some(22 * 60_000))), entry(1, steer(None))],
             true,
+            false,
         );
         assert!(r.contains("Loops (22 min in loops): 2"), "{r}");
         assert!(r.contains("[would steer] after 22 min: tend: stuck"), "{r}");

@@ -22,6 +22,9 @@ use crate::session::{Change, SessionModel};
 use crate::shape::{shape, Shaped};
 use crate::text::{estimate_tokens, sha256_hex};
 
+/// Largest edit text (old or new) kept as a blob.
+const MAX_EDIT_BLOB_BYTES: usize = 1 << 20;
+
 /// Initial values. Tune them in Phase 2 with real sessions.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -895,14 +898,18 @@ impl Controller {
             old_text: format!("<blob:{old_hash}>"),
             new_text: format!("<blob:{new_hash}>"),
         };
-        d.blobs.push(Blob {
-            hash: old_hash,
-            content: old_text.clone(),
-        });
-        d.blobs.push(Blob {
-            hash: new_hash,
-            content: new_text.clone(),
-        });
+        // Keep the texts only where the guard reads them, and only test-sized ones: an
+        // edit of a lockfile or a data file is not worth a copy on disk (I4, F4).
+        if guard::judges(&path, &old_text, &new_text) {
+            for (hash, content) in [(old_hash, &old_text), (new_hash, &new_text)] {
+                if content.len() <= MAX_EDIT_BLOB_BYTES {
+                    d.blobs.push(Blob {
+                        hash,
+                        content: content.clone(),
+                    });
+                }
+            }
+        }
         let ev = self.push(d, now, vec![], Body::Event { event: stored });
         let Some((j, reasons)) = self.judge_test_edit(d, now, ev, &path, &old_text, &new_text)
         else {
@@ -1655,6 +1662,20 @@ mod tests {
             matches!(d.response.permission, Some(Permission::Deny(_))),
             "only once"
         );
+    }
+
+    /// F4: an edit of a file the guard does not read keeps hashes only, no copies.
+    #[test]
+    fn edits_of_non_test_files_store_no_blobs() {
+        let mut c = ctl(Mode::Look);
+        let edit = |path: &str| Event::EditProposed {
+            tool_use_id: "x".into(),
+            path: path.into(),
+            old_text: "a = 1\n".repeat(1000),
+            new_text: "a = 2\n".repeat(1000),
+        };
+        assert!(c.handle(edit("package-lock.json"), 0).blobs.is_empty());
+        assert_eq!(c.handle(edit("tests/test_a.py"), 1).blobs.len(), 2);
     }
 
     /// G6: an agent that cannot deny gets a warning, and a warning is nothing to allow.

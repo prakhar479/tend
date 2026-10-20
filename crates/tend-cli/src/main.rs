@@ -55,32 +55,40 @@ enum Cmd {
     Mode {
         #[arg(value_enum)]
         mode: ModeArg,
-        #[arg(long)]
-        session: Option<PathBuf>,
+        /// A session id or prefix, `-1` (newest), `-2`, …, or a path.
+        #[arg(long, allow_hyphen_values = true)]
+        session: Option<String>,
     },
     /// Allow one edit the test guard blocked (the latest, or action a-N). Run it yourself,
     /// for example with `! tend allow` in Claude Code; the agent may not.
     Allow {
         id: Option<String>,
-        #[arg(long)]
-        session: Option<PathBuf>,
+        /// A session id or prefix, `-1` (newest), `-2`, …, or a path.
+        #[arg(long, allow_hyphen_values = true)]
+        session: Option<String>,
     },
-    /// Show what happened in a session.
+    /// Show what happened in a session (default: the newest one started here).
     Report {
+        /// A session id or prefix, `-1` (newest), `-2`, …, or a path.
+        #[arg(long, allow_hyphen_values = true)]
+        session: Option<String>,
+        /// Every section, including empty ones.
         #[arg(long)]
-        session: Option<PathBuf>,
+        full: bool,
     },
     /// Print the full original of a summarized output (o-N).
     Show {
         id: String,
-        #[arg(long)]
-        session: Option<PathBuf>,
+        /// A session id or prefix, `-1` (newest), `-2`, …, or a path.
+        #[arg(long, allow_hyphen_values = true)]
+        session: Option<String>,
     },
     /// Show the cause chain of an action (a-N), output (o-N), or entry number.
     Why {
         id: String,
-        #[arg(long)]
-        session: Option<PathBuf>,
+        /// A session id or prefix, `-1` (newest), `-2`, …, or a path.
+        #[arg(long, allow_hyphen_values = true)]
+        session: Option<String>,
     },
     /// Note that tend got something wrong: an action (a-N), an output (o-N), an entry
     /// number, or `session`. `tend review` lists the notes.
@@ -88,8 +96,9 @@ enum Cmd {
         target: String,
         #[arg(required = true, num_args = 1..)]
         note: Vec<String>,
-        #[arg(long)]
-        session: Option<PathBuf>,
+        /// A session id or prefix, `-1` (newest), `-2`, …, or a path.
+        #[arg(long, allow_hyphen_values = true)]
+        session: Option<String>,
     },
     /// List flags across all sessions, with what each one points at.
     Review,
@@ -113,6 +122,9 @@ enum Cmd {
         /// such as tend's own test runs). They are left out by default.
         #[arg(long, requires = "all")]
         include_tmp: bool,
+        /// For one transcript: every section, including empty ones.
+        #[arg(long)]
+        full: bool,
     },
     /// List recorded sessions.
     Sessions {
@@ -257,7 +269,7 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Init { agent } => bail!("`tend init {agent}` is Phase 2 (see docs/TASKS.md)"),
         Cmd::Undo { .. } => bail!("undo is Phase 3 (see docs/TASKS.md)"),
         Cmd::Mode { mode, session } => {
-            let dir = paths::resolve_session(session)?;
+            let dir = sessions::resolve(session.as_deref(), true)?;
             let req = ipc::Request::SetMode {
                 mode: mode.into(),
                 token: paths::read_token(&dir),
@@ -267,7 +279,7 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Allow { id, session } => {
-            let dir = paths::resolve_session(session)?;
+            let dir = sessions::resolve(session.as_deref(), true)?;
             let req = ipc::Request::Allow {
                 action: id,
                 token: paths::read_token(&dir),
@@ -277,23 +289,25 @@ fn run(cli: Cli) -> Result<i32> {
             println!("{}", reply.message.unwrap_or_default());
             Ok(0)
         }
-        Cmd::Report { session } => {
-            let dir = paths::resolve_session(session)?;
+        Cmd::Report { session, full } => {
+            let dir = sessions::resolve(session.as_deref(), false)?;
             let entries = store::read_entries(&dir)?;
             let label = dir
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
-            print!("{}", report::render(&label, &entries, true));
+            print!("{}", report::render(&label, &entries, true, full));
             let flags = store::read_flags(&dir);
-            println!("Flags: {}", flags.len());
+            if full || !flags.is_empty() {
+                println!("Flags: {}", flags.len());
+            }
             for f in &flags {
                 println!("  - {}: {}", f.target, f.note);
             }
             Ok(0)
         }
         Cmd::Show { id, session } => {
-            let dir = paths::resolve_session(session)?;
+            let dir = sessions::resolve(session.as_deref(), false)?;
             let entries = store::read_entries(&dir)?;
             let hash = report::find_output_blob(&entries, &id)
                 .ok_or_else(|| anyhow::anyhow!("no output {id} in {}", dir.display()))?;
@@ -305,7 +319,7 @@ fn run(cli: Cli) -> Result<i32> {
             note,
             session,
         } => {
-            let dir = paths::resolve_session(session)?;
+            let dir = sessions::resolve(session.as_deref(), false)?;
             if target != "session" {
                 let entries = store::read_entries(&dir)?;
                 if report::find_target(&entries, &target).is_none() {
@@ -335,7 +349,7 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Why { id, session } => {
-            let dir = paths::resolve_session(session)?;
+            let dir = sessions::resolve(session.as_deref(), false)?;
             let entries = store::read_entries(&dir)?;
             print!("{}", report::why(&entries, &id)?);
             Ok(0)
@@ -345,9 +359,10 @@ fn run(cli: Cli) -> Result<i32> {
             all,
             projects,
             include_tmp,
+            full,
         } => {
             match transcript {
-                Some(t) if !all => print!("{}", retro::run(&t)?),
+                Some(t) if !all => print!("{}", retro::run(&t, full)?),
                 _ => {
                     let root = projects.unwrap_or_else(paths::claude_projects_dir);
                     print!("{}", retro::run_all(&root, 5, include_tmp)?);
@@ -365,16 +380,7 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Sessions { prune: None } => {
-            for dir in paths::list_sessions() {
-                let live = sessions::is_live(&dir);
-                let n = store::read_entries(&dir).map(|e| e.len()).unwrap_or(0);
-                println!(
-                    "{}  {:>6} entries{}",
-                    dir.display(),
-                    n,
-                    if live { "  (live)" } else { "" }
-                );
-            }
+            print!("{}", sessions::list(&paths::sessions_dir()));
             Ok(0)
         }
         Cmd::Daemon {

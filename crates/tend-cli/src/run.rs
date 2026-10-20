@@ -65,6 +65,10 @@ struct Ran {
     code: i32,
     /// Stopped by a signal to `tend run` (timeout, Esc): print what we have, at once.
     signaled: bool,
+    /// The output passed `MAX_FILTER_BYTES` and went straight to stdout; `output` is
+    /// empty. Such an output is never filtered, so holding it in memory would only risk
+    /// running out (I4, F5).
+    streamed: bool,
 }
 
 /// Run the command with stdout and stderr in one pipe, as a terminal would interleave them.
@@ -73,6 +77,7 @@ fn execute(script: &str) -> Ran {
         output: format!("tend run: {e}\n").into_bytes(),
         code: 127,
         signaled: false,
+        streamed: false,
     })
 }
 
@@ -100,7 +105,7 @@ fn run_child(script: &str) -> std::io::Result<Ran> {
     };
     let pgid = child.id() as libc::pid_t;
 
-    let output = Arc::new(Mutex::new(Vec::new()));
+    let output = Arc::new(Mutex::new((Vec::new(), false)));
     let (eof_tx, eof_rx) = mpsc::channel::<()>();
     {
         let output = Arc::clone(&output);
@@ -110,10 +115,24 @@ fn run_child(script: &str) -> std::io::Result<Ran> {
                 if n == 0 {
                     break;
                 }
-                output
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .extend_from_slice(&chunk[..n]);
+                let mut guard = output.lock().unwrap_or_else(|e| e.into_inner());
+                let (buf, streamed) = &mut *guard;
+                if !*streamed && buf.len() + n > MAX_FILTER_BYTES {
+                    // Too large to filter: hand over what we have, then pass the rest on.
+                    let mut out = std::io::stdout().lock();
+                    let _ = out.write_all(buf);
+                    let _ = out.flush();
+                    buf.clear();
+                    buf.shrink_to_fit();
+                    *streamed = true;
+                }
+                if *streamed {
+                    let mut out = std::io::stdout().lock();
+                    let _ = out.write_all(&chunk[..n]);
+                    let _ = out.flush();
+                } else {
+                    buf.extend_from_slice(&chunk[..n]);
+                }
             }
             let _ = eof_tx.send(());
         });
@@ -137,11 +156,12 @@ fn run_child(script: &str) -> std::io::Result<Ran> {
         }
     };
     let _ = eof_rx.recv_timeout(Duration::from_millis(DRAIN_MS));
-    let output = std::mem::take(&mut *output.lock().unwrap_or_else(|e| e.into_inner()));
+    let (output, streamed) = std::mem::take(&mut *output.lock().unwrap_or_else(|e| e.into_inner()));
     Ok(Ran {
         output,
         code,
         signaled,
+        streamed,
     })
 }
 
@@ -182,7 +202,7 @@ pub fn run(tool_use_id: &str, script: &str) -> i32 {
         .unwrap_or(DEFAULT_TIMEOUT_MS);
     // A stopped run prints what it has at once: whoever stopped it is waiting.
     let summary = socket
-        .filter(|_| !ran.signaled && ran.output.len() <= MAX_FILTER_BYTES)
+        .filter(|_| !ran.signaled && !ran.streamed && ran.output.len() <= MAX_FILTER_BYTES)
         .and_then(|s| {
             let req = Request::Filter {
                 tool_use_id: tool_use_id.to_string(),

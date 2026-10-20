@@ -434,9 +434,7 @@ pub fn test_write_targets(cmd: &str) -> Vec<String> {
 /// Like `test_write_targets`, plus source files, which may hold tests (Rust unit tests
 /// in `src/`, I2 G2). The caller keeps those whose text has test code.
 pub fn code_write_targets(cmd: &str) -> Vec<String> {
-    write_targets(cmd, |w| {
-        is_test_path(w) || re!(r"\.(rs|py|go|[cm]?[jt]sx?|java|kt|cs|rb)$").is_match(w)
-    })
+    write_targets(cmd, crate::guard::may_hold_tests)
 }
 
 fn write_targets(cmd: &str, keep: impl Fn(&str) -> bool) -> Vec<String> {

@@ -5,9 +5,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
-use crate::paths::socket_path;
+use crate::paths::{self, socket_path};
 
 /// A daemon listens on this socket. Only "refused" or "not found" mean stale: a busy
 /// daemon may answer slowly, and its socket must survive (R0.3).
@@ -78,6 +78,170 @@ pub fn prune(root: &Path, days: u64, now_secs: u64) -> Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
+/// The project a session ran in: `cwd` of its `session_started` event (the first lines).
+pub fn session_cwd(dir: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let f = fs::File::open(dir.join("ledger.jsonl")).ok()?;
+    BufReader::new(f)
+        .lines()
+        .take(4)
+        .map_while(Result::ok)
+        .find_map(|l| {
+            let v: serde_json::Value = serde_json::from_str(&l).ok()?;
+            let ev = v.get("body")?.get("event")?;
+            (ev.get("type")?.as_str()? == "session_started")
+                .then(|| ev.get("cwd")?.as_str().map(str::to_string))
+                .flatten()
+        })
+}
+
+/// Which session a command means (I4, U1, U3, U5).
+/// - `spec`: a path, an id or unique id prefix (as `tend sessions` prints), or `-N` for
+///   the Nth newest.
+/// - No `spec`: the session this shell runs in (`TEND_SESSION_DIR`), else the newest one
+///   started in the current directory, else the newest.
+/// - `live`: only sessions whose daemon runs (for `tend mode` and `tend allow`).
+pub fn resolve(spec: Option<&str>, live: bool) -> Result<PathBuf> {
+    let root = paths::sessions_dir();
+    let mut all = dirs(&root);
+    all.reverse(); // newest first: ids start with the start time
+    let name = |d: &Path| {
+        d.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    };
+    if let Some(spec) = spec {
+        let dir = if Path::new(spec).is_dir() {
+            PathBuf::from(spec)
+        } else if let Some(n) = spec.strip_prefix('-').and_then(|n| n.parse::<usize>().ok()) {
+            all.get(n.max(1) - 1)
+                .cloned()
+                .ok_or_else(|| anyhow!("there are only {} sessions", all.len()))?
+        } else {
+            let hits: Vec<&PathBuf> = all.iter().filter(|d| name(d).starts_with(spec)).collect();
+            match hits[..] {
+                [one] => one.clone(),
+                [] => bail!("no session `{spec}` (see `tend sessions`)"),
+                _ => bail!(
+                    "`{spec}` matches {} sessions: {}",
+                    hits.len(),
+                    hits.iter()
+                        .take(5)
+                        .map(|d| name(d))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        };
+        if live && !is_live(&dir) {
+            bail!("session {} is not live", name(&dir));
+        }
+        return Ok(dir);
+    }
+    if let Some(p) = std::env::var_os("TEND_SESSION_DIR") {
+        return Ok(PathBuf::from(p));
+    }
+    let here = std::env::current_dir()
+        .ok()
+        .map(|d| d.to_string_lossy().to_string());
+    let in_here = |d: &&PathBuf| here.is_some() && session_cwd(d) == here;
+    if live {
+        let running: Vec<PathBuf> = all.into_iter().filter(|d| is_live(d)).collect();
+        let local: Vec<&PathBuf> = running.iter().filter(in_here).collect();
+        let pick: Vec<&PathBuf> = if local.is_empty() {
+            running.iter().collect()
+        } else {
+            local
+        };
+        return match pick[..] {
+            [one] => Ok(one.clone()),
+            [] => bail!("no live tend session (start one with `tend claude`)"),
+            _ => bail!(
+                "{} live sessions; choose one with --session: {}",
+                pick.len(),
+                pick.iter()
+                    .map(|d| format!("{} ({})", name(d), session_cwd(d).unwrap_or_default()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+    }
+    all.iter()
+        .find(in_here)
+        .or(all.first())
+        .cloned()
+        .ok_or_else(|| anyhow!("no sessions in {}", root.display()))
+}
+
+/// One line per session for `tend sessions`, newest first.
+pub fn list(root: &Path) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let mut all = dirs(root);
+    all.reverse();
+    for dir in all {
+        let entries = crate::store::read_entries(&dir).unwrap_or_default();
+        let id = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let start = id
+            .split('-')
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let first = entries.iter().map(|e| e.ts_ms).filter(|t| *t > 0).min();
+        let last = entries.iter().map(|e| e.ts_ms).max();
+        let dur = match (first, last) {
+            (Some(a), Some(b)) if b >= a => crate::report::minutes(b - a),
+            _ => "-".into(),
+        };
+        let (mut mode, mut tools) = (String::from("?"), 0u64);
+        for e in &entries {
+            match &e.body {
+                tend_core::Body::Event {
+                    event: tend_core::Event::SessionStarted { mode: Some(m), .. },
+                } => mode = format!("{m:?}").to_lowercase(),
+                tend_core::Body::Event {
+                    event: tend_core::Event::ToolCompleted { .. },
+                } => tools += 1,
+                _ => {}
+            }
+        }
+        let flags = crate::store::read_flags(&dir).len();
+        let _ = writeln!(
+            out,
+            "{id:<18} {}  {dur:>8}  {mode:<8} {tools:>4} calls{}{}  {}",
+            utc(start),
+            if flags > 0 {
+                format!(" · {flags} flags")
+            } else {
+                String::new()
+            },
+            if is_live(&dir) { " · live" } else { "" },
+            session_cwd(&dir).unwrap_or_default(),
+        );
+    }
+    out
+}
+
+/// `YYYY-MM-DD HH:MM` (UTC) for unix seconds.
+fn utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let (h, m) = ((secs % 86_400) / 3600, (secs % 3600) / 60);
+    // Civil date from days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(mo <= 2);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +296,12 @@ mod tests {
             .iter()
             .all(|d| d != &live));
         let _ = fs::remove_dir_all(&r);
+    }
+
+    #[test]
+    fn utc_dates() {
+        assert_eq!(utc(0), "1970-01-01 00:00");
+        assert_eq!(utc(1_792_398_944), "2026-10-19 08:35");
+        assert_eq!(utc(1_709_251_199), "2024-02-29 23:59");
     }
 }

@@ -938,3 +938,31 @@ fn launch_without_a_conversation_leaves_no_session() {
     let left = fs::read_dir(dir.join("home/sessions")).unwrap().count();
     assert_eq!(left, 0);
 }
+
+/// F5: an output over the filter limit streams through byte for byte, with the exit
+/// code, and `tend run` never asks the daemon about it.
+#[test]
+fn huge_output_streams_without_the_daemon() {
+    let dir = tmp("huge");
+    let sock = dir.join("count.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let out = Command::new(bin())
+        .args([
+            "run",
+            "--id",
+            "t1",
+            "--sh",
+            "head -c 12000000 /dev/zero | tr '\\0' 'x'; echo; exit 5",
+        ])
+        .env("TEND_SOCKET", &sock)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(5));
+    assert_eq!(out.stdout.len(), 12_000_001);
+    assert!(out.stdout[..12_000_000].iter().all(|&b| b == b'x'));
+    assert!(
+        listener.accept().is_err(),
+        "no filter request for a huge output"
+    );
+}

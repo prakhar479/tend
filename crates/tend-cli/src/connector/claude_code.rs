@@ -33,12 +33,19 @@ const MAX_SNAPSHOT_FILES: usize = 32;
 /// is dropped at the end of the turn; this bounds the rest.
 const MAX_PENDING_SNAPSHOTS: usize = 64;
 
+/// Largest file whose content hash PostToolUse records for edit cycles.
+const MAX_HASH_BYTES: u64 = 16 << 20;
+
 /// A file's text: None if it does not exist. Err if it cannot be compared (a directory,
 /// too large, not UTF-8), so the guard skips it.
 fn read_text(path: &Path) -> Result<Option<String>, ()> {
+    read_text_up_to(path, MAX_SNAPSHOT_BYTES)
+}
+
+fn read_text_up_to(path: &Path, max: u64) -> Result<Option<String>, ()> {
     match std::fs::metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Ok(m) if m.is_file() && m.len() <= MAX_SNAPSHOT_BYTES => {
+        Ok(m) if m.is_file() && m.len() <= max => {
             std::fs::read_to_string(path).map(Some).map_err(|_| ())
         }
         _ => Err(()),
@@ -258,10 +265,19 @@ fn edit_texts(tool: &str, input: &Value, cwd: &str) -> Option<(String, String, S
             let join = |k: &str| edits.iter().map(|e| s(e, k)).collect::<Vec<_>>().join("\n");
             (join("old_string"), join("new_string"))
         }
-        "Write" => (
-            std::fs::read_to_string(resolve(cwd, path)).unwrap_or_default(),
-            s(input, "content").to_string(),
-        ),
+        // The old text matters only to the guard: read it for files that can hold tests,
+        // up to the snapshot size, never a 200 MB data file under the daemon lock (I4, F4).
+        "Write" => {
+            let old = if tend_core::guard::may_hold_tests(path) {
+                read_text(&resolve(cwd, path))
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            (old, s(input, "content").to_string())
+        }
         _ => return None,
     };
     Some((path.to_string(), old, new))
@@ -356,8 +372,10 @@ impl Connector for ClaudeCode {
                 if !failed && EDIT_TOOLS.contains(&tool.as_str()) {
                     let path = s(&input, "file_path").to_string();
                     if !path.is_empty() {
-                        let after_hash = std::fs::read_to_string(resolve(&cwd, &path))
+                        // Edit cycles compare content hashes; a huge file is skipped.
+                        let after_hash = read_text_up_to(&resolve(&cwd, &path), MAX_HASH_BYTES)
                             .ok()
+                            .flatten()
                             .map(|c| sha256_hex(&c));
                         evs.push(Event::FileEdited {
                             tool_use_id: tool_use_id.clone(),
