@@ -104,6 +104,7 @@ fn run_child(script: &str) -> std::io::Result<Ran> {
         // `cmd` drops here, closing our copies of the write end.
     };
     let pgid = child.id() as libc::pid_t;
+    let reaper = spawn_reaper(pgid);
 
     let output = Arc::new(Mutex::new((Vec::new(), false)));
     let (eof_tx, eof_rx) = mpsc::channel::<()>();
@@ -156,6 +157,11 @@ fn run_child(script: &str) -> std::io::Result<Ran> {
         }
     };
     let _ = eof_rx.recv_timeout(Duration::from_millis(DRAIN_MS));
+    // We are alive to the end: tell the reaper to leave the group alone (background
+    // children of a finished command keep running, as in Claude Code's own Bash).
+    if let Some(mut w) = reaper {
+        let _ = w.write_all(b"x");
+    }
     let (output, streamed) = std::mem::take(&mut *output.lock().unwrap_or_else(|e| e.into_inner()));
     Ok(Ran {
         output,
@@ -163,6 +169,45 @@ fn run_child(script: &str) -> std::io::Result<Ran> {
         signaled,
         streamed,
     })
+}
+
+/// A watchdog for a hard stop: `tend reap <pgid>` waits on a pipe that only this
+/// process holds. If `tend run` dies without saying goodbye (SIGKILL, from a timeout
+/// or a group kill), the pipe closes and the reaper kills the command's process group,
+/// so a test's servers and children do not outlive it (I6, F6). PDEATHSIG covers only
+/// the shell, and macOS has none. The reaper runs in its own group, so a kill aimed at
+/// the caller's group does not take it too.
+fn spawn_reaper(pgid: libc::pid_t) -> Option<std::io::PipeWriter> {
+    let exe = std::env::current_exe().ok()?;
+    let (reader, writer) = std::io::pipe().ok()?;
+    Command::new(exe)
+        .arg("reap")
+        .arg(pgid.to_string())
+        .stdin(reader)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .ok()?;
+    Some(writer)
+}
+
+/// `tend reap <pgid>`: wait for `tend run` to finish or die. EOF with no goodbye byte
+/// means it died: kill the group.
+pub fn reap(pgid: &str) -> i32 {
+    let Ok(pgid) = pgid.parse::<libc::pid_t>() else {
+        return 0;
+    };
+    if pgid <= 1 {
+        return 0;
+    }
+    let mut byte = [0u8; 1];
+    let n = std::io::stdin().read(&mut byte).unwrap_or(0);
+    if n == 0 {
+        // SAFETY: signals the process group `tend run` created for its command.
+        unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    }
+    0
 }
 
 fn exit_code(status: ExitStatus) -> i32 {

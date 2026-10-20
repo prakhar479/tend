@@ -92,15 +92,21 @@ pub enum Body {
 /// Read actions that an `undelivered` entry names as not applied, with a note in the
 /// reason (D9). The ledger itself is never changed.
 pub fn settle_undelivered(entries: &mut [Entry]) {
-    let late: std::collections::BTreeSet<String> = entries
-        .iter()
-        .filter_map(|e| match &e.body {
-            Body::Undelivered { actions, .. } => Some(actions.clone()),
-            _ => None,
-        })
-        .flatten()
-        .collect();
-    if late.is_empty() {
+    let mut notes: BTreeMap<String, String> = BTreeMap::new();
+    for e in entries.iter() {
+        if let Body::Undelivered { actions, reason } = &e.body {
+            // Late replies (D9) and rewrites the agent ignored (I6, F8) both land here.
+            let note = if reason.contains("timeout") || reason == "late" {
+                " [not delivered: the reply came too late]".to_string()
+            } else {
+                format!(" [not applied: {}]", reason.trim_end_matches('.'))
+            };
+            for a in actions {
+                notes.insert(a.clone(), note.clone());
+            }
+        }
+    }
+    if notes.is_empty() {
         return;
     }
     for e in entries.iter_mut() {
@@ -111,9 +117,9 @@ pub fn settle_undelivered(entries: &mut [Entry]) {
             ..
         } = &mut e.body
         {
-            if *applied && late.contains(id) {
+            if let Some(note) = notes.get(id).filter(|_| *applied) {
                 *applied = false;
-                reason.push_str(" [not delivered: the reply came too late]");
+                reason.push_str(note);
             }
         }
     }

@@ -39,6 +39,11 @@ pub fn run_claude(mode: Mode, args: Vec<String>) -> Result<i32> {
     }
     let (user_settings, args) = take_settings(args);
     let exe = env::current_exe().context("find tend executable")?;
+    // In parallel with the daemon's start: is this Claude Code version checked?
+    let version_check = {
+        let bin = bin.clone();
+        thread::spawn(move || unchecked_version(&bin))
+    };
 
     let session = match setup(&exe, mode, user_settings.as_deref()) {
         Ok(s) => Some(s),
@@ -47,6 +52,13 @@ pub fn run_claude(mode: Mode, args: Vec<String>) -> Result<i32> {
             None
         }
     };
+
+    if let Ok(Some(v)) = version_check.join() {
+        eprintln!(
+            "tend: Claude Code {v} has not been checked with this tend (scripts/conformance.py). If it changed a hook, tend fails open and records less."
+        );
+        mark_version_seen(&v);
+    }
 
     forward_signals();
     let mut cmd = Command::new(&bin);
@@ -163,6 +175,55 @@ fn finish(s: &mut Session) {
             s.dir.join("daemon.log").display()
         );
     }
+}
+
+/// Claude Code versions with a conformance record, baked in at build time (build.rs).
+const CONFORMANT: &str = env!("TEND_CONFORMANT");
+
+/// The agent's version when no conformance record covers it and the user was not told
+/// yet (once per version: `<home>/versions-seen`, see `mark_version_seen`). None when it is checked, already
+/// reported, or unknown (I6, P1).
+fn unchecked_version(bin: &str) -> Option<String> {
+    let mut child = Command::new(bin)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // A version check must not hold up the start.
+    for _ in 0..150 {
+        if child.try_wait().ok()?.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    if child.try_wait().ok()?.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    let mut stdout = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut stdout).ok()?;
+    let version = stdout.split_whitespace().next()?.to_string();
+    if !version.chars().next().is_some_and(|c| c.is_ascii_digit())
+        || CONFORMANT.split(',').any(|v| v == version)
+    {
+        return None;
+    }
+    let seen = paths::home().join("versions-seen");
+    let known = fs::read_to_string(&seen).unwrap_or_default();
+    if known.lines().any(|l| l == version) {
+        return None;
+    }
+    Some(version)
+}
+
+/// Remember that the user was told about `version` (after setup made the data dir).
+fn mark_version_seen(version: &str) {
+    let seen = paths::home().join("versions-seen");
+    let known = fs::read_to_string(&seen).unwrap_or_default();
+    let _ = fs::write(&seen, format!("{known}{version}\n"));
 }
 
 /// `--tend-mode X` or `--tend-mode=X` anywhere in the arguments (clap only sees it

@@ -300,6 +300,12 @@ pub fn one_line(entries: &[Entry]) -> String {
     if t.loops > 0 {
         parts.push(plural(t.loops, "loop", "loops"));
     }
+    let ignored = entries.iter().any(|e| {
+        matches!(&e.body, Body::Undelivered { reason, .. } if reason.contains("ignored tend's rewrite"))
+    });
+    if ignored {
+        parts.push("Claude Code ignored tend's rewrite (run scripts/conformance.py)".into());
+    }
     parts.join(" · ")
 }
 

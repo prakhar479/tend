@@ -30,7 +30,7 @@ fn tmp(name: &str) -> PathBuf {
 fn fake_agent(dir: &Path) -> PathBuf {
     let script = dir.join("fake-claude.sh");
     let body = format!(
-        "#!/bin/sh\n\
+        "#!/bin/sh\n[ \"$1\" = --version ] && echo '2.1.304 (Claude Code)' && exit 0\n\
          echo \"$@\" > '{d}/args.txt'\n\
          tend hook PostToolUse < '{post}' > '{d}/post-out.json'\n\
          tend hook PreToolUse < '{pre}' > '{d}/pre-out.json'\n\
@@ -866,7 +866,7 @@ fn agent_runs_when_tend_setup_fails() {
     let agent = dir.join("agent.sh");
     fs::write(
         &agent,
-        format!("#!/bin/sh\necho \"$@\" > '{}/args.txt'\n", dir.display()),
+        format!("#!/bin/sh\n[ \"$1\" = --version ] && echo '2.1.304 (Claude Code)' && exit 0\necho \"$@\" > '{}/args.txt'\n", dir.display()),
     )
     .unwrap();
     fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
@@ -895,7 +895,7 @@ fn sigterm_to_the_launcher_stops_the_agent() {
     fs::write(
         &agent,
         format!(
-            "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+            "#!/bin/sh\n[ \"$1\" = --version ] && echo '2.1.304 (Claude Code)' && exit 0\necho $$ > '{}'\nexec sleep 30\n",
             pidfile.display()
         ),
     )
@@ -944,7 +944,7 @@ s.recv(1000)
     fs::write(
         &agent,
         format!(
-            "#!/bin/sh\ntend hook UserPromptSubmit < /dev/null\npython3 '{}/stop.py'\nsleep 0.3\n",
+            "#!/bin/sh\n[ \"$1\" = --version ] && echo '2.1.304 (Claude Code)' && exit 0\ntend hook UserPromptSubmit < /dev/null\npython3 '{}/stop.py'\nsleep 0.3\n",
             dir.display()
         ),
     )
@@ -1044,4 +1044,35 @@ fn shim_latency_budget() {
     let p95 = times[times.len() * 95 / 100];
     eprintln!("shim p50 {:?} p95 {:?}", times[times.len() / 2], p95);
     assert!(p95 < Duration::from_millis(20), "p95 {p95:?}");
+}
+
+/// F6: when `tend run` is killed hard (SIGKILL), its command's children do not live on.
+#[test]
+fn hard_killed_tend_run_leaves_no_orphans() {
+    let marker = format!("sleep 41.{}", std::process::id());
+    let mut child = Command::new(bin())
+        .args(["run", "--id", "t", "--sh"])
+        .arg(format!("{marker} & sleep 30"))
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let running = || {
+        let out = Command::new("pgrep")
+            .args(["-f", &marker])
+            .output()
+            .unwrap();
+        !out.stdout.is_empty()
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !running() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(running(), "the command did not start");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while running() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!running(), "orphan after SIGKILL: {marker}");
 }

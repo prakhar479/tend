@@ -154,6 +154,8 @@ pub struct Controller {
     allowed: BTreeMap<EditKey, (String, u64)>,
     /// Bash calls wrapped by `tend run`, by tool use id.
     wrapped: BTreeMap<String, Wrapped>,
+    /// Claude Code ran a call as written although tend rewrote it: wrap nothing more.
+    rewrite_ignored: bool,
     /// Command keys never to wrap again: a wrapped run of them got no tool result
     /// (Claude Code's auto-mode classifier can deny a rewrite as a bypass).
     no_wrap: std::collections::BTreeSet<String>,
@@ -227,6 +229,8 @@ struct LastSummary {
 struct Wrapped {
     /// The command the agent asked for.
     command: String,
+    /// Id of the wrap action.
+    action_id: String,
     /// Seq of the wrap action (cause of the output entry).
     action_seq: u64,
     /// `tend run` reported the output.
@@ -264,6 +268,7 @@ impl Controller {
             last_blocked: None,
             allowed: BTreeMap::new(),
             wrapped: BTreeMap::new(),
+            rewrite_ignored: false,
             no_wrap: std::collections::BTreeSet::new(),
             last_summary: None,
             deferred: None,
@@ -452,6 +457,14 @@ impl Controller {
         let hash = sha256_hex(&output);
         let wrapped = self.wrapped.remove(&tool_use_id);
         let filtered = wrapped.as_ref().is_some_and(|w| w.filtered);
+        // tend relies on `updatedInput` without a permission decision, which Claude Code
+        // does not document (R3.1). If the call ran the agent's command, not the wrapper,
+        // the wrap did not happen: say so, and stop wrapping (I6, F8).
+        let ran_wrapper = input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .is_some_and(|c| c.contains(" run --id "));
+        let ignored = wrapped.as_ref().filter(|_| !filtered && !ran_wrapper);
         let stored = Event::ToolCompleted {
             tool_use_id,
             tool,
@@ -460,6 +473,19 @@ impl Controller {
             failed,
         };
         let ev = self.push(d, now, vec![], Body::Event { event: stored });
+        if let Some(w) = ignored {
+            self.rewrite_ignored = true;
+            self.push(
+                d,
+                now,
+                vec![w.action_seq, ev],
+                Body::Undelivered {
+                    actions: vec![w.action_id.clone()],
+                    reason: "Claude Code ran the command as written: it ignored tend's rewrite."
+                        .into(),
+                },
+            );
+        }
         if filtered {
             // `tend run` already recorded the full output; this is what the agent saw.
             if let Some(p) = wrapped.and_then(|w| w.pending) {
@@ -847,8 +873,14 @@ impl Controller {
         if changes_state {
             return;
         }
-        if self.no_wrap.contains(&command_key(&command)) {
-            let reason = "Not wrapped: a wrapped run of this command got no result before (denied or stopped).";
+        let reason = if self.rewrite_ignored {
+            Some("Not wrapped: Claude Code ignored tend's command rewrite earlier in this session (check it with scripts/conformance.py).")
+        } else if self.no_wrap.contains(&command_key(&command)) {
+            Some("Not wrapped: a wrapped run of this command got no result before (denied or stopped).")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
             let action = ActionKind::Wrap {
                 tool_use_id: tool_use_id.clone(),
             };
@@ -865,13 +897,14 @@ impl Controller {
             tool_use_id: tool_use_id.clone(),
         };
         let supported = self.caps.rewrite_input && rewrite_ok;
-        let seq = self.next_seq;
+        let (seq, action_id) = (self.next_seq, format!("a-{}", self.next_action));
         if self.act_if(d, now, cause, action, reason, supported) {
             d.response.wrap = true;
             self.wrapped.insert(
                 tool_use_id,
                 Wrapped {
                     command,
+                    action_id,
                     action_seq: seq,
                     filtered: false,
                     pending: None,
@@ -1858,6 +1891,33 @@ mod tests {
                 .response
                 .wrap
         );
+    }
+
+    /// F8: Claude Code ran the agent's command, not the wrapper (it ignored
+    /// `updatedInput`). The wrap is recorded as not applied, and nothing more is wrapped.
+    #[test]
+    fn ignored_rewrite_is_recorded_and_stops_wrapping() {
+        let mut c = ctl(Mode::Optimize);
+        assert!(
+            c.handle(requested("t1", "pytest tests/a.py", true), 0)
+                .response
+                .wrap
+        );
+        let mut ran = bash("pytest tests/a.py", PYTEST);
+        if let Event::ToolCompleted { tool_use_id, .. } = &mut ran {
+            *tool_use_id = "t1".into();
+        }
+        let d = c.handle(ran, 1);
+        assert!(d.entries.iter().any(|e| matches!(
+            &e.body,
+            Body::Undelivered { actions, reason } if actions == &["a-1"] && reason.contains("ignored tend's rewrite")
+        )));
+        let d = c.handle(requested("t2", "pytest tests/b.py", true), 2);
+        assert!(!d.response.wrap);
+        assert!(d.entries.iter().any(|e| matches!(
+            &e.body,
+            Body::Action { reason, .. } if reason.contains("ignored tend's command rewrite")
+        )));
     }
 
     fn denied(id: &str) -> Event {

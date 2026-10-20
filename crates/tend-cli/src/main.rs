@@ -188,6 +188,11 @@ fn main() {
         let _ = std::panic::catch_unwind(|| shim::run(&event));
         std::process::exit(0);
     }
+    // `tend reap <pgid>`: the watchdog `tend run` starts (see run.rs). No clap: it must
+    // start fast and never fail loudly.
+    if argv.get(1).map(String::as_str) == Some("reap") {
+        std::process::exit(run::reap(argv.get(2).map_or("", String::as_str)));
+    }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
