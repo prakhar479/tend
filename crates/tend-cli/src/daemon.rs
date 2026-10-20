@@ -40,7 +40,8 @@ pub fn run(dir: PathBuf, parent_pid: Option<i32>, mode: Mode, agent: &str) -> Re
     // Bind under a temporary name and rename: the socket appears at its path only once
     // it listens, so a client never finds a socket that refuses (bind creates the file
     // before listen).
-    let tmp = sock.with_extension(format!("sock.{}", std::process::id()));
+    // The temporary name is no longer than `tendd.sock`, so it fits the path limit too.
+    let tmp = sock.with_file_name(format!("{}.t", std::process::id() % 10_000_000));
     let _ = fs::remove_file(&tmp);
     let listener = UnixListener::bind(&tmp).with_context(|| format!("bind {}", tmp.display()))?;
     fs::rename(&tmp, &sock).with_context(|| format!("rename to {}", sock.display()))?;

@@ -63,6 +63,7 @@ agent hook → `tend hook` → socket → daemon → `Connector::map` → `Contr
 
 ```sh
 make check                          # fmt --check, clippy -D warnings, test
+make check-clean                    # the same with an empty HOME and minimal PATH, as CI runs it
 cargo test -p tend-core           # fast loop for core logic
 make e2e                            # end-to-end with fake agent
 cargo run -- retro fixtures/transcripts/loop_session.jsonl

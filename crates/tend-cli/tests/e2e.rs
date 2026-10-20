@@ -453,7 +453,13 @@ fn large_filter_does_not_block_pings_or_hooks() {
             .unwrap();
     pre["hook_event_name"] = "PreToolUse".into();
     pre["permission_mode"] = "auto".into();
-    pre["tool_input"]["command"] = "pytest -v".into();
+    // tend wraps only a runner it can find: give it one, so the test does not depend on
+    // a pytest on the machine's PATH (CI has none).
+    let fake = dir.join("bin/pytest");
+    fs::create_dir_all(fake.parent().unwrap()).unwrap();
+    fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    pre["tool_input"]["command"] = format!("{} -v", fake.display()).into();
     pre.as_object_mut().unwrap().remove("tool_response");
     assert!(hook(&sock, "PreToolUse", &pre).contains("updatedInput"));
 
