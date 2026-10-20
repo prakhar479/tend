@@ -266,6 +266,17 @@ Review after the checkpoint: about 60 findings, most of them confirmed. Batches 
     - controller tests moved to `controller/tests.rs`.
   - L7, U11: see I3, I1.
 
+## Extensions E (from `docs/extensions-2026-10-20.md`)
+
+- [x] **CI fix.** An e2e test needed a pytest on PATH. Added `make check-clean`; the temporary socket name now fits the path limit; checkout@v5. Also fixed the guard's tolerance false positive on whole files, found by the polaris prototype.
+- [ ] **E1** `tend audit [BASE[..HEAD]]`: what a diff changed in tests, suppressions, check config, and dependencies (text, json, markdown).
+- [ ] **E2** Session audit: a base tree at SessionStart (temp index + write-tree), E1 at exit, in the exit line and report.
+- [ ] **E3** GitHub Action: the audit in the job summary or a PR comment; dogfood on this repo.
+- [ ] **E4** Expected value changed to the last failure's actual value.
+- [ ] **E5** Snapshot and golden updates (`jest -u`, `insta accept`, `*.snap`).
+- [ ] **E6–E11** Plugin, `.tend.toml`, secret redaction, per-project memory, `tend export`, notifications.
+- [ ] **E12–E16** Other agents, MCP server, `tend bench`, HTML report, deciders.
+
 ## Phase 2 — Optimize + Codex (not started)
 
 - [ ] Tune `Config` defaults from Phase 1 data.
