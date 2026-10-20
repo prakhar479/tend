@@ -1,0 +1,153 @@
+{
+  "description": "tend: record tool calls, guard test edits, find loops (needs `tend` on PATH).",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tend",
+            "args": [
+              "hook",
+              "SessionStart",
+              "--plugin"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tend",
+            "args": [
+              "hook",
+              "PreToolUse",
+              "--plugin"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tend",
+            "args": [
+              "hook",
+              "PostToolUse",
+              "--plugin"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash|Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tend",
+            "args": [
+              "hook",
+              "PostToolUseFailure",
+              "--plugin"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tend",
+            "args": [
+              "hook",
+              "PermissionDenied",
+              "--plugin"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tend",
+            "args": [
+              "hook",
+              "UserPromptSubmit",
+              "--plugin"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tend",
+            "args": [
+              "hook",
+              "Stop",
+              "--plugin"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tend",
+            "args": [
+              "hook",
+              "PreCompact",
+              "--plugin"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tend",
+            "args": [
+              "hook",
+              "SessionEnd",
+              "--plugin"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

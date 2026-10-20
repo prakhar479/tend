@@ -303,9 +303,11 @@ fn start_daemon(session: &Path, mode: &str) -> (Daemon, PathBuf) {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    // The guard first: if the daemon never answers, the panic still stops it.
+    let daemon = Daemon(child);
     let sock = socket_of(session);
     wait_for_daemon(&sock);
-    (Daemon(child), sock)
+    (daemon, sock)
 }
 
 fn hook(sock: &Path, event: &str, payload: &serde_json::Value) -> String {
@@ -1203,4 +1205,85 @@ fn repo_policy_is_loaded_from_the_project() {
     let out = hook(&sock, "PreToolUse", &pre);
     assert!(out.contains("protected by .tend.toml"), "{out}");
     assert!(out.contains("\"deny\""), "{out}");
+}
+
+/// E6: as a Claude Code plugin there is no launcher. The first hook of a conversation
+/// starts its daemon; later hooks find it by session id; SessionEnd stops it.
+#[test]
+fn plugin_hooks_run_a_session_without_the_launcher() {
+    let dir = tmp("plugin");
+    let home = dir.join("home");
+    let config = dir.join("config.toml");
+    fs::write(&config, "plugin_mode = optimize\n").unwrap();
+    let mut payload: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("pre_tool_use_edit_test.json")).unwrap())
+            .unwrap();
+    payload["session_id"] = "9b1d6f2e-0000-4000-8000-0000000000e6".into();
+    let plugin_hook = |event: &str, extra_env: Option<(&str, &str)>| {
+        use std::io::Write;
+        let mut cmd = Command::new(bin());
+        cmd.args(["hook", event, "--plugin"])
+            .env("TEND_HOME", &home)
+            .env("TEND_CONFIG", &config)
+            .env("TEND_HOOK_TIMEOUT_MS", "2000")
+            .env_remove("TEND_SOCKET")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        if let Some((k, v)) = extra_env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    // Under the launcher (TEND_SOCKET set), plugin hooks stay out of the way.
+    assert_eq!(
+        plugin_hook("PreToolUse", Some(("TEND_SOCKET", "/nonexistent"))),
+        ""
+    );
+    assert!(!home.join("by-session").exists());
+
+    assert_eq!(plugin_hook("SessionStart", None), "");
+    let out = plugin_hook("PreToolUse", None);
+    assert!(
+        out.contains("\"deny\""),
+        "optimize mode from the config: {out}"
+    );
+    let session = fs::read_dir(home.join("sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    // The status line finds the session from the session id on stdin.
+    let mut status = Command::new(bin())
+        .arg("status")
+        .env("TEND_HOME", &home)
+        .env_remove("TEND_SESSION_DIR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        status
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"session_id":"9b1d6f2e-0000-4000-8000-0000000000e6"}"#)
+            .unwrap();
+    }
+    let line = String::from_utf8(status.wait_with_output().unwrap().stdout).unwrap();
+    assert!(line.starts_with("tend optimize"), "{line}");
+    plugin_hook("SessionEnd", None);
+    assert!(socket_gone(&session), "SessionEnd stops the daemon");
+    let report = tend(&["report"], &session);
+    assert!(report.contains("Test guard: 1"), "{report}");
 }

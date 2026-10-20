@@ -1,0 +1,9 @@
+{
+  "name": "tend",
+  "version": "0.1.0",
+  "description": "Local supervisor for Claude Code: records what the agent does, guards test edits, finds fix loops. Needs the tend binary on PATH.",
+  "homepage": "https://github.com/prakhar479/tend",
+  "author": {
+    "name": "prakhar479"
+  }
+}

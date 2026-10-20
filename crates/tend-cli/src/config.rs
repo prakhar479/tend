@@ -10,6 +10,7 @@
 //! idle_gap_minutes = 10
 //! keep_days = 30            # tend claude deletes older sessions; 0 keeps all
 //! experimental_audit = false  # audit what each session changed in tests and checks
+//! plugin_mode = look         # mode of sessions the Claude Code plugin starts
 //! ```
 
 use std::env;
@@ -55,7 +56,7 @@ pub fn load() -> Config {
     c
 }
 
-const KEYS: [&str; 7] = [
+const KEYS: [&str; 8] = [
     "shape_threshold_tokens",
     "max_summary_ratio",
     "loop_threshold",
@@ -63,6 +64,7 @@ const KEYS: [&str; 7] = [
     "idle_gap_minutes",
     "keep_days",
     "experimental_audit",
+    "plugin_mode",
 ];
 
 fn parse(text: &str) -> (Config, Vec<String>) {
@@ -115,6 +117,13 @@ fn apply(c: &mut Config, line: &str, seen: &mut std::collections::BTreeSet<Strin
         "tighten_after" => c.tighten_after = int(1, 1000)? as u32,
         "idle_gap_minutes" => c.idle_gap_minutes = int(1, 24 * 60)?,
         "keep_days" => c.keep_days = int(0, 36_500)?,
+        "plugin_mode" => {
+            c.plugin_mode = match value.trim_matches('"') {
+                "look" => tend_core::Mode::Look,
+                "optimize" => tend_core::Mode::Optimize,
+                v => bail!("{key} must be look or optimize, got {v}"),
+            }
+        }
         "experimental_audit" => {
             c.experimental_audit = match value {
                 "true" => true,

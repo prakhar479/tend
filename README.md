@@ -14,6 +14,18 @@ Prototype. Claude Code only (tested with 2.1.303). Look mode, the default, recor
 cargo install --path crates/tend-cli   # Rust 1.87 or newer; installs `tend` into ~/.cargo/bin
 ```
 
+### As a Claude Code plugin
+
+To keep typing `claude`, load tend's hooks as a plugin (the `tend` binary must be on PATH):
+
+```sh
+claude plugin marketplace add prakhar479/tend      # or a local clone: ./tend-rs
+claude plugin install tend@tend
+claude --plugin-dir ./plugin                       # or: one session, from a clone
+```
+
+The first hook of each conversation starts its session; `SessionEnd` stops it. Plugin sessions run in `plugin_mode` (config, default `look`). With `tend claude`, the plugin's hooks step aside, so nothing is recorded twice. `tend status` works for plugin sessions too (Claude Code passes the session id to the status line).
+
 ## Use
 
 ```sh

@@ -13,6 +13,7 @@ mod doctor;
 mod ipc;
 mod launcher;
 mod paths;
+mod plugin;
 mod report;
 mod retro;
 mod run;
@@ -189,6 +190,8 @@ enum Cmd {
         mode: ModeArg,
         #[arg(long, default_value = "claude-code")]
         agent: String,
+        #[arg(long)]
+        idle_exit_minutes: Option<u64>,
     },
 }
 
@@ -221,8 +224,16 @@ fn main() {
     // newer settings file, an older binary) still exit 0 (rule 1).
     if argv.get(1).map(String::as_str) == Some("hook") {
         let event = argv.get(2).cloned().unwrap_or_default();
+        // `--plugin`: called by the Claude Code plugin, with no launcher (plugin.rs).
+        let from_plugin = argv.iter().skip(3).any(|a| a == "--plugin");
         // Exit 0 even if something panics.
-        let _ = std::panic::catch_unwind(|| shim::run(&event));
+        let _ = std::panic::catch_unwind(|| {
+            if from_plugin {
+                plugin::run(&event)
+            } else {
+                shim::run(&event)
+            }
+        });
         std::process::exit(0);
     }
     // `tend reap <pgid>`: the watchdog `tend run` starts (see run.rs). No clap: it must
@@ -393,9 +404,23 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Status => {
-            // A status line must never show an error: print nothing instead.
-            if let Some(dir) = std::env::var_os("TEND_SESSION_DIR") {
-                if let Ok(entries) = store::read_entries(&PathBuf::from(dir)) {
+            // A status line must never show an error: print nothing instead. Under the
+            // launcher the session is in the environment; under the plugin, Claude Code
+            // passes the session id on stdin.
+            let dir = std::env::var_os("TEND_SESSION_DIR")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    use std::io::{IsTerminal, Read};
+                    if std::io::stdin().is_terminal() {
+                        return None;
+                    }
+                    let mut input = String::new();
+                    std::io::stdin().read_to_string(&mut input).ok()?;
+                    let v: serde_json::Value = serde_json::from_str(&input).ok()?;
+                    plugin::existing_session_dir(v.get("session_id")?.as_str()?)
+                });
+            if let Some(dir) = dir {
+                if let Ok(entries) = store::read_entries(&dir) {
                     println!("{}", report::status_line(&entries));
                 }
             }
@@ -514,8 +539,15 @@ fn run(cli: Cli) -> Result<i32> {
             parent_pid,
             mode,
             agent,
+            idle_exit_minutes,
         } => {
-            daemon::run(session_dir, parent_pid, mode.into(), &agent)?;
+            daemon::run(
+                session_dir,
+                parent_pid,
+                mode.into(),
+                &agent,
+                idle_exit_minutes,
+            )?;
             Ok(0)
         }
         Cmd::Hook { .. } | Cmd::Run { .. } => unreachable!("handled in main"),

@@ -4,7 +4,7 @@
 
 use std::env;
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -116,10 +116,12 @@ fn setup(exe: &Path, mode: Mode, user_settings: Option<&str>) -> Result<Session>
         }
     }
     if crate::config::load().experimental_audit {
-        record_audit_base(&dir);
+        if let Ok(cwd) = env::current_dir() {
+            record_audit_base(&dir, &cwd);
+        }
     }
     let sock = paths::socket_path(&dir);
-    let mut daemon = start_daemon(exe, &dir, mode)?;
+    let mut daemon = start_daemon(exe, &dir, mode, Some(std::process::id()), None)?;
     if !wait_for(&sock) {
         let _ = daemon.kill();
         let _ = daemon.wait();
@@ -191,21 +193,18 @@ fn finish(s: &mut Session) {
 
 /// The session audit (experimental): the working tree's state before the agent starts,
 /// as a git tree, in `<session>/audit-base` ("root\ntree"). Nothing in the repo changes.
-fn record_audit_base(dir: &Path) {
-    let base = env::current_dir()
-        .ok()
-        .and_then(|cwd| crate::audit::repo_root(&cwd).ok())
-        .and_then(|root| {
-            let tree = crate::audit::worktree_tree(&root, dir).ok()?;
-            Some(format!("{}\n{tree}\n", root.display()))
-        });
+pub(crate) fn record_audit_base(dir: &Path, cwd: &Path) {
+    let base = crate::audit::repo_root(cwd).ok().and_then(|root| {
+        let tree = crate::audit::worktree_tree(&root, dir).ok()?;
+        Some(format!("{}\n{tree}\n", root.display()))
+    });
     if let Some(base) = base {
         let _ = fs::write(dir.join("audit-base"), base);
     }
 }
 
 /// Audit the session against its base: write `audit.json`, return the line to print.
-fn finish_audit(dir: &Path) -> Option<String> {
+pub(crate) fn finish_audit(dir: &Path) -> Option<String> {
     let base = fs::read_to_string(dir.join("audit-base")).ok()?;
     let mut lines = base.lines();
     let (root, from) = (PathBuf::from(lines.next()?), lines.next()?.to_string());
@@ -352,24 +351,40 @@ fn merge_settings(tend: &mut Value, user: &Value) {
     *tend = merged;
 }
 
-fn mode_name(mode: Mode) -> &'static str {
+pub(crate) fn mode_name(mode: Mode) -> &'static str {
     match mode {
         Mode::Look => "look",
         Mode::Optimize => "optimize",
     }
 }
 
-fn start_daemon(exe: &Path, dir: &Path, mode: Mode) -> Result<Child> {
-    let log = File::create(dir.join("daemon.log"))?;
-    Command::new(exe)
-        .arg("daemon")
+/// Start a session daemon. `parent`: exit when this process is gone (the launcher).
+/// `idle_exit_minutes`: exit after this long without a request (plugin mode, where no
+/// launcher waits for the agent).
+pub(crate) fn start_daemon(
+    exe: &Path,
+    dir: &Path,
+    mode: Mode,
+    parent: Option<u32>,
+    idle_exit_minutes: Option<u64>,
+) -> Result<Child> {
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("daemon.log"))?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("daemon")
         .arg("--session-dir")
         .arg(dir)
-        .arg("--parent-pid")
-        .arg(std::process::id().to_string())
         .arg("--mode")
-        .arg(mode_name(mode))
-        .stdin(Stdio::null())
+        .arg(mode_name(mode));
+    if let Some(pid) = parent {
+        cmd.arg("--parent-pid").arg(pid.to_string());
+    }
+    if let Some(m) = idle_exit_minutes {
+        cmd.arg("--idle-exit-minutes").arg(m.to_string());
+    }
+    cmd.stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
         // Own process group: Ctrl-C in the terminal must not reach the daemon.
@@ -378,7 +393,7 @@ fn start_daemon(exe: &Path, dir: &Path, mode: Mode) -> Result<Child> {
         .context("spawn daemon")
 }
 
-fn wait_for(sock: &Path) -> bool {
+pub(crate) fn wait_for(sock: &Path) -> bool {
     for _ in 0..1000 {
         if ipc::send(sock, &Request::Ping, Duration::from_millis(200)).is_ok() {
             return true;

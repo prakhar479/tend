@@ -30,7 +30,16 @@ struct State {
     store: Store,
 }
 
-pub fn run(dir: PathBuf, parent_pid: Option<i32>, mode: Mode, agent: &str) -> Result<()> {
+/// When the daemon last got a request (ms), for the idle exit.
+static LAST_REQUEST_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn run(
+    dir: PathBuf,
+    parent_pid: Option<i32>,
+    mode: Mode,
+    agent: &str,
+    idle_exit_minutes: Option<u64>,
+) -> Result<()> {
     let sock = socket_path(&dir);
     // The socket accepts hook events and `tend allow`: keep it in a private dir.
     crate::paths::ensure_private_dir(&dir)?;
@@ -61,10 +70,16 @@ pub fn run(dir: PathBuf, parent_pid: Option<i32>, mode: Mode, agent: &str) -> Re
         let sock = sock.clone();
         thread::spawn(move || watch_parent(pid, &sock));
     }
+    LAST_REQUEST_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+    if let Some(minutes) = idle_exit_minutes {
+        let sock = sock.clone();
+        thread::spawn(move || watch_idle(minutes, &sock));
+    }
 
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
+                LAST_REQUEST_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
                 let state = Arc::clone(&state);
                 let sock = sock.clone();
                 let token = Arc::clone(&token);
@@ -78,6 +93,20 @@ pub fn run(dir: PathBuf, parent_pid: Option<i32>, mode: Mode, agent: &str) -> Re
         }
     }
     Ok(())
+}
+
+/// Plugin mode has no launcher to watch: exit after a long quiet spell. A later hook
+/// starts a new daemon for the same session if the agent comes back.
+fn watch_idle(minutes: u64, sock: &Path) {
+    loop {
+        thread::sleep(Duration::from_secs(30));
+        let last = LAST_REQUEST_MS.load(std::sync::atomic::Ordering::Relaxed);
+        if now_ms().saturating_sub(last) > minutes * 60_000 {
+            eprintln!("tendd: idle for {minutes} min; exiting");
+            let _ = fs::remove_file(sock);
+            std::process::exit(0);
+        }
+    }
 }
 
 /// Exit when the launcher is gone, so no daemon outlives its session.

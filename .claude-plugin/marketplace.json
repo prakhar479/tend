@@ -1,0 +1,13 @@
+{
+  "name": "tend",
+  "owner": {
+    "name": "prakhar479"
+  },
+  "plugins": [
+    {
+      "name": "tend",
+      "source": "./plugin",
+      "description": "tend hooks for Claude Code (needs the tend binary on PATH)"
+    }
+  ]
+}

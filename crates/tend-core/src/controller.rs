@@ -42,6 +42,8 @@ pub struct Config {
     pub keep_days: u64,
     /// `tend claude` audits what the session changed in tests and checks (experimental).
     pub experimental_audit: bool,
+    /// The mode of sessions the Claude Code plugin starts (no `--tend-mode` there).
+    pub plugin_mode: Mode,
 }
 
 impl Default for Config {
@@ -54,6 +56,7 @@ impl Default for Config {
             idle_gap_minutes: 10,
             keep_days: 30,
             experimental_audit: false,
+            plugin_mode: Mode::Look,
         }
     }
 }
@@ -65,6 +68,10 @@ impl Config {
             ("idle_gap_minutes", self.idle_gap_minutes.to_string()),
             ("experimental_audit", self.experimental_audit.to_string()),
             ("keep_days", self.keep_days.to_string()),
+            (
+                "plugin_mode",
+                format!("{:?}", self.plugin_mode).to_lowercase(),
+            ),
             ("loop_threshold", self.loop_threshold.to_string()),
             ("max_summary_ratio", self.max_summary_ratio.to_string()),
             (
