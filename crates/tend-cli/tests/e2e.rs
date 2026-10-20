@@ -645,7 +645,8 @@ fn bash_write_that_weakens_a_test_is_warned() {
     )
     .unwrap();
 
-    let command = "sed -i '/assert 2/d' tests/test_api.py";
+    // `-i.bak` works with GNU and BSD (macOS) sed alike.
+    let command = "sed -i.bak '/assert 2/d' tests/test_api.py";
     let mut pre: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(fixture("post_tool_use_bash.json")).unwrap())
             .unwrap();
