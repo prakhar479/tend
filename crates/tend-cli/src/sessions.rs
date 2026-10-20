@@ -14,9 +14,12 @@ use crate::paths::{self, socket_path};
 pub fn is_live(dir: &Path) -> bool {
     match UnixStream::connect(socket_path(dir)) {
         Ok(_) => true,
+        // "Refused" and "not found" mean no daemon; so does a path the OS cannot use.
         Err(e) => !matches!(
             e.kind(),
-            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::NotFound
+                | std::io::ErrorKind::InvalidInput
         ),
     }
 }
@@ -276,6 +279,11 @@ mod tests {
         let live = r.join("0000000002-2");
         fs::create_dir_all(&dead).unwrap();
         fs::create_dir_all(&live).unwrap();
+        // A long temp dir (macOS) puts sockets in the shared fallback dir; the daemon
+        // creates it, so the test must too.
+        for d in [&dead, &live] {
+            fs::create_dir_all(socket_path(d).parent().unwrap()).unwrap();
+        }
         // A socket file nobody listens on.
         drop(UnixListener::bind(socket_path(&dead)).unwrap());
         // A listener that answers pings, like a daemon.

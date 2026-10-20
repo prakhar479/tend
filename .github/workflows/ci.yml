@@ -25,7 +25,17 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: make check
+      - name: make check
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! make check 2>&1 | tee check.log; then
+            # The job log needs a GitHub login; annotations do not. Put each failure
+            # (the panic line and the two lines after it) into one.
+            awk '/panicked at|^error(\[|:)/ { n = 3; msg = "" }
+                 n > 0 { msg = msg (msg == "" ? "" : "%0A") $0; n--; if (n == 0) print "::error::" msg }' check.log | head -20
+            exit 1
+          fi
       - run: python3 -m py_compile scripts/*.py
 
   msrv:

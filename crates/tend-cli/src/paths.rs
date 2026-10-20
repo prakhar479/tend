@@ -58,9 +58,13 @@ pub fn socket_path(dir: &Path) -> PathBuf {
     let hash = sha256_hex(&dir.to_string_lossy());
     // SAFETY: getuid has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
-    env::temp_dir()
-        .join(format!("tend-{uid}"))
-        .join(format!("{}.sock", &hash[..16]))
+    let name = format!("{}.sock", &hash[..16]);
+    let in_temp = env::temp_dir().join(format!("tend-{uid}")).join(&name);
+    if in_temp.as_os_str().len() <= MAX_SOCKET_PATH {
+        return in_temp;
+    }
+    // A long $TMPDIR (macOS uses /var/folders/…; some CI setups go deeper): /tmp is short.
+    PathBuf::from("/tmp").join(format!("tend-{uid}")).join(name)
 }
 
 /// The control token file: `tend allow`, `tend mode`, and the launcher's shutdown

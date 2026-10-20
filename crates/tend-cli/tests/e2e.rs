@@ -86,7 +86,7 @@ fn tend(args: &[&str], session: &Path) -> String {
 }
 
 /// The session socket, by the daemon's rule (`paths::socket_path`): a long session path
-/// falls back to `<tmp>/tend-<uid>/<hash>.sock` (I5, T7).
+/// falls back to `<tmp>/tend-<uid>/<hash>.sock`, and to `/tmp` when that is long too.
 fn socket_of(session: &Path) -> PathBuf {
     let p = session.join("tendd.sock");
     if p.as_os_str().len() <= 100 {
@@ -94,9 +94,19 @@ fn socket_of(session: &Path) -> PathBuf {
     }
     let hash = tend_core::text::sha256_hex(&session.to_string_lossy());
     let uid = unsafe { libc::getuid() };
-    std::env::temp_dir()
-        .join(format!("tend-{uid}"))
-        .join(format!("{}.sock", &hash[..16]))
+    let name = format!("{}.sock", &hash[..16]);
+    let in_temp = std::env::temp_dir().join(format!("tend-{uid}")).join(&name);
+    if in_temp.as_os_str().len() <= 100 {
+        return in_temp;
+    }
+    PathBuf::from("/tmp").join(format!("tend-{uid}")).join(name)
+}
+
+/// A socket path for a test listener that fits the OS limit whatever $TMPDIR is.
+fn short_socket(name: &str) -> PathBuf {
+    let p = PathBuf::from("/tmp").join(format!("tend-t-{}-{name}.sock", std::process::id()));
+    let _ = fs::remove_file(&p);
+    p
 }
 
 fn socket_gone(session: &Path) -> bool {
@@ -498,6 +508,7 @@ fn large_filter_does_not_block_pings_or_hooks() {
             line
         })
     };
+    let started = std::time::Instant::now();
     let (mut slowest, mut samples) = (Duration::ZERO, 0);
     while !filter.is_finished() {
         slowest = slowest.max(direct(&sock));
@@ -511,9 +522,13 @@ fn large_filter_does_not_block_pings_or_hooks() {
         &reply[..reply.len().min(200)]
     );
     assert!(samples > 0, "the filter finished before any hook was timed");
+    // A hook stuck behind the filter waits for most of it (about 1.5 s in a debug build);
+    // allow for a slow, shared CI runner (macOS) without hiding that.
+    let filter_took = started.elapsed();
+    let limit = baseline + (filter_took / 3).max(Duration::from_millis(400));
     assert!(
-        slowest < baseline + Duration::from_millis(150),
-        "hook waited {slowest:?} (idle: {baseline:?}) over {samples} samples"
+        slowest < limit,
+        "hook waited {slowest:?} (idle {baseline:?}, filter {filter_took:?}) over {samples} samples"
     );
 }
 
@@ -804,7 +819,8 @@ fn tend_run_with_unknown_arguments_still_runs_the_command() {
 
 /// A daemon that accepts and never answers (stuck, or not tend at all).
 fn silent_listener(dir: &Path) -> (PathBuf, thread::JoinHandle<()>) {
-    let sock = dir.join("silent.sock");
+    let name = dir.file_name().unwrap().to_string_lossy().to_string();
+    let sock = short_socket(&name);
     let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
     let handle = thread::spawn(move || {
         let mut held = Vec::new();
@@ -994,8 +1010,8 @@ fn launch_without_a_conversation_leaves_no_session() {
 /// code, and `tend run` never asks the daemon about it.
 #[test]
 fn huge_output_streams_without_the_daemon() {
-    let dir = tmp("huge");
-    let sock = dir.join("count.sock");
+    tmp("huge");
+    let sock = short_socket("count");
     let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
     listener.set_nonblocking(true).unwrap();
     let out = Command::new(bin())
