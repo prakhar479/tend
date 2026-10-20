@@ -88,6 +88,11 @@ impl Broker {
     /// Fast path. Returns the rule answer; never waits for a decider.
     // TODO(Phase 4): run enabled deciders off the fast path with a deadline,
     // validate their answers, and record late answers for the session model.
+    /// A registered decider handles this question.
+    pub fn has_decider_for(&self, question: &str) -> bool {
+        self.deciders.iter().any(|d| d.handles(question))
+    }
+
     pub fn ask(&self, q: &Question<'_>) -> (Answer, Source) {
         (rule_answer(q), Source::Rule)
     }

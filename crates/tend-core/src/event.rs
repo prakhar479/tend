@@ -23,6 +23,12 @@ pub enum Event {
         #[serde(default)]
         mode: Option<Mode>,
     },
+    /// The agent switched conversations in the same process (`/clear`, `/resume`): a new
+    /// transcript, and earlier failures and edits belong to another conversation (I6, R3).
+    ConversationChanged {
+        transcript_path: Option<String>,
+        reason: String,
+    },
     /// A tool call before it runs (non-edit tools).
     ToolRequested {
         tool_use_id: String,

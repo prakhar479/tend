@@ -33,6 +33,7 @@ tend review                          # all flags across sessions, with what they
 tend retro ~/.claude/projects/<project>/<session>.jsonl   # report on a past session
 tend retro --all                     # every past session and subagent, ranked
 tend status                          # one line for the status line (empty outside tend)
+tend doctor                          # check the install: binary, Claude Code version, data dir, config
 ```
 
 `--session` takes an id or a unique prefix of one (as `tend sessions` prints it), `-1` for the newest, `-2`, and so on, or a path.

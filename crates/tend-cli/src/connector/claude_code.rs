@@ -11,6 +11,7 @@ use tend_core::text::sha256_hex;
 use tend_core::{Capabilities, Event, Permission, Response};
 
 use super::Connector;
+use crate::paths::now_ms;
 
 const EDIT_TOOLS: [&str; 3] = ["Edit", "MultiEdit", "Write"];
 
@@ -21,12 +22,20 @@ pub const HOOKED_TOOLS: [&str; 4] = ["Bash", "Edit", "MultiEdit", "Write"];
 #[derive(Default)]
 pub struct ClaudeCode {
     started: bool,
+    /// Claude Code's id of the current conversation.
+    session_id: String,
     /// Test files a Bash call may write, as they were before it ran (R1.4).
-    snapshots: BTreeMap<String, Vec<(PathBuf, Option<String>)>>,
+    /// Keyed by tool use id, with the time taken (ms).
+    snapshots: BTreeMap<String, (u64, Snapshot)>,
 }
+
+/// Files as a Bash call found them before it ran: path and text (None: no such file).
+type Snapshot = Vec<(PathBuf, Option<String>)>;
 
 /// Largest file the Bash-write guard snapshots. Test files are far smaller.
 const MAX_SNAPSHOT_BYTES: u64 = 1 << 20;
+/// At the end of a turn, snapshots older than this are dropped.
+const SNAPSHOT_KEEP_MS: u64 = 10 * 60 * 1000;
 /// Most files one Bash call snapshots.
 const MAX_SNAPSHOT_FILES: usize = 32;
 /// Bash calls whose snapshots wait for a result. A call that never reports (interrupted)
@@ -309,17 +318,36 @@ impl Connector for ClaudeCode {
     fn map(&mut self, hook_event: &str, p: &Value) -> Vec<Event> {
         let mut evs = Vec::new();
         let cwd = s(p, "cwd").to_string();
+        let transcript_path = p
+            .get("transcript_path")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let session_id = s(p, "session_id");
         if !self.started {
             self.started = true;
             evs.push(Event::SessionStarted {
                 agent: self.agent().into(),
                 cwd: cwd.clone(),
-                transcript_path: p
-                    .get("transcript_path")
-                    .and_then(Value::as_str)
-                    .map(String::from),
+                transcript_path,
                 mode: None,
             });
+        } else if !session_id.is_empty()
+            && !self.session_id.is_empty()
+            && session_id != self.session_id
+        {
+            // `/clear` or `/resume` in the same process: a new conversation (I6, R3).
+            let reason = match (hook_event, s(p, "source")) {
+                ("SessionStart", source) if !source.is_empty() => source.to_string(),
+                _ => "new session id".to_string(),
+            };
+            self.snapshots.clear();
+            evs.push(Event::ConversationChanged {
+                transcript_path,
+                reason,
+            });
+        }
+        if !session_id.is_empty() {
+            self.session_id = session_id.to_string();
         }
         let tool = s(p, "tool_name").to_string();
         let tool_use_id = s(p, "tool_use_id").to_string();
@@ -349,7 +377,8 @@ impl Connector for ClaudeCode {
                     if tool == "Bash" && self.snapshots.len() < MAX_PENDING_SNAPSHOTS {
                         let files = snapshot(command, &cwd);
                         if !files.is_empty() {
-                            self.snapshots.insert(tool_use_id.clone(), files);
+                            self.snapshots
+                                .insert(tool_use_id.clone(), (now_ms(), files));
                         }
                     }
                     let rewrite_ok = matches!(mode, "auto" | "bypassPermissions")
@@ -384,7 +413,8 @@ impl Connector for ClaudeCode {
                         });
                     }
                 }
-                for (path, before) in self.snapshots.remove(&tool_use_id).unwrap_or_default() {
+                let files = self.snapshots.remove(&tool_use_id).map(|(_, f)| f);
+                for (path, before) in files.unwrap_or_default() {
                     let Ok(after) = read_text(&path) else {
                         continue;
                     };
@@ -414,8 +444,11 @@ impl Connector for ClaudeCode {
                 chars: s(p, "prompt").chars().count(),
             }),
             "Stop" => {
-                // A call with no result by now never reports (interrupted, or denied).
-                self.snapshots.clear();
+                // A call with no result by now was interrupted or denied, unless it still
+                // runs in the background (a subagent, `run_in_background`): keep recent
+                // ones, drop the rest (I6, R4).
+                let cutoff = now_ms().saturating_sub(SNAPSHOT_KEEP_MS);
+                self.snapshots.retain(|_, (t, _)| *t >= cutoff);
                 evs.push(Event::TurnEnded);
             }
             "PreCompact" => evs.push(Event::Compacted {
@@ -631,6 +664,30 @@ mod tests {
         }
     }
 
+    /// R3: a new session id in the same process (`/clear`, `/resume`) is a new
+    /// conversation with its own transcript.
+    #[test]
+    fn new_session_id_is_a_new_conversation() {
+        let mut c = ClaudeCode::default();
+        let mut p = fixture("pre_tool_use_bash_auto.json");
+        p["hook_event_name"] = json!("SessionStart");
+        p["source"] = json!("startup");
+        assert!(matches!(
+            c.map("SessionStart", &p)[0],
+            Event::SessionStarted { .. }
+        ));
+        assert!(c.map("SessionStart", &p).is_empty(), "same conversation");
+        p["session_id"] = json!("9b1d6f2e-0000-4000-8000-000000000002");
+        p["transcript_path"] = json!("/home/dev/.claude/projects/x/second.jsonl");
+        p["source"] = json!("clear");
+        let evs = c.map("SessionStart", &p);
+        assert!(
+            matches!(&evs[..], [Event::ConversationChanged { transcript_path: Some(t), reason }]
+                if t.ends_with("second.jsonl") && reason == "clear"),
+            "{evs:?}"
+        );
+    }
+
     /// T8: real captures from Claude Code 2.1.304 (conformance run): a PreToolUse Bash
     /// payload in auto mode, and the PostToolUseFailure of a wrapped test run, whose
     /// error text is tend's summary.
@@ -773,6 +830,9 @@ mod tests {
         pre["tool_input"]["command"] = json!("cd shop && sed -i '/assert b/d' tests/*.py");
         c.map("PreToolUse", &pre);
         std::fs::write(&test, "assert a\n").unwrap();
+        // R4: the turn ends while the call still runs (a background subagent): the
+        // snapshot is recent, so it stays.
+        c.map("Stop", &json!({}));
 
         let mut post = fixture("post_tool_use_bash.json");
         post["cwd"] = pre["cwd"].clone();

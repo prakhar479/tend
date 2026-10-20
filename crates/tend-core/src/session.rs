@@ -56,7 +56,8 @@ impl SessionModel {
     }
 
     pub fn shape_level(&self, kind: OutputKind) -> u8 {
-        self.levels.get(&kind).copied().unwrap_or(DEFAULT_LEVEL)
+        // Every kind is in `levels`; an unknown one is not shaped (C1).
+        self.levels.get(&kind).copied().unwrap_or(0)
     }
 
     pub fn levels(&self) -> &BTreeMap<OutputKind, u8> {

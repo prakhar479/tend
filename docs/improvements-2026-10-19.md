@@ -1,5 +1,7 @@
 # tend: improvements found in review (2026-10-19)
 
+**Status (2026-10-20):** every item below is done (batches I1–I6 in `docs/TASKS.md`), except what needs a remote (C5: CI has not run yet) and a real PermissionDenied capture.
+
 This review came after the checkpoint fixes (C1–C4). It had four parts: tend-core logic, the tend-cli runtime, test quality (87 hand-made mutations), and a hands-on CLI pass. Most findings are **confirmed**: each was reproduced by a test, a run, or a measurement, in throwaway scratch projects; the repo was not changed. Findings marked *plausible* come from reading the code. Sizes: S ≈ hours, M ≈ a day, L ≈ days.
 
 Rule numbers refer to the rules in `CLAUDE.md`. Rule 1: tend never blocks or breaks the agent through its own failure. Rule 4: the ledger never claims an action that did not happen.

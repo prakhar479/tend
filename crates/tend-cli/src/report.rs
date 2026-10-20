@@ -375,7 +375,8 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
     let mut agent = String::from("?");
     let mut cwd = String::new();
     let mut mode = String::from("?");
-    let mut transcript: Option<String> = None;
+    let mut transcripts: Vec<String> = Vec::new();
+    let (mut conversations, mut ignored) = (1u64, 0u64);
     let t = totals(entries);
     let (mut tools, mut bash, mut reopens, mut judgments) = (0u64, 0u64, 0u64, 0u64);
     let (mut shaped, mut before, mut after, mut shaped_applied) = (0u64, 0u64, 0u64, 0u64);
@@ -423,10 +424,16 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
                 } => {
                     agent = a.clone();
                     cwd = c.clone();
-                    transcript = transcript_path.clone();
+                    transcripts.extend(transcript_path.clone());
                     if let Some(m) = m {
                         mode = format!("{m:?}").to_lowercase();
                     }
+                }
+                Event::ConversationChanged {
+                    transcript_path, ..
+                } => {
+                    conversations += 1;
+                    transcripts.extend(transcript_path.clone());
                 }
                 Event::ToolCompleted { tool, input, .. } => {
                     tools += 1;
@@ -441,6 +448,9 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
                 _ => {}
             },
             Body::Output { .. } | Body::Format { .. } => {}
+            Body::Undelivered { actions, reason } if reason.contains("ignored tend's rewrite") => {
+                ignored += actions.len() as u64
+            }
             Body::Undelivered { actions, .. } => undelivered += actions.len() as u64,
             Body::Override { action } => guards.push(format!("[user allowed] {action} once")),
             Body::Judgment { .. } => judgments += 1,
@@ -518,7 +528,15 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
     };
 
     let mut out = String::new();
-    let _ = writeln!(out, "Session {label} · {agent} · {duration} · mode: {mode}");
+    let convs = if conversations > 1 {
+        format!(" · {conversations} conversations")
+    } else {
+        String::new()
+    };
+    let _ = writeln!(
+        out,
+        "Session {label} · {agent} · {duration} · mode: {mode}{convs}"
+    );
     if !cwd.is_empty() {
         let _ = writeln!(out, "Project: {cwd}");
     }
@@ -562,11 +580,15 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
             }
         }
     }
-    match transcript
-        .as_deref()
-        .map(Path::new)
-        .and_then(usage_from_transcript)
-    {
+    // One transcript per conversation (`/clear` and `/resume` start another, R3).
+    let usage = transcripts
+        .iter()
+        .filter_map(|t| usage_from_transcript(Path::new(t)))
+        .reduce(|mut a, b| {
+            a.add(&b);
+            a
+        });
+    match usage {
         Some(u) => {
             let _ = writeln!(
                 out,
@@ -634,6 +656,12 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
         let _ = writeln!(
             out,
             "Not delivered: {undelivered} actions (the reply came after the hook timeout)"
+        );
+    }
+    if ignored > 0 {
+        let _ = writeln!(
+            out,
+            "Rewrites ignored by Claude Code: {ignored} (wrapping stopped; run scripts/conformance.py)"
         );
     }
     let _ = write!(out, "{}", precision(&t, live));

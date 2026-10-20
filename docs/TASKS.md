@@ -250,7 +250,21 @@ Review after the checkpoint: about 60 findings, most of them confirmed. Batches 
     - Jobs: an MSRV job (1.87, the new `rust-version`); a latency job (an ignored e2e test, p95 < 20 ms in release); a 60 s fuzz smoke job; `py_compile`; and a manual conformance job (`workflow_dispatch`, needs `ANTHROPIC_API_KEY`).
     - CI still needs a remote (C5).
   - X1: `compile_error!` on non-Unix.
-- [ ] **I6. Later:** F6, F8 + P1, R3, R4, L7, U10, U11, simplifications.
+- [x] **I6. Later:** F6, F8 + P1, R3, R4, L7, U10, U11, simplifications.
+  Done:
+  - F6: `tend run` starts a reaper (`tend reap <pgid>`) on a pipe only it holds. If `tend run` dies without a goodbye byte, the reaper kills the command's group. A test checks that a SIGKILL leaves no orphan, and fails without the reaper.
+  - F8: a wrapped call that ran the agent's own command means Claude Code ignored `updatedInput`. tend records the wrap as not applied (`undelivered`, with its own note), stops wrapping, and says so in the report and at exit.
+  - P1: `build.rs` bakes in the versions with a record under `docs/conformance/`. `tend claude` warns once per unchecked Claude Code version (checked in parallel, capped at 1.5 s).
+  - R3: a new `session_id` in the same process (`/clear`, `/resume`) emits `conversation_changed`. Loop, edit, and block state start afresh, and the report sums every conversation's transcript. Live check: subagent hooks share the `session_id` and carry an `agent_id`, so they trigger no change.
+  - R4: Stop drops only snapshots older than 10 min.
+  - U10: `tend doctor`.
+  - Simplifications:
+    - `same_failure` judgments are recorded only when a decider handles them;
+    - failures are parsed only for test and build outputs;
+    - the output is hashed once;
+    - an unknown kind is not shaped;
+    - controller tests moved to `controller/tests.rs`.
+  - L7, U11: see I3, I1.
 
 ## Phase 2 — Optimize + Codex (not started)
 

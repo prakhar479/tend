@@ -8,6 +8,7 @@ compile_error!("tend supports Unix (Linux, macOS) only for now");
 mod config;
 mod connector;
 mod daemon;
+mod doctor;
 mod ipc;
 mod launcher;
 mod paths;
@@ -107,6 +108,8 @@ enum Cmd {
     },
     /// List flags across all sessions, with what each one points at.
     Review,
+    /// Check the install: which tend runs, the Claude Code version, the data dir, config.
+    Doctor,
     /// One line for the Claude Code status line: mode and what tend did so far.
     /// Prints nothing outside a tend session.
     Status,
@@ -353,6 +356,11 @@ fn run(cli: Cli) -> Result<i32> {
                 }
             }
             Ok(0)
+        }
+        Cmd::Doctor => {
+            let (report, healthy) = doctor::run();
+            print!("{report}");
+            Ok(if healthy { 0 } else { 1 })
         }
         Cmd::Review => {
             print!("{}", review(&paths::list_sessions()));
