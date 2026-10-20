@@ -44,7 +44,8 @@ struct SigState {
     first_ms: u64,
     steered: bool,
     command: String,
-    message: String,
+    /// The failure as first seen.
+    failure: Failure,
 }
 
 #[derive(Debug, Clone)]
@@ -95,60 +96,83 @@ impl LoopDetector {
     }
 
     /// Call after each command run with the failures found in its output.
-    /// A signature that this command no longer produces is forgotten.
+    /// A signature that this command no longer produces is forgotten, except after a run
+    /// that shows only the runner's summary line (`| tail -1`): it failed without saying
+    /// which tests, so this command's known failures stay, and the run is an attempt for
+    /// each of them (I3, L4).
     pub fn on_run(&mut self, command: &str, failures: &[Failure], now_ms: u64) -> Vec<Observation> {
         let current: HashSet<&str> = failures.iter().map(|f| f.signature.as_str()).collect();
-        self.sigs
-            .retain(|sig, st| st.command != command || current.contains(sig.as_str()));
+        let partial = !failures.is_empty() && failures.iter().all(|f| f.summary_only);
+        let mut seen: Vec<Failure> = Vec::new();
+        if partial {
+            let mut carried: Vec<&SigState> = self
+                .sigs
+                .iter()
+                .filter(|(sig, st)| {
+                    st.command == command
+                        && !st.failure.summary_only
+                        && !current.contains(sig.as_str())
+                })
+                .map(|(_, st)| st)
+                .collect();
+            carried.sort_by_key(|st| st.first_ms);
+            seen.extend(carried.into_iter().map(|st| st.failure.clone()));
+        } else {
+            self.sigs
+                .retain(|sig, st| st.command != command || current.contains(sig.as_str()));
+        }
+        seen.extend(failures.iter().cloned());
+        seen.iter()
+            .map(|f| self.observe(command, f, now_ms))
+            .collect()
+    }
 
-        let mut out = Vec::new();
-        for f in failures {
-            match self.sigs.get_mut(&f.signature) {
-                Some(st) => {
-                    if self.edits > st.last_edit {
-                        st.attempts += 1;
-                        st.last_edit = self.edits;
-                    }
-                    let edits = st.attempts;
-                    let previous_message = Some(st.message.clone());
-                    let signal = if edits >= self.threshold && !st.steered {
-                        st.steered = true;
-                        Some(LoopSignal::Loop {
-                            signature: f.signature.clone(),
-                            summary: f.summary(),
-                            edits,
-                            first_ms: st.first_ms,
-                        })
-                    } else {
-                        None
-                    };
-                    out.push(Observation {
-                        failure: f.clone(),
-                        previous_message,
-                        signal,
-                    });
+    fn observe(&mut self, command: &str, f: &Failure, now_ms: u64) -> Observation {
+        let edits_now = self.edits;
+        match self.sigs.get_mut(&f.signature) {
+            Some(st) => {
+                if edits_now > st.last_edit {
+                    st.attempts += 1;
+                    st.last_edit = edits_now;
                 }
-                None => {
-                    self.sigs.insert(
-                        f.signature.clone(),
-                        SigState {
-                            last_edit: self.edits,
-                            attempts: 0,
-                            first_ms: now_ms,
-                            steered: false,
-                            command: command.to_string(),
-                            message: f.message.clone(),
-                        },
-                    );
-                    out.push(Observation {
+                let edits = st.attempts;
+                let previous_message = Some(st.failure.message.clone());
+                let signal = if edits >= self.threshold && !st.steered {
+                    st.steered = true;
+                    Some(LoopSignal::Loop {
+                        signature: f.signature.clone(),
+                        summary: f.summary(),
+                        edits,
+                        first_ms: st.first_ms,
+                    })
+                } else {
+                    None
+                };
+                Observation {
+                    failure: f.clone(),
+                    previous_message,
+                    signal,
+                }
+            }
+            None => {
+                self.sigs.insert(
+                    f.signature.clone(),
+                    SigState {
+                        last_edit: edits_now,
+                        attempts: 0,
+                        first_ms: now_ms,
+                        steered: false,
+                        command: command.to_string(),
                         failure: f.clone(),
-                        previous_message: None,
-                        signal: None,
-                    });
+                    },
+                );
+                Observation {
+                    failure: f.clone(),
+                    previous_message: None,
+                    signal: None,
                 }
             }
         }
-        out
     }
 }
 
@@ -162,7 +186,37 @@ mod tests {
             signature: signature_of(Some("t"), msg),
             test: Some("t".into()),
             message: msg.into(),
+            summary_only: false,
         }
+    }
+
+    fn summary(msg: &str) -> Failure {
+        Failure {
+            signature: signature_of(None, msg),
+            test: None,
+            message: msg.into(),
+            summary_only: true,
+        }
+    }
+
+    /// L4: `| tail -3` (the failing test) and `| tail -1` (only the summary) alternate;
+    /// the loop is still found.
+    #[test]
+    fn summary_only_runs_keep_the_loop() {
+        let mut d = LoopDetector::new(3);
+        let full = [fail("assert 500 == 200")];
+        let short = [summary("1 failed, 2 passed in 0.12s")];
+        d.on_run("pytest", &full, 0);
+        let mut steered = false;
+        for i in 1..=3u64 {
+            d.on_edit("src/app.py", &format!("h{i}"));
+            let f: &[Failure] = if i % 2 == 1 { &short } else { &full };
+            steered |= d
+                .on_run("pytest", f, i)
+                .iter()
+                .any(|o| matches!(&o.signal, Some(LoopSignal::Loop { signature, .. }) if *signature == full[0].signature));
+        }
+        assert!(steered);
     }
 
     #[test]

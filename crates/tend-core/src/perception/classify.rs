@@ -80,16 +80,23 @@ pub fn classify(command: &str) -> CommandInfo {
         OutputKind::Test
     } else if is_view(command) {
         OutputKind::View
-    } else if re!(BUILD).is_match(command) {
-        OutputKind::Build
-    } else if re!(INSTALL).is_match(command) {
-        OutputKind::Install
-    } else if re!(r"(?:^|[\s;&|(])git\s").is_match(command) {
-        OutputKind::Git
-    } else if re!(r"(?:^|[\s;&|(])(grep|rg|ag|find|fd|ls|tree)\b").is_match(command) {
-        OutputKind::Search
     } else {
-        OutputKind::Other
+        // Programs in command position only: `grep -rn make src/` searches, it does not
+        // build (I3, S1).
+        let segments = shell::parse(command).segments;
+        let kinds: Vec<OutputKind> = segments
+            .iter()
+            .filter_map(|seg| kind_of(shell::program_words(seg)))
+            .collect();
+        [
+            OutputKind::Build,
+            OutputKind::Install,
+            OutputKind::Git,
+            OutputKind::Search,
+        ]
+        .into_iter()
+        .find(|k| kinds.contains(k))
+        .unwrap_or(OutputKind::Other)
     };
     CommandInfo {
         kind,
@@ -98,9 +105,42 @@ pub fn classify(command: &str) -> CommandInfo {
     }
 }
 
-const BUILD: &str = r"\bcargo\s+(build|check|clippy)\b|\btsc\b|\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\bgo\s+(build|vet)\b|\bmake\b|\b(mvn|gradle|gradlew)\b|\b(webpack|next\s+build)\b|\bvite\s+build\b|\b(gcc|g\+\+|clang)\b";
-
-const INSTALL: &str = r"\b(npm|pnpm|yarn|bun)\s+(install|i|add|ci)\b|\b(pip|pip3)\s+install\b|\buv\s+(sync|pip\s+install|add)\b|\bpoetry\s+install\b|\bcargo\s+(install|fetch)\b|\b(apt|apt-get|brew)\s+install\b|\bgo\s+(get|mod\s+download)\b";
+/// The kind of output a simple command makes, from its program (not a runner or a view).
+fn kind_of(w: &[String]) -> Option<OutputKind> {
+    let first = shell::program_name(w.first()?);
+    let arg = |i: usize| w.get(i).map(String::as_str);
+    let pkg = matches!(first, "npm" | "pnpm" | "yarn" | "bun");
+    let kind = match (first, arg(1)) {
+        ("cargo", Some("build" | "check" | "clippy" | "b" | "c" | "doc")) => OutputKind::Build,
+        (
+            "tsc" | "webpack" | "make" | "mvn" | "gradle" | "gradlew" | "gcc" | "g++" | "clang"
+            | "clang++" | "cc" | "cmake" | "ninja" | "javac",
+            _,
+        ) => OutputKind::Build,
+        ("go", Some("build" | "vet")) | ("next" | "vite", Some("build")) => OutputKind::Build,
+        (_, Some("build")) if pkg => OutputKind::Build,
+        (_, Some("run"))
+            if pkg && arg(2).is_some_and(|s| s == "build" || s.starts_with("build:")) =>
+        {
+            OutputKind::Build
+        }
+        (_, Some("install" | "i" | "add" | "ci")) if pkg => OutputKind::Install,
+        ("pip" | "pip3" | "conda" | "mamba" | "gem", Some("install")) => OutputKind::Install,
+        ("uv", Some("sync" | "add")) | ("poetry", Some("install" | "add")) => OutputKind::Install,
+        ("uv", Some("pip")) if arg(2) == Some("install") => OutputKind::Install,
+        ("cargo", Some("install" | "fetch")) | ("bundle", Some("install")) => OutputKind::Install,
+        ("apt" | "apt-get" | "brew", Some("install")) | ("go", Some("get")) => OutputKind::Install,
+        ("go", Some("mod")) if arg(2) == Some("download") => OutputKind::Install,
+        ("git", _) => OutputKind::Git,
+        (
+            "grep" | "egrep" | "fgrep" | "rg" | "ag" | "ack" | "find" | "fd" | "ls" | "tree"
+            | "locate",
+            _,
+        ) => OutputKind::Search,
+        _ => return None,
+    };
+    Some(kind)
+}
 
 /// Some simple command prints file content: `cat`, `head`, `tail`, `less`, `bat`, `nl`,
 /// or `sed` without `-i`, with a file operand (`git log | head` reads a pipe, not a
@@ -160,22 +200,75 @@ fn segment_views(w: &[String]) -> bool {
 fn runner_of(words: &[String]) -> Option<TestRunner> {
     let w = shell::program_words(words);
     let first = shell::program_name(w.first()?);
-    let arg = |i: usize| w.get(i).map(String::as_str);
-    match (first, arg(1)) {
+    // Options of a package manager or make before the script or target:
+    // `pnpm --filter api test`, `make -C api test`, `npm --prefix web test`.
+    let rest = skip_options(first, &w[1..]);
+    let arg = |i: usize| rest.get(i).map(String::as_str);
+    let test_name =
+        |s: &str| s == "test" || s == "t" || s.starts_with("test:") || s.starts_with("test-");
+    match (first, arg(0)) {
         ("pytest" | "py.test", _) => Some(TestRunner::Pytest),
         ("vitest", _) => Some(TestRunner::Vitest),
         ("jest", _) => Some(TestRunner::Jest),
-        ("cargo", Some("test" | "nextest")) => Some(TestRunner::Cargo),
+        ("cargo", Some("test" | "nextest" | "t")) => Some(TestRunner::Cargo),
         ("go", Some("test")) => Some(TestRunner::Go),
-        ("npm" | "pnpm" | "yarn" | "bun", Some("test" | "t")) => Some(TestRunner::Other),
-        ("npm" | "pnpm" | "yarn" | "bun", Some("run")) if arg(2) == Some("test") => {
+        // `pnpm vitest run`, `yarn jest`: the package manager runs the runner.
+        ("npm" | "pnpm" | "yarn" | "bun", Some("vitest")) => Some(TestRunner::Vitest),
+        ("npm" | "pnpm" | "yarn" | "bun", Some("jest")) => Some(TestRunner::Jest),
+        ("npm" | "pnpm" | "yarn" | "bun", Some(s)) if test_name(s) => Some(TestRunner::Other),
+        ("npm" | "pnpm" | "yarn" | "bun", Some("run")) if arg(1).is_some_and(test_name) => {
             Some(TestRunner::Other)
         }
-        ("mocha" | "rspec" | "phpunit" | "tox" | "nox" | "ctest", _) => Some(TestRunner::Other),
-        ("mvn" | "gradle" | "gradlew", Some("test")) => Some(TestRunner::Other),
-        ("make", Some("test" | "check")) => Some(TestRunner::Other),
+        ("unittest" | "mocha" | "rspec" | "phpunit" | "tox" | "nox" | "ctest" | "nose2", _) => {
+            Some(TestRunner::Other)
+        }
+        // `python manage.py test` (Django).
+        (py, Some(script))
+            if (py.starts_with("python") || py == "./manage.py" || py == "manage.py")
+                && (script.ends_with("manage.py") && arg(1) == Some("test")
+                    || py.ends_with("manage.py") && script == "test") =>
+        {
+            Some(TestRunner::Other)
+        }
+        ("mvn" | "gradle" | "gradlew", Some(s)) if s == "test" || s == "check" => {
+            Some(TestRunner::Other)
+        }
+        ("make", Some(s))
+            if s == "test" || s == "check" || test_name(s) || s.starts_with("check-") =>
+        {
+            Some(TestRunner::Other)
+        }
+        ("deno" | "dotnet" | "swift" | "mix", Some("test")) => Some(TestRunner::Other),
+        ("rake", Some("test" | "spec")) => Some(TestRunner::Other),
         _ => None,
     }
+}
+
+/// Words after leading options that take a value (or not) for package managers and make.
+fn skip_options<'a>(program: &str, mut w: &'a [String]) -> &'a [String] {
+    let with_value: &[&str] = match program {
+        "npm" | "pnpm" | "yarn" | "bun" => &[
+            "--filter",
+            "-F",
+            "--prefix",
+            "-C",
+            "--dir",
+            "--workspace",
+            "-w",
+            "--cwd",
+        ],
+        "make" => &["-C", "-f", "-j", "--directory", "--file"],
+        _ => return w,
+    };
+    while let Some(o) = w.first().filter(|o| o.starts_with('-')) {
+        let n = if with_value.contains(&o.as_str()) {
+            2
+        } else {
+            1
+        };
+        w = &w[n.min(w.len())..];
+    }
+    w
 }
 
 fn detect_runner(cmd: &str) -> Option<TestRunner> {
@@ -187,9 +280,10 @@ fn detect_runner(cmd: &str) -> Option<TestRunner> {
 /// exactly (`| tail -20` becomes `| tail -50`), so loops and re-runs compare keys (R1.3).
 /// Commands without a test runner keep their text.
 pub fn command_key(cmd: &str) -> String {
-    let Some((_, seg)) = runner_segment(cmd) else {
+    let Some((runner, seg)) = runner_segment(cmd) else {
         return cmd.trim().to_string();
     };
+    let pytest = runner == TestRunner::Pytest;
     let words = shell::program_words(&seg);
     let mut key: Vec<&str> = Vec::new();
     let mut skip_next = false;
@@ -200,8 +294,17 @@ pub fn command_key(cmd: &str) -> String {
             continue;
         }
         let name = if i == 0 { shell::program_name(w) } else { w };
-        // Redirections and output-only options.
+        // Redirections and output-only options. A bare `>` takes the next word with it.
         let redirect = w.contains('>') || w.starts_with('<');
+        if redirect
+            && w.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&')
+                .trim_start_matches('>')
+                .trim_start_matches('<')
+                .is_empty()
+        {
+            skip_next = true;
+            continue;
+        }
         let noise = matches!(
             w,
             "-q" | "-qq"
@@ -216,13 +319,15 @@ pub fn command_key(cmd: &str) -> String {
                 | "--nocapture"
                 | "--color"
                 | "--no-cov"
-                | "-rA"
                 | "--exitfirst"
-        ) || ["--tb=", "--color=", "-r", "--maxfail=", "--durations="]
+        ) || ["--tb=", "--color=", "--maxfail=", "--durations="]
             .iter()
-            .any(|p| w.starts_with(p) && w.len() > p.len());
-        if w == "-p" {
-            skip_next = true; // `-p no:asyncio`
+            .any(|p| w.starts_with(p) && w.len() > p.len())
+            // pytest's report options (`-rA`, `-rfE`); go's `-run=TestA` is a selection.
+            || (pytest && re!(r"^-r[a-zA-Z]+$").is_match(w));
+        // pytest's `-p no:asyncio` loads a plugin; cargo's `-p crate` selects a package.
+        if pytest && w == "-p" {
+            skip_next = true;
             continue;
         }
         if !redirect && !noise {
@@ -233,7 +338,18 @@ pub fn command_key(cmd: &str) -> String {
     while key.last() == Some(&"--") {
         key.pop();
     }
-    key.join(" ")
+    let key = key.join(" ");
+    // With no selection, the directory is the selection: `cd api && npm test` and
+    // `cd web && npm test` run different suites (I3, L3).
+    let bare = key
+        .split(' ')
+        .skip(1)
+        .all(|w| matches!(w, "test" | "t" | "run" | "check" | "nextest"));
+    let (_, dirs) = shell::leading_cd(cmd);
+    match dirs.last() {
+        Some(d) if bare => format!("{key} (in {})", d.trim_end_matches('/')),
+        _ => key,
+    }
 }
 
 /// The command (probably) writes files: `sed -i`, `perl -i`, `tee`, `cp`/`mv`/`rm`/
@@ -269,19 +385,33 @@ fn segment_writes(seg: &[String]) -> bool {
         } else {
             rest
         };
-        !target.is_empty() && !target.starts_with('&') && !target.starts_with("/dev/")
+        !target.is_empty() && !target.starts_with('&') && !is_scratch(target)
     });
+    // `pytest | tee /tmp/t.log` keeps a copy of the output; it edits nothing (I3, L2).
+    let tee = first == "tee"
+        && w.iter()
+            .skip(1)
+            .any(|x| !x.starts_with('-') && !is_scratch(x));
     redirect
-        || matches!(
-            first,
-            "tee" | "cp" | "mv" | "rm" | "patch" | "truncate" | "touch"
-        )
+        || tee
+        || matches!(first, "cp" | "mv" | "rm" | "patch" | "truncate" | "touch")
         || (matches!(first, "sed" | "perl" | "ruby") && has("-i"))
         || (first == "git"
             && matches!(
                 w.get(1).map(String::as_str),
                 Some("apply" | "checkout" | "restore" | "stash")
             ))
+}
+
+/// A place for logs and scratch output, not the project's files.
+fn is_scratch(target: &str) -> bool {
+    target.starts_with("/dev/")
+        || target.starts_with("/tmp/")
+        || target.starts_with("/var/tmp/")
+        || target.starts_with("$TMPDIR")
+        || target.starts_with("${TMPDIR")
+        || target.ends_with(".log")
+        || target.ends_with(".out")
 }
 
 /// A here-doc script that writes files (`python3 - <<EOF … open(p, "w") … EOF`).
@@ -458,6 +588,117 @@ mod tests {
             "cargo test orders"
         );
         assert_eq!(command_key("ls -la"), "ls -la");
+    }
+
+    /// I3: build, install, git, and search come from the program in command position.
+    #[test]
+    fn kinds_come_from_the_program() {
+        for (cmd, kind) in [
+            ("grep -rn make src/", OutputKind::Search),
+            ("rg 'gcc' docs", OutputKind::Search),
+            ("git commit -m 'make it faster'", OutputKind::Git),
+            ("ls ~/.gradle", OutputKind::Search),
+            ("echo make sure", OutputKind::Other),
+            ("grep -rn 'pip install' docs", OutputKind::Search),
+            (
+                "source .venv/bin/activate && black --check src",
+                OutputKind::Other,
+            ),
+            ("cargo build --release 2>&1 | tail -5", OutputKind::Build),
+            ("npx tsc --noEmit", OutputKind::Build),
+            ("pnpm run build:web", OutputKind::Build),
+            ("make -j8", OutputKind::Build),
+            ("python -m pip install -e .", OutputKind::Install),
+            ("uv pip install requests", OutputKind::Install),
+            ("cd web && npm ci", OutputKind::Install),
+            ("git status && git diff --stat", OutputKind::Git),
+        ] {
+            assert_eq!(classify(cmd).kind, kind, "{cmd}");
+        }
+    }
+
+    /// I3, L7: runners behind package managers, options, and other frameworks.
+    #[test]
+    fn more_runners() {
+        for (cmd, runner) in [
+            ("python -m unittest discover -s tests", TestRunner::Other),
+            ("python manage.py test shop", TestRunner::Other),
+            ("./manage.py test", TestRunner::Other),
+            ("pnpm vitest run", TestRunner::Vitest),
+            ("yarn jest --ci", TestRunner::Jest),
+            ("bunx vitest", TestRunner::Vitest),
+            ("make -C api test", TestRunner::Other),
+            ("make test-unit", TestRunner::Other),
+            ("npm run test:unit", TestRunner::Other),
+            (
+                "uv run --with pytest-xdist --frozen pytest -n 4",
+                TestRunner::Pytest,
+            ),
+            ("pnpm --filter api test", TestRunner::Other),
+            ("deno test", TestRunner::Other),
+            ("dotnet test", TestRunner::Other),
+            ("cargo t", TestRunner::Cargo),
+        ] {
+            assert_eq!(classify(cmd).runner, Some(runner), "{cmd}");
+        }
+        assert_eq!(classify("python manage.py migrate").runner, None);
+        assert_eq!(classify("make build").runner, None);
+    }
+
+    /// I3, L3: different selections give different keys.
+    #[test]
+    fn keys_keep_the_selection() {
+        assert_ne!(
+            command_key("cargo test -p tend-core"),
+            command_key("cargo test -p tend-cli")
+        );
+        assert_ne!(
+            command_key("go test -run=TestA ./pkg"),
+            command_key("go test -run=TestB ./pkg")
+        );
+        assert_ne!(
+            command_key("cd api && npm test"),
+            command_key("cd web && npm test")
+        );
+        assert_eq!(command_key("cd api && npm test"), "npm test (in api)");
+        assert_eq!(
+            command_key("pytest -rfE -p no:x tests/a.py"),
+            "pytest tests/a.py"
+        );
+    }
+
+    /// I3, L2: keeping a copy of the output is not an edit.
+    #[test]
+    fn output_logs_are_not_writes() {
+        for cmd in [
+            "pytest -q 2>&1 | tee /tmp/t.log",
+            "cargo test > /tmp/out.txt; tail -5 /tmp/out.txt",
+            "make check 2>&1 | tee build.log",
+            "pytest > run.out",
+        ] {
+            assert!(!writes_files(cmd), "{cmd}");
+        }
+        for cmd in ["echo x | tee src/a.py", "echo x >> requirements.txt"] {
+            assert!(writes_files(cmd), "{cmd}");
+        }
+    }
+
+    /// I3, S3: a comment ends at the newline; the next line is its own command.
+    #[test]
+    fn comment_does_not_join_lines() {
+        assert_eq!(
+            classify("cd api  # go there\npytest -q").runner,
+            Some(TestRunner::Pytest)
+        );
+        assert_eq!(
+            test_write_targets("cd /app  # repo root\nsed -i 's/==/!=/' tests/test_a.py"),
+            ["tests/test_a.py"]
+        );
+        // S4: ANSI-C quoting does not swallow the rest of the line.
+        assert_eq!(
+            classify("echo $'a\\'b'; pytest -q").runner,
+            Some(TestRunner::Pytest)
+        );
     }
 
     /// R0.5 (D7): runners count only in command position.

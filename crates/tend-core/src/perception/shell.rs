@@ -74,11 +74,11 @@ pub fn parse(cmd: &str) -> CommandLine {
             }
             ' ' | '\t' => end_word(&mut words, &mut word, &mut in_word),
             // A comment runs to the end of the line.
+            // A comment runs to the end of the line; the newline itself still ends the
+            // segment (I3, S3).
             '#' if !in_word => {
-                for n in chars.by_ref() {
-                    if n == '\n' {
-                        break;
-                    }
+                while chars.peek().is_some_and(|&n| n != '\n') {
+                    chars.next();
                 }
             }
             '\n' => {
@@ -118,6 +118,22 @@ pub fn parse(cmd: &str) -> CommandLine {
             }
             '{' | '}' if !in_word => {
                 line.complex = true;
+            }
+            // ANSI-C quoting: `$'a\'b'` is one word, `\'` does not end it (I3, S4).
+            '$' if chars.peek() == Some(&'\'') => {
+                in_word = true;
+                chars.next();
+                while let Some(q) = chars.next() {
+                    match q {
+                        '\\' => {
+                            if let Some(n) = chars.next() {
+                                word.push(n);
+                            }
+                        }
+                        '\'' => break,
+                        _ => word.push(q),
+                    }
+                }
             }
             '$' if chars.peek() == Some(&'(') => {
                 line.complex = true;
@@ -185,15 +201,40 @@ pub fn program_words(segment: &[String]) -> &[String] {
     loop {
         match w {
             [first, rest @ ..] if is_assignment(first) => w = rest,
-            [first, rest @ ..] if matches!(first.as_str(), "env" | "time" | "nice" | "npx") => {
+            [first, rest @ ..]
+                if matches!(
+                    first.as_str(),
+                    "env" | "time" | "nice" | "npx" | "bunx" | "pnpx"
+                ) =>
+            {
                 w = rest
+            }
+            // `uv run --with X --frozen pytest`: options of `uv run` before the program.
+            [a, b, rest @ ..] if a == "uv" && b == "run" => {
+                let mut r = rest;
+                while let Some(o) = r.first().filter(|o| o.starts_with('-')) {
+                    let takes_value = matches!(
+                        o.as_str(),
+                        "--with"
+                            | "--extra"
+                            | "--group"
+                            | "--python"
+                            | "-p"
+                            | "--package"
+                            | "--project"
+                            | "--directory"
+                            | "--env-file"
+                            | "--with-requirements"
+                    );
+                    r = &r[if takes_value { 2 } else { 1 }.min(r.len())..];
+                }
+                w = r
             }
             [first, _, rest @ ..] if first == "timeout" => w = rest,
             [a, b, rest @ ..]
                 if matches!(
                     (a.as_str(), b.as_str()),
-                    ("uv" | "poetry" | "pipenv" | "hatch", "run")
-                        | ("pnpm" | "bundle" | "yarn", "exec")
+                    ("poetry" | "pipenv" | "hatch", "run") | ("pnpm" | "bundle" | "yarn", "exec")
                 ) =>
             {
                 w = rest

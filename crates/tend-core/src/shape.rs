@@ -79,9 +79,30 @@ pub fn shape(output: &str, level: u8, max_ratio: f32) -> Option<Shaped> {
     }
 
     // Important lines start a block that runs to the next blank line (max block_max lines).
+    // A Python traceback lists the innermost frame, where the error is, last: keep its
+    // first line and its end instead (I3, S2).
     let mut i = 0;
     while i < n {
         if is_important(&lines[i]) && !is_pass(&lines[i]) {
+            let full_end = (i + 1..n)
+                .find(|&j| lines[j].trim().is_empty())
+                .unwrap_or(n);
+            if full_end - i > p.block_max
+                && lines[i]
+                    .trim_start()
+                    .starts_with("Traceback (most recent call last)")
+            {
+                keep[i] = true;
+                for k in keep
+                    .iter_mut()
+                    .take(full_end)
+                    .skip(full_end + 1 - p.block_max)
+                {
+                    *k = true;
+                }
+                i = full_end;
+                continue;
+            }
             let end = (i + p.block_max).min(n);
             let mut j = i;
             while j < end && (j == i || !lines[j].trim().is_empty()) {
@@ -401,6 +422,35 @@ mod tests {
     #[test]
     fn level_zero_is_off() {
         assert!(shape(PYTEST, 0, 0.7).is_none());
+    }
+
+    /// I3, S2: a deep Python traceback keeps its innermost frame and the error.
+    #[test]
+    fn deep_traceback_keeps_the_innermost_frame() {
+        let mut out = String::new();
+        for i in 0..200 {
+            out.push_str(&format!("tests/test_{i}.py::test_ok PASSED\n"));
+        }
+        out.push_str("Traceback (most recent call last):\n");
+        for i in 0..40 {
+            out.push_str(&format!(
+                "  File \"/app/shop/layer{i}.py\", line {i}, in f{i}\n    return f{}(x)\n",
+                i + 1
+            ));
+        }
+        out.push_str("  File \"/app/shop/pricing.py\", line 9, in rate\n    return RATES[region]\nshop.pricing.RateMissing: 'EU'\n\n");
+        for i in 0..200 {
+            out.push_str(&format!("tests/test_more_{i}.py::test_ok PASSED\n"));
+        }
+        for level in [2, 3] {
+            let s = shape(&out, level, 0.9).expect("shaped");
+            assert!(s.text.contains("pricing.py"), "level {level}:\n{}", s.text);
+            assert!(s.text.contains("RateMissing: 'EU'"), "level {level}");
+            assert!(
+                s.text.contains("Traceback (most recent call last)"),
+                "level {level}"
+            );
+        }
     }
 
     #[test]

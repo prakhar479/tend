@@ -201,7 +201,26 @@ Review after the checkpoint: about 60 findings, most of them confirmed. Batches 
     - T1: a table of 50 weakening cases, each with its expected reason, and 12 neutral cases. Six rule mutations each fail it.
     - G6: controller tests for an agent without deny, and for a Bash-write warning that leaves nothing to allow.
   - Retro over the owner's 108 real Edit/Write edits: still 0 false flags.
-- [ ] **I3. Loops and classification:** L1 errors in passing runs · L2 tee as an edit · L3 key collisions · L4 tail variants · L5 and L6 signatures · S1 build regex · S2 traceback tails · S3 comment newline · T4 property tests.
+- [x] **I3. Loops and classification:** L1 errors in passing runs · L2 tee as an edit · L3 key collisions · L4 tail variants · L5 and L6 signatures · S1 build regex · S2 traceback tails · S3 comment newline · T4 property tests.
+  Done:
+  - L1: the generic error fallback is skipped when the runner reports a pass and no failure.
+  - L2: `tee` and redirects to `/tmp`, `.log`, or `.out` are not edits.
+  - L3: `-p` and `-r…` are dropped from keys only for pytest; a bare runner keys on its `cd` dir (`npm test (in api)`); a `> file` redirect target stays out of the key.
+  - L4: a summary-only run keeps the command's known failures and counts as an attempt.
+  - L5: paths keep their file name; `:N` and `(N, N)` are normalized only after a file name; `id=`, `due to N previous`, temp names (with a digit), and only fractional or `ms` timings are normalized.
+  - L6: unittest parser; pytest ids with spaces; jest warnings ignored.
+  - S1: build, install, git, and search come from the program in command position.
+  - S2: a deep Python traceback keeps its first line and its end.
+  - S3: a comment no longer swallows the newline.
+  - S4: ANSI-C `$'…'` quoting.
+  - L7 (from I6): unittest, Django, `pnpm vitest`, `yarn jest`, `bunx`, `make -C dir test`, `test:*` scripts, `uv run --with`, `--filter`, deno, dotnet, swift, mix, rake.
+  - T4: `tests/properties.rs` with a seeded generator:
+    - shape keeps every failure over 300 spliced inputs;
+    - noise does not change a signature, but a value does;
+    - keys follow the selection;
+    - the shell reader never panics.
+    It found the redirect-target key bug.
+  - Retro (real work): 1 loop. It is the dev session re-running the deliberately failing demo suite while editing tend. It counts as a loop by definition: edits anywhere count as attempts.
 - [ ] **I4. Resources and UX:** F4 big Writes · F5 `tend run` streaming · R1 session cleanup · U1–U9.
 - [ ] **I5. Tests and CI:** T3, T5–T9, X1.
 - [ ] **I6. Later:** F6, F8 + P1, R3, R4, L7, U10, U11, simplifications.

@@ -1454,6 +1454,23 @@ mod tests {
         }
     }
 
+    /// I3, L1 and L2: a passing run that logs an error, re-run through `tee`, is no loop.
+    #[test]
+    fn logged_error_in_a_passing_run_is_not_a_loop() {
+        let out = "ConnectionError: refused (retrying)\n3 passed in 0.12s\n";
+        let mut c = ctl(Mode::Optimize);
+        for i in 0..5 {
+            c.handle(edited("src/app.py", &format!("h{i}")), i * 60_000);
+            let d = c.handle(bash("pytest -s tests/test_retry.py", out), i * 60_000);
+            assert!(d.response.add_context.is_empty(), "run {i}");
+        }
+        let mut c = ctl(Mode::Optimize);
+        for i in 0..5 {
+            let d = c.handle(bash("pytest -q 2>&1 | tee /tmp/t.log", PYTEST), i * 60_000);
+            assert!(d.response.add_context.is_empty(), "tee run {i}");
+        }
+    }
+
     /// Checkpoint C2: reading a log or test file that shows a failure is not a run.
     #[test]
     fn viewing_failure_text_is_not_a_loop() {
