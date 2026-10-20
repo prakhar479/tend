@@ -158,6 +158,8 @@ pub struct Controller {
     allowed: BTreeMap<EditKey, (String, u64)>,
     /// Bash calls wrapped by `tend run`, by tool use id.
     wrapped: BTreeMap<String, Wrapped>,
+    /// (actual, expected) values the latest failing run of each command showed (E4).
+    failure_values: BTreeMap<String, Vec<(String, String)>>,
     /// Claude Code ran a call as written although tend rewrote it: wrap nothing more.
     rewrite_ignored: bool,
     /// Command keys never to wrap again: a wrapped run of them got no tool result
@@ -289,6 +291,7 @@ impl Controller {
             last_blocked: None,
             allowed: BTreeMap::new(),
             wrapped: BTreeMap::new(),
+            failure_values: BTreeMap::new(),
             rewrite_ignored: false,
             no_wrap: std::collections::BTreeSet::new(),
             last_summary: None,
@@ -450,6 +453,7 @@ impl Controller {
                 self.blocked.clear();
                 self.last_blocked = None;
                 self.allowed.clear();
+                self.failure_values.clear();
             }
             Event::TurnEnded => {
                 let ev = self.push(&mut d, now_ms, vec![], Body::Event { event });
@@ -613,6 +617,18 @@ impl Controller {
         } else {
             Vec::new()
         };
+        // Values the failures show, by run, for the expected-to-actual rule (E4).
+        if matches!(kind, OutputKind::Test | OutputKind::Build) {
+            let pairs: Vec<(String, String)> = failures
+                .iter()
+                .flat_map(|f| guard::value_pairs(&f.message))
+                .collect();
+            if pairs.is_empty() {
+                self.failure_values.remove(command);
+            } else if self.failure_values.len() < 64 || self.failure_values.contains_key(command) {
+                self.failure_values.insert(command.to_string(), pairs);
+            }
+        }
         let mut looped: Vec<(String, String, u64, u64)> = Vec::new();
         let active = self.active_ms;
         // The rules answer "same failure?" from the signature alone, so a judgment is
@@ -865,6 +881,20 @@ impl Controller {
             _ => (String::new(), String::new(), false),
         };
         let ev = self.push(d, now, vec![], Body::Event { event });
+        // Rewriting every expected snapshot makes a failing suite pass by definition: say
+        // so, so the agent (and the ledger) checks what changed (E5). It never blocks.
+        if let Some(form) = crate::perception::snapshot_update(&command) {
+            let message = format!(
+                "tend: `{form}` rewrites expected snapshots or golden files. Check that only the intended ones change."
+            );
+            let action = ActionKind::Guard {
+                path: "snapshots".into(),
+                decision: GuardDecision::Warn,
+            };
+            if self.act(d, now, ev, action, message.clone()) {
+                d.response.add_context.push(message);
+            }
+        }
         if !runs_tend_allow(&command) {
             self.maybe_wrap(d, now, ev, tool_use_id, command, rewrite_ok);
             return;
@@ -1047,6 +1077,17 @@ impl Controller {
         }
         let q = Question::TestWeakened { path, old, new };
         let (answer, source) = self.broker.ask(&q);
+        // E4: the edit makes the test expect what the failing run produced.
+        let pairs: Vec<(String, String)> =
+            self.failure_values.values().flatten().cloned().collect();
+        let answer = match (answer, guard::expected_to_actual(old, new, &pairs)) {
+            (Answer::Weakened { mut reasons }, Some(r)) => {
+                reasons.push(r);
+                Answer::Weakened { reasons }
+            }
+            (_, Some(r)) => Answer::Weakened { reasons: vec![r] },
+            (a, None) => a,
+        };
         let (name, version) = (q.name(), q.version());
         let j = self.push(
             d,

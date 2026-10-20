@@ -218,6 +218,76 @@ pub fn assess(old: &str, new: &str) -> Answer {
     }
 }
 
+/// (actual, expected) values a failure message shows: pytest `assert 0 == 1`, unittest
+/// `5 != 6`, jest `Expected: 6` / `Received: 5`, Go `got 5, want 6`, Rust `left: 5` /
+/// `right: 6` (both orders: Rust does not say which side is expected).
+pub fn value_pairs(message: &str) -> Vec<(String, String)> {
+    macro_rules! lit {
+        () => {
+            r#"(-?[0-9][0-9._eE+-]*|'[^']{0,40}'|"[^"]{0,40}"|True|False|None|true|false|null)"#
+        };
+    }
+    let mut out = Vec::new();
+    for re in [
+        re!(concat!(r"\bassert ", lit!(), " == ", lit!())),
+        re!(concat!(r"(?:^|\s)", lit!(), " != ", lit!())),
+        re!(concat!(r"\bgot:? ", lit!(), ",? want:? ", lit!())),
+    ] {
+        if let Some(c) = re.captures(message) {
+            out.push((c[1].to_string(), c[2].to_string()));
+        }
+    }
+    let field = |re: &regex::Regex| re.captures(message).map(|c| c[1].to_string());
+    let (expected, received) = (
+        field(re!(concat!(r"\bExpected:\s*", lit!()))),
+        field(re!(concat!(r"\bReceived:\s*", lit!()))),
+    );
+    if let (Some(e), Some(r)) = (expected, received) {
+        out.push((r, e));
+    }
+    let (left, right) = (
+        field(re!(concat!(r"\bleft:\s*", lit!()))),
+        field(re!(concat!(r"\bright:\s*", lit!()))),
+    );
+    if let (Some(l), Some(r)) = (left, right) {
+        out.push((l.clone(), r.clone()));
+        out.push((r, l));
+    }
+    out.retain(|(a, e)| a != e);
+    out
+}
+
+/// The edit changes an expected value to the actual value of a recent failure, so the
+/// test now agrees with the bug (reference Phase 3; I6 E4). `pairs`: (actual, expected).
+pub fn expected_to_actual(old: &str, new: &str, pairs: &[(String, String)]) -> Option<String> {
+    let (old, new) = (code_only_keep_strings(old), code_only_keep_strings(new));
+    let count = |text: &str, lit: &str| {
+        regex::Regex::new(&format!(r"(^|[^\w.]){}($|[^\w.])", regex::escape(lit)))
+            .map(|r| r.find_iter(text).count())
+            .unwrap_or(0)
+    };
+    pairs.iter().find_map(|(actual, expected)| {
+        let fewer_expected = count(&new, expected) < count(&old, expected);
+        let more_actual = count(&new, actual) > count(&old, actual);
+        (fewer_expected && more_actual).then(|| {
+            format!(
+                "expected value changed to the failing run's actual value ({expected} → {actual})"
+            )
+        })
+    })
+}
+
+/// Code without comments, strings kept as written (literals are what E4 compares).
+fn code_only_keep_strings(text: &str) -> String {
+    text.lines()
+        .map(|l| {
+            let l = l.split(" # ").next().unwrap_or(l);
+            l.split(" // ").next().unwrap_or(l)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// An assertion that cannot fail: `assert True`, `assert True, "msg"`, `assert 1 == 1`,
 /// `self.assertTrue(True)`, `assert!(true)`, `assert_eq!(1, 1)`, `expect(1).toBe(1)`.
 fn always_passes(line: &str) -> bool {
@@ -700,6 +770,34 @@ mod tests {
                 assess(old, new)
             );
         }
+    }
+
+    #[test]
+    fn expected_value_changed_to_actual() {
+        let pairs = value_pairs("FAILED tests/t.py::test_total - assert 0 == 1");
+        assert_eq!(pairs, [("0".to_string(), "1".to_string())]);
+        let old = "def test_total():\n    assert total([]) == 1\n";
+        let new = "def test_total():\n    assert total([]) == 0\n";
+        assert!(expected_to_actual(old, new, &pairs)
+            .unwrap()
+            .contains("(1 → 0)"));
+        // A different fix (the code, or another value) is not flagged.
+        assert!(expected_to_actual(
+            old,
+            "def test_total():\n    assert total([]) == 1\n    assert x\n",
+            &pairs
+        )
+        .is_none());
+        let jest = value_pairs("expect(received).toBe(expected); Expected: 6; Received: 5");
+        assert_eq!(jest, [("5".to_string(), "6".to_string())]);
+        assert!(
+            expected_to_actual("expect(t()).toBe(6);", "expect(t()).toBe(5);", &jest).is_some()
+        );
+        let rust = value_pairs("assertion `left == right` failed; left: 5; right: 6");
+        assert!(expected_to_actual("assert_eq!(t(), 6);", "assert_eq!(t(), 5);", &rust).is_some());
+        let s = value_pairs("AssertionError: assert 'EUR' == 'USD'");
+        assert!(expected_to_actual("assert c == 'USD'", "assert c == 'EUR'", &s).is_some());
+        assert!(value_pairs("KeyError: 'total'").is_empty());
     }
 
     #[test]

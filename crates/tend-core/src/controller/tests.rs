@@ -960,3 +960,51 @@ fn entries_round_trip_through_json() {
         assert_eq!(serde_json::from_str::<Entry>(&s).unwrap(), e);
     }
 }
+
+/// E4: after `assert 0 == 1` fails, changing the test's expected 1 to 0 is flagged.
+#[test]
+fn expected_value_changed_to_the_failing_value_is_flagged() {
+    let out = "FAILED tests/test_t.py::test_total - assert 0 == 1\n1 failed, 3 passed in 0.10s\n";
+    let mut c = ctl(Mode::Optimize);
+    c.handle(bash("pytest tests/test_t.py", out), 0);
+    let edit = |new: &str| Event::EditProposed {
+        tool_use_id: "x".into(),
+        path: "tests/test_t.py".into(),
+        old_text: "    assert total([]) == 1\n".into(),
+        new_text: new.into(),
+    };
+    let d = c.handle(edit("    assert total([]) == 0\n"), 1);
+    match &d.response.permission {
+        Some(Permission::Deny(m)) => {
+            assert!(m.contains("failing run's actual value (1 → 0)"), "{m}")
+        }
+        p => panic!("{p:?}"),
+    }
+    // Fixing the code instead, or a passing run since, is not flagged.
+    c.handle(bash("pytest tests/test_t.py", "4 passed in 0.10s\n"), 2);
+    assert!(c
+        .handle(edit("    assert total([]) == 0\n"), 3)
+        .response
+        .permission
+        .is_none());
+}
+
+/// E5: a snapshot-rewriting run is pointed out, never blocked.
+#[test]
+fn snapshot_update_runs_get_a_warning() {
+    let mut c = ctl(Mode::Optimize);
+    let d = c.handle(requested("t1", "npx jest -u", true), 0);
+    assert!(d.response.permission.is_none());
+    assert!(d
+        .response
+        .add_context
+        .iter()
+        .any(|m| m.contains("`jest -u` rewrites expected snapshots")));
+    let mut look = ctl(Mode::Look);
+    let d = look.handle(requested("t1", "cargo insta accept", true), 0);
+    assert!(d.response.add_context.is_empty());
+    assert!(d
+        .entries
+        .iter()
+        .any(|e| matches!(&e.body, Body::Action { applied: false, .. })));
+}

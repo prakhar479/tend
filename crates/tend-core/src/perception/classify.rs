@@ -465,6 +465,22 @@ fn write_targets(cmd: &str, keep: impl Fn(&str) -> bool) -> Vec<String> {
     out.into_iter().take(MAX_WRITE_TARGETS).collect()
 }
 
+/// A command that rewrites expected snapshots or golden files wholesale (I6 E5):
+/// `jest -u`, `vitest -u`, `--update-snapshots`, `cargo insta accept`,
+/// `pytest --snapshot-update`, `--force-regen`, `go test -update`, `UPDATE_GOLDEN=1`.
+/// Returns the part that matched.
+pub fn snapshot_update(cmd: &str) -> Option<String> {
+    let runner_flag =
+        re!(r"\b(jest|vitest)\b[^|;&]*?\s(-u|--update(Snapshot)?|--updateSnapshot)\b");
+    let other = re!(
+        r"--update-snapshots?\b|--updateSnapshot\b|--snapshot-update\b|--force-regen\b|--update-goldens?\b|\binsta\s+(accept|review)\b|\bcargo\s+insta\s+test\b[^|;&]*--accept\b|\bINSTA_UPDATE=(always|new)\b|\bUPDATE_(GOLDEN|GOLDENS|SNAPSHOT|SNAPSHOTS|EXPECT)=\S+|\bgo\s+test\b[^|;&]*\s-update\b"
+    );
+    runner_flag
+        .find(cmd)
+        .or_else(|| other.find(cmd))
+        .map(|m| m.as_str().trim().to_string())
+}
+
 /// The first simple command that runs a test runner, and its words.
 pub fn runner_segment(cmd: &str) -> Option<(TestRunner, Vec<String>)> {
     shell::parse(cmd)
@@ -663,6 +679,34 @@ mod tests {
             command_key("pytest -rfE -p no:x tests/a.py"),
             "pytest tests/a.py"
         );
+    }
+
+    /// E5: commands that rewrite snapshots wholesale.
+    #[test]
+    fn snapshot_updates() {
+        for cmd in [
+            "npx jest -u",
+            "pnpm vitest run --update",
+            "npm test -- --updateSnapshot",
+            "cargo insta accept",
+            "cargo insta test --accept",
+            "pytest --snapshot-update tests/",
+            "pytest --force-regen",
+            "UPDATE_GOLDEN=1 go test ./...",
+            "go test ./pkg -update",
+            "npx playwright test --update-snapshots",
+        ] {
+            assert!(snapshot_update(cmd).is_some(), "{cmd}");
+        }
+        for cmd in [
+            "npx jest",
+            "git log -u",
+            "pytest -q",
+            "cargo update",
+            "apt-get update",
+        ] {
+            assert!(snapshot_update(cmd).is_none(), "{cmd}");
+        }
     }
 
     /// I3, L2: keeping a copy of the output is not an edit.
