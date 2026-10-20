@@ -189,7 +189,18 @@ Review after the checkpoint: about 60 findings, most of them confirmed. Batches 
     - U11: 2 ms start poll.
     - R1, in part: the agent binary is checked first; a launch with no conversation leaves no session; the new `keep_days` (default 30) auto-prunes at launch.
   - Live check with Claude Code 2.1.303: the quoted hooks fire.
-- [ ] **I2. Guard:** G1 comments and strings · G2 inline and other test files · G3 skip forms · G4 deleted tests, early return, swallowed asserts · G5 always-pass variants · G6 + T1 table tests.
+- [x] **I2. Guard:** G1 comments and strings · G2 inline and other test files · G3 skip forms · G4 deleted tests, early return, swallowed asserts · G5 always-pass variants · G6 + T1 table tests.
+  Done:
+  - G1: `guard::code_only` strips comments and replaces each string with a hashed placeholder, so commented-out asserts are flagged and comment or import changes are not. Only assertion calls count.
+  - G2: `guard::judges` also judges test code outside test paths (`#[test]`, `#[cfg(test)]`, `def test_`, `func Test…(t *testing.T)`, `@Test`), and the path rule now covers `tests.py`, `tests.rs`, `*Tests.cs`, and `_spec.rb`. Bash writes snapshot source files that hold tests (`code_write_targets`).
+  - G3: skip forms widened, with focus (`.only`, `fit`) and `#[should_panic]` as separate reasons.
+  - G4: tests removed or renamed, `except AssertionError` or bare `except:` added, a `return` before the asserts.
+  - G5: always-pass variants with a message, plus same-operand asserts.
+  - Also: tolerance raised (`rel=`, `atol=`, …) and precision lowered (`toBeCloseTo`, `places=`), from the reference's Phase 3 list.
+  - Tests:
+    - T1: a table of 50 weakening cases, each with its expected reason, and 12 neutral cases. Six rule mutations each fail it.
+    - G6: controller tests for an agent without deny, and for a Bash-write warning that leaves nothing to allow.
+  - Retro over the owner's 108 real Edit/Write edits: still 0 false flags.
 - [ ] **I3. Loops and classification:** L1 errors in passing runs · L2 tee as an edit · L3 key collisions · L4 tail variants · L5 and L6 signatures · S1 build regex · S2 traceback tails · S3 comment newline · T4 property tests.
 - [ ] **I4. Resources and UX:** F4 big Writes · F5 `tend run` streaming · R1 session cleanup · U1–U9.
 - [ ] **I5. Tests and CI:** T3, T5–T9, X1.

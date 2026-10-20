@@ -73,7 +73,7 @@ fn expand(base: &Path, target: &str) -> Vec<PathBuf> {
 /// Snapshot the test files a Bash command may write (R1.4). Relative paths start where
 /// the command runs: the hook's cwd, then any leading `cd DIR &&`.
 fn snapshot(command: &str, cwd: &str) -> Vec<(PathBuf, Option<String>)> {
-    let targets = tend_core::perception::test_write_targets(command);
+    let targets = tend_core::perception::code_write_targets(command);
     if targets.is_empty() {
         return vec![];
     }
@@ -84,7 +84,13 @@ fn snapshot(command: &str, cwd: &str) -> Vec<(PathBuf, Option<String>)> {
         if files.len() >= MAX_SNAPSHOT_FILES || files.iter().any(|(p, _)| *p == path) {
             continue;
         }
-        if let Ok(text) = read_text(&path) {
+        let Ok(text) = read_text(&path) else {
+            continue;
+        };
+        // A source file counts only when it holds tests (Rust unit tests in `src/`).
+        let is_test = tend_core::guard::is_test_path(&path.to_string_lossy())
+            || text.as_deref().is_some_and(tend_core::guard::has_test_code);
+        if is_test {
             files.push((path, text));
         }
     }
@@ -660,6 +666,44 @@ mod tests {
     }
 
     /// R1.4: test files a Bash command names are compared before and after it runs.
+    /// I2 G2: a Bash write to a source file that holds unit tests is guarded too; a
+    /// source file without tests is not snapshotted.
+    #[test]
+    fn bash_writes_to_inline_tests_become_file_changes() {
+        let dir = std::env::temp_dir().join(format!("tend-bashw-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let lib = dir.join("src/lib.rs");
+        let plain = dir.join("src/main.rs");
+        let tests = "fn t() -> u32 { 6 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t6() { assert_eq!(super::t(), 6); }\n}\n";
+        std::fs::write(&lib, tests).unwrap();
+        std::fs::write(&plain, "fn main() { assert!(true); }\n").unwrap();
+
+        let mut c = ClaudeCode::default();
+        let mut pre = fixture("post_tool_use_bash.json");
+        pre["hook_event_name"] = json!("PreToolUse");
+        pre.as_object_mut().unwrap().remove("tool_response");
+        pre["cwd"] = json!(dir.display().to_string());
+        pre["tool_input"]["command"] = json!("sed -i '/assert/d' src/lib.rs src/main.rs");
+        c.map("PreToolUse", &pre);
+        std::fs::write(&lib, tests.replace("assert_eq!(super::t(), 6);", "")).unwrap();
+        std::fs::write(&plain, "fn main() { }\n").unwrap();
+
+        let mut post = fixture("post_tool_use_bash.json");
+        post["cwd"] = pre["cwd"].clone();
+        post["tool_input"] = pre["tool_input"].clone();
+        let paths: Vec<String> = c
+            .map("PostToolUse", &post)
+            .iter()
+            .filter_map(|e| match e {
+                Event::FileChanged { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(paths, [lib.display().to_string()]);
+    }
+
     #[test]
     fn bash_writes_to_test_files_become_file_changes() {
         let dir = std::env::temp_dir().join(format!("tend-bashw-{}", std::process::id()));

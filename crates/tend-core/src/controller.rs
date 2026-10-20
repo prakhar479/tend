@@ -12,7 +12,7 @@ type EditKey = (String, String, String);
 use crate::broker::{Answer, Broker, Question};
 use crate::capability::Capabilities;
 use crate::event::{Event, Mode};
-use crate::guard::{is_test_path, GuardDecision};
+use crate::guard::{self, GuardDecision};
 use crate::loops::{LoopDetector, LoopSignal};
 use crate::perception::{
     classify, command_key, extract_failures, shell, writes_files, Failure, OutputKind,
@@ -966,7 +966,7 @@ impl Controller {
         old: &str,
         new: &str,
     ) -> Option<(u64, Vec<String>)> {
-        if !is_test_path(path) {
+        if !guard::judges(path, old, new) {
             return None;
         }
         let q = Question::TestWeakened { path, old, new };
@@ -1638,6 +1638,54 @@ mod tests {
             matches!(d.response.permission, Some(Permission::Deny(_))),
             "only once"
         );
+    }
+
+    /// G6: an agent that cannot deny gets a warning, and a warning is nothing to allow.
+    #[test]
+    fn guard_warns_where_the_agent_cannot_deny() {
+        let caps = Capabilities {
+            deny: false,
+            ask: false,
+            ..Capabilities::CLAUDE_CODE
+        };
+        let mut c = Controller::new(Config::default(), caps, Mode::Optimize);
+        let d = c.handle(weakening(), 0);
+        assert_eq!(d.response.permission, None);
+        assert!(d
+            .response
+            .add_context
+            .iter()
+            .any(|m| m.contains("may weaken tests")));
+        assert!(!d.response.add_context[0].contains("tend allow"));
+        assert!(c.allow(None, 1).is_err(), "a warning blocks nothing");
+    }
+
+    /// G6: the Bash-write warning (R1.4) is not a block either.
+    #[test]
+    fn bash_write_warning_is_nothing_to_allow() {
+        let mut c = ctl(Mode::Optimize);
+        c.handle(
+            bash_changed("/r/tests/test_api.py", "assert a\nassert b\n", "assert a\n"),
+            0,
+        );
+        assert!(c.allow(None, 1).is_err());
+    }
+
+    /// G2: an edit of a Rust unit test in `src/` is judged.
+    #[test]
+    fn inline_rust_test_edit_is_guarded() {
+        let mut c = ctl(Mode::Optimize);
+        let d = c.handle(
+            Event::EditProposed {
+                tool_use_id: "x".into(),
+                path: "crates/shop/src/orders.rs".into(),
+                old_text: "#[test]\nfn total() {\n    assert_eq!(total(), 6);\n}\n".into(),
+                new_text: "#[test]\n#[ignore]\nfn total() {\n    assert_eq!(total(), 6);\n}\n"
+                    .into(),
+            },
+            0,
+        );
+        assert!(matches!(d.response.permission, Some(Permission::Deny(_))));
     }
 
     fn requested(id: &str, cmd: &str, rewrite_ok: bool) -> Event {
