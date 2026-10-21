@@ -140,7 +140,13 @@ Rules of the form "on event, do action". Events come from the existing controlle
 | `oneshot` | `claude -p "<task>"` per task. A fresh session each time. | No; one task, then exit. | **Default for workers** (owner decision): clean context per task; best of N |
 | `attached` | The user's own terminal (`tend claude --tend-role lead`). | No. Only at its next hook. The user sees an unread count. | Human-in-the-loop leads |
 
-`stream` mode is the key. Without it, an idle agent cannot be woken, and leader topologies would need tricks with the Stop hook. **[Verify]** that hooks fire the same way in stream mode, that a new turn can be sent at any idle point, and how an interrupt works there (spike F-S1).
+`stream` mode is the key. Without it, an idle agent cannot be woken, and leader topologies would need tricks with the Stop hook. **Confirmed by spike F-S1 (2026-10-21, `docs/TASKS.md`):**
+- Hooks fire per turn as in a normal session, under the `--session-id` tend picks.
+- A new user line wakes an idle session; lines sent during a turn are queued.
+- An interrupt is the control request `{"type":"control_request","request":{"subtype":"interrupt"}}`; the session takes the next turn after it.
+- Closing stdin ends the session cleanly.
+- `UserPromptSubmit` context reaches the model, so attached sessions can be told things at their next prompt.
+- Forks and resumes copy the parent's messages into a new transcript, so token budgets count each message uuid once.
 
 Other useful flags (Claude Code 2.1.306, from `claude --help`):
 - `--session-id <uuid>`: tend picks the id, so the ledger, hub, and transcript line up from the start.
@@ -281,7 +287,7 @@ This replaces F3 and F5 in `docs/fleet-2026-10-21.md`. F1, F2, F4, and F6 stay. 
 
 | # | Task | Acceptance | Size |
 |---|---|---|---|
-| F-S1 | **Spike: stream mode.** Long-lived `claude -p` with stream-json in and out, under tend's `--settings`. Do hooks fire? Can a turn be sent when idle? What does an interrupt look like? Does `--resume --fork-session` work headless with hooks? | Results under "Spike results" | S |
+| F-S1 | **Spike: stream mode.** (Done 2026-10-21: all confirmed.) Long-lived `claude -p` with stream-json in and out, under tend's `--settings`. Do hooks fire? Can a turn be sent when idle? What does an interrupt look like? Does `--resume --fork-session` work headless with hooks? | Results under "Spike results" | S |
 | F-S2 | **Spike: concurrency.** Run 4 stream sessions at once. Measure rate-limit and usage-limit behavior and the hub's CPU. | Numbers in the doc | S |
 | F3a | **Spawn and lifecycle.** Hub spawns `stream` and `oneshot` sessions (with `--session-id`, brief, worktree); stop, restart with backoff, stuck detection, `fleet status`, `stop`, `down`, `prune`. | e2e: 2 fake stream workers; kill one; it restarts; `down` stops all; no worktree lost | M |
 | F3b | **Core fleet model.** `fleet/` in tend-core: fleet file, roles, channels, presets, `step()` with commands. | Table tests per preset; replay is deterministic | M |
