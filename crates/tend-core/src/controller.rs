@@ -49,6 +49,27 @@ pub struct Config {
     /// Wrap test runs in `tend run` (optimize mode). In auto mode each wrapped call costs
     /// Claude Code about 1-2 s of permission checking (benchmark, 2026-10-20).
     pub wrap_tests: bool,
+    /// Awareness of other tend sessions on this machine (F1).
+    pub fleet: FleetSetting,
+}
+
+/// `fleet` config: off (no watching), look (record notices only, the default), or on
+/// (also tell the agent, in optimize mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FleetSetting {
+    Off,
+    Look,
+    On,
+}
+
+impl FleetSetting {
+    pub fn name(self) -> &'static str {
+        match self {
+            FleetSetting::Off => "off",
+            FleetSetting::Look => "look",
+            FleetSetting::On => "on",
+        }
+    }
 }
 
 impl Default for Config {
@@ -64,6 +85,7 @@ impl Default for Config {
             plugin_mode: Mode::Look,
             notify: false,
             wrap_tests: true,
+            fleet: FleetSetting::Look,
         }
     }
 }
@@ -74,6 +96,7 @@ impl Config {
         [
             ("idle_gap_minutes", self.idle_gap_minutes.to_string()),
             ("experimental_audit", self.experimental_audit.to_string()),
+            ("fleet", self.fleet.name().to_string()),
             ("keep_days", self.keep_days.to_string()),
             ("notify", self.notify.to_string()),
             ("wrap_tests", self.wrap_tests.to_string()),
@@ -190,6 +213,8 @@ pub struct Controller {
     /// Active clock for loop time: wall time with idle gaps capped.
     last_ms: Option<u64>,
     active_ms: u64,
+    /// What other tend sessions did that matters here (F1).
+    fleet: crate::fleet::Fleet,
 }
 
 /// The costly, pure part of handling an output: hash, failures, and summary.
@@ -317,6 +342,7 @@ impl Controller {
             deferred: None,
             last_ms: None,
             active_ms: 0,
+            fleet: crate::fleet::Fleet::default(),
         }
     }
 
@@ -479,9 +505,34 @@ impl Controller {
     }
 
     pub fn handle(&mut self, event: Event, now_ms: u64) -> Decision {
-        self.tick(now_ms);
+        // Other sessions' activity is not this session's: it must not make idle time
+        // here count as active (loop time).
+        if !matches!(event, Event::Peer { .. } | Event::Workspace { .. }) {
+            self.tick(now_ms);
+        }
         let mut d = Decision::default();
         let is_bash = matches!(&event, Event::ToolCompleted { tool, .. } if tool == "Bash");
+        // Fleet (F1): hook events can carry notices; this session's edits and failures
+        // are what peers' activity is compared with.
+        let delivers = matches!(
+            &event,
+            Event::ToolRequested { .. }
+                | Event::EditProposed { .. }
+                | Event::ToolCompleted { .. }
+                | Event::PromptSubmitted { .. }
+        );
+        let my_edit = match &event {
+            Event::FileEdited { path, .. } | Event::FileChanged { path, .. } => Some(path.clone()),
+            _ => None,
+        };
+        if let Event::ToolCompleted {
+            output,
+            failed: true,
+            ..
+        } = &event
+        {
+            self.fleet.on_my_failure(output, now_ms);
+        }
         match event {
             _ if is_bash => self.on_bash(&mut d, event, now_ms),
             Event::EditProposed { .. } => self.on_edit_proposed(&mut d, event, now_ms),
@@ -517,6 +568,29 @@ impl Controller {
                 self.last_blocked = None;
                 self.allowed.clear();
                 self.failure_values.clear();
+                self.fleet.reset_conversation();
+            }
+            Event::Workspace { top, common } => {
+                self.fleet.set_workspace(&top, &common);
+                let event = Event::Workspace { top, common };
+                self.push(&mut d, now_ms, vec![], Body::Event { event });
+            }
+            Event::Peer {
+                session,
+                seq,
+                at_ms,
+                agent,
+                activity,
+            } => {
+                let event = Event::Peer {
+                    session: session.clone(),
+                    seq,
+                    at_ms,
+                    agent: agent.clone(),
+                    activity: activity.clone(),
+                };
+                let ev = self.push(&mut d, now_ms, vec![], Body::Event { event });
+                self.fleet.on_peer(&session, &agent, at_ms, &activity, ev);
             }
             Event::TurnEnded => {
                 let ev = self.push(&mut d, now_ms, vec![], Body::Event { event });
@@ -526,7 +600,44 @@ impl Controller {
                 self.push(&mut d, now_ms, vec![], Body::Event { event: other });
             }
         }
+        if let Some(path) = my_edit {
+            self.fleet.on_my_edit(&path, now_ms);
+        }
+        if delivers {
+            self.deliver_fleet(&mut d, now_ms);
+        }
         d
+    }
+
+    /// Record pending fleet notices as actions, and tell the agent in optimize mode when
+    /// `fleet = on`. Each action is caused by the peer's event and by this hook's event.
+    fn deliver_fleet(&mut self, d: &mut Decision, now: u64) {
+        let notices = self.fleet.take();
+        if notices.is_empty() {
+            return;
+        }
+        let trigger = d
+            .entries
+            .iter()
+            .find(|e| matches!(e.body, Body::Event { .. }))
+            .map(|e| e.seq);
+        let supported = self.caps.inject_context;
+        let applied =
+            self.session.mode == Mode::Optimize && supported && self.cfg.fleet == FleetSetting::On;
+        for n in notices {
+            let mut causes = vec![n.cause];
+            causes.extend(trigger);
+            let action = ActionKind::Fleet {
+                notice: n.kind,
+                peer: n.peer,
+                path: n.path,
+                text: n.text.clone(),
+            };
+            self.record(d, now, causes, action, n.reason, applied, !supported);
+            if applied {
+                d.response.add_context.push(n.text);
+            }
+        }
     }
 
     fn on_bash(&mut self, d: &mut Decision, event: Event, now: u64) {
@@ -1314,7 +1425,7 @@ impl Controller {
             ActionKind::Wrap { .. } => self.caps.rewrite_input,
             ActionKind::Retry { .. } => self.caps.retry_denied,
             ActionKind::Shape { .. } => self.caps.replace_output,
-            ActionKind::Steer { .. } => self.caps.inject_context,
+            ActionKind::Steer { .. } | ActionKind::Fleet { .. } => self.caps.inject_context,
             ActionKind::Guard { decision, .. } => match decision {
                 GuardDecision::Ask => self.caps.ask,
                 GuardDecision::Deny => self.caps.deny,

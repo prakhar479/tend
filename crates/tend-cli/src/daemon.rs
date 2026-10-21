@@ -32,6 +32,8 @@ struct State {
     memory: Option<PathBuf>,
     /// Desktop notifications are on (`notify = true`).
     notify: bool,
+    /// The session's working directory, once it started (for the fleet watcher).
+    cwd: Option<String>,
 }
 
 /// When the daemon last got a request (ms), for the idle exit.
@@ -69,6 +71,7 @@ pub fn run(
         store,
         memory: None,
         notify: crate::config::load().notify,
+        cwd: None,
     }));
     eprintln!("tendd: listening on {} (mode {mode:?})", sock.display());
 
@@ -77,6 +80,10 @@ pub fn run(
         thread::spawn(move || watch_parent(pid, &sock));
     }
     LAST_REQUEST_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+    if crate::config::load().fleet != tend_core::FleetSetting::Off {
+        let state = Arc::clone(&state);
+        thread::spawn(move || watch_fleet(dir, &state));
+    }
     if let Some(minutes) = idle_exit_minutes {
         let sock = sock.clone();
         thread::spawn(move || watch_idle(minutes, &sock));
@@ -85,7 +92,6 @@ pub fn run(
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
-                LAST_REQUEST_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
                 let state = Arc::clone(&state);
                 let sock = sock.clone();
                 let token = Arc::clone(&token);
@@ -110,6 +116,7 @@ fn remember(st: &mut State, decisions: &[tend_core::Decision]) -> Result<()> {
             event: tend_core::Event::SessionStarted { cwd, .. },
         } = &e.body
         {
+            st.cwd = Some(cwd.clone());
             let cwd = Path::new(cwd);
             let root = crate::audit::repo_root(cwd).unwrap_or_else(|_| cwd.to_path_buf());
             let key = tend_core::text::sha256_hex(&root.to_string_lossy());
@@ -198,6 +205,41 @@ fn notify(messages: &[String]) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+/// How often the fleet watcher looks at the other sessions (F1).
+const FLEET_POLL: Duration = Duration::from_secs(1);
+
+/// Fleet awareness (F1): once the session has started, record its workspace, then feed
+/// the other live sessions' activity to the controller. Off the hook path: the lock is
+/// held only to handle what one round found. Errors are logged and skipped.
+fn watch_fleet(dir: PathBuf, state: &Mutex<State>) {
+    let cwd = loop {
+        thread::sleep(FLEET_POLL);
+        if let Some(c) = state.lock().unwrap_or_else(|e| e.into_inner()).cwd.clone() {
+            break c;
+        }
+    };
+    let ws = crate::fleet::workspace(Path::new(&cwd));
+    let mut watcher = crate::fleet::Watcher::new(dir, ws.common.clone());
+    let mut events = vec![tend_core::Event::Workspace {
+        top: ws.top,
+        common: ws.common,
+    }];
+    let root = crate::paths::sessions_dir();
+    loop {
+        if !events.is_empty() {
+            let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+            for ev in events.drain(..) {
+                let d = st.controller.handle(ev, now_ms());
+                if let Err(e) = st.store.persist(&d) {
+                    eprintln!("tendd: fleet: {e:#}");
+                }
+            }
+        }
+        thread::sleep(FLEET_POLL);
+        events = watcher.poll(&root, now_ms());
+    }
 }
 
 /// Plugin mode has no launcher to watch: exit after a long quiet spell. A later hook
@@ -295,10 +337,12 @@ fn serve(
     BufReader::new(stream.try_clone()?)
         .take(MAX_REQUEST_BYTES)
         .read_line(&mut line)?;
-    // A liveness probe (`is_live`) connects and closes: not an error.
+    // A liveness probe (`is_live`) connects and closes: not an error, and not activity,
+    // or peers' fleet watchers would keep a plugin daemon from its idle exit.
     if line.is_empty() {
         return Ok(());
     }
+    LAST_REQUEST_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
     let req: Request = serde_json::from_str(&line).context("bad request")?;
     let mut shutdown = false;
 

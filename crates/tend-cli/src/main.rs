@@ -11,6 +11,7 @@ mod connector;
 mod daemon;
 mod doctor;
 mod export;
+mod fleet;
 mod ipc;
 mod launcher;
 mod paths;
@@ -152,6 +153,8 @@ enum Cmd {
     /// One line for the Claude Code status line: mode and what tend did so far.
     /// Prints nothing outside a tend session.
     Status,
+    /// The live tend sessions on this machine, grouped by repo.
+    Fleet,
     /// Reverse an action (Phase 3).
     #[command(hide = true)]
     Undo { id: String },
@@ -524,7 +527,11 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Why { id, session } => {
             let dir = sessions::resolve(session.as_deref(), false)?;
             let entries = store::read_entries(&dir)?;
-            print!("{}", report::why(&entries, &id)?);
+            print!("{}", report::why_across(&entries, &id, &fleet::peer_entry)?);
+            Ok(0)
+        }
+        Cmd::Fleet => {
+            print!("{}", fleet::view_default());
             Ok(0)
         }
         Cmd::Retro {

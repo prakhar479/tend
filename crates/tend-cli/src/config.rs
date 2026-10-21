@@ -13,6 +13,7 @@
 //! plugin_mode = look         # mode of sessions the Claude Code plugin starts
 //! notify = false             # desktop notification on a loop or a blocked edit
 //! wrap_tests = true          # optimize: run tests through `tend run` (costs ~1-2 s each in auto mode)
+//! fleet = look               # other tend sessions here: off, look (record), on (also tell the agent)
 //! ```
 
 use std::env;
@@ -20,7 +21,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
-use tend_core::Config;
+use tend_core::{Config, FleetSetting};
 
 /// $TEND_CONFIG, then $XDG_CONFIG_HOME/tend/config.toml, then ~/.config/tend/config.toml.
 pub fn path() -> PathBuf {
@@ -58,7 +59,7 @@ pub fn load() -> Config {
     c
 }
 
-const KEYS: [&str; 10] = [
+const KEYS: [&str; 11] = [
     "shape_threshold_tokens",
     "max_summary_ratio",
     "loop_threshold",
@@ -69,6 +70,7 @@ const KEYS: [&str; 10] = [
     "plugin_mode",
     "notify",
     "wrap_tests",
+    "fleet",
 ];
 
 fn parse(text: &str) -> (Config, Vec<String>) {
@@ -126,6 +128,14 @@ fn apply(c: &mut Config, line: &str, seen: &mut std::collections::BTreeSet<Strin
                 "look" => tend_core::Mode::Look,
                 "optimize" => tend_core::Mode::Optimize,
                 v => bail!("{key} must be look or optimize, got {v}"),
+            }
+        }
+        "fleet" => {
+            c.fleet = match value {
+                "off" => FleetSetting::Off,
+                "look" => FleetSetting::Look,
+                "on" => FleetSetting::On,
+                v => bail!("{key} must be off, look, or on, got {v}"),
             }
         }
         "wrap_tests" => {
@@ -221,6 +231,15 @@ mod tests {
         assert!(w[3].contains("set twice"), "{w:?}");
         assert!(parse("shape_threshold_tokens = 0").1[0].contains("100..="));
         assert!(parse("loop_threshold = three").1.len() == 1);
+    }
+
+    #[test]
+    fn fleet_setting() {
+        assert_eq!(parse("fleet = on").0.fleet, FleetSetting::On);
+        assert_eq!(parse("fleet = off").0.fleet, FleetSetting::Off);
+        let (c, w) = parse("fleet = yes");
+        assert_eq!(c.fleet, FleetSetting::Look);
+        assert!(w[0].contains("off, look, or on"), "{w:?}");
     }
 
     #[test]

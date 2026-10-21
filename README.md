@@ -45,6 +45,7 @@ tend claude --resume                 # other arguments (and --help) go to claude
 tend report                          # newest session started in this directory
 tend report --session -2 --full      # the one before it, every section
 tend sessions                        # list: start, duration, mode, calls, project
+tend fleet                           # live tend sessions on this machine, by repo
 tend show o-3                        # full original of a summarized output
 tend why a-2                         # cause chain of an action
 tend mode optimize                   # change the mode of the live session
@@ -88,7 +89,19 @@ experimental_audit = false      # audit each session's changes to tests and chec
 plugin_mode = look              # mode of sessions the Claude Code plugin starts
 notify = false                  # desktop notification when tend steers a loop or blocks an edit
 wrap_tests = true               # optimize: run tests through `tend run`; each costs ~1-2 s in auto mode
+fleet = look                    # other tend sessions here: off, look (record only), on (also tell the agent)
 ```
+
+### Fleet
+
+Sessions on one machine see what the others do (design: `docs/fleet-2026-10-21.md`). Each daemon reads the other live sessions' ledgers once a second. tend notices four things:
+
+- **Peer edit.** In the same checkout, another session edited a file after this one did.
+- **Peer git.** In the same checkout, another session ran a git command that changes files or HEAD (`git stash`, `checkout`, `reset`, `commit`, …).
+- **Peer failure.** A failed run here names a file another session in this checkout edited in the last 30 minutes.
+- **Worktree overlap.** In another worktree of the same repo, both sessions edited one file. Merging the branches will conflict there.
+
+Each notice is an action in the ledger, caused by the other session's entry. `tend why a-N` follows the cause into that session's ledger. With `fleet = look` (the default) notices are only recorded and shown in `tend report`. With `fleet = on`, a session in optimize mode also gets them as added context at its next hook: at most 3 per hook and 40 per session.
 
 ## Repo policy
 

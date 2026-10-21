@@ -1,6 +1,7 @@
 //! Controller tests.
 
 use super::*;
+use crate::event::PeerActivity;
 use crate::session::DEFAULT_LEVEL;
 use serde_json::json;
 
@@ -1088,4 +1089,122 @@ fn wrapping_can_be_turned_off() {
             ..
         }
     )));
+}
+
+/// A controller in /repo with one peer in the same checkout that edited `path` after
+/// this session did. Returns the controller and the seq of the peer's edit event.
+fn fleet_ctl(mode: Mode, setting: FleetSetting) -> (Controller, u64) {
+    let cfg = Config {
+        fleet: setting,
+        ..Config::default()
+    };
+    let mut c = Controller::new(cfg, Capabilities::CLAUDE_CODE, mode);
+    let ws = Event::Workspace {
+        top: "/repo".into(),
+        common: "/repo/.git".into(),
+    };
+    c.handle(ws, 0);
+    // Both clocks are this machine's: the peer's times compare with ours.
+    let peer = |seq, activity| Event::Peer {
+        session: "1700000000-42".into(),
+        seq,
+        at_ms: seq,
+        agent: "claude".into(),
+        activity,
+    };
+    let joined = PeerActivity::Joined {
+        cwd: "/repo".into(),
+        top: "/repo".into(),
+        common: "/repo/.git".into(),
+    };
+    c.handle(peer(3, joined), 1);
+    c.handle(edited("/repo/src/api.rs", "h1"), 2);
+    let d = c.handle(
+        peer(
+            9,
+            PeerActivity::Edited {
+                path: "/repo/src/api.rs".into(),
+            },
+        ),
+        3,
+    );
+    assert!(
+        d.response.is_empty(),
+        "a peer event is not a hook: nothing to send"
+    );
+    (c, d.entries.last().unwrap().seq)
+}
+
+fn fleet_actions(d: &Decision) -> Vec<(&Entry, bool)> {
+    d.entries
+        .iter()
+        .filter_map(|e| match &e.body {
+            Body::Action {
+                action: ActionKind::Fleet { .. },
+                applied,
+                ..
+            } => Some((e, *applied)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn fleet_notice_is_delivered_at_the_next_hook_when_on() {
+    let (mut c, peer_seq) = fleet_ctl(Mode::Optimize, FleetSetting::On);
+    let d = c.handle(Event::PromptSubmitted { chars: 3 }, 4);
+    let acts = fleet_actions(&d);
+    assert_eq!(acts.len(), 1);
+    let (e, applied) = acts[0];
+    assert!(applied);
+    // Caused by the peer's event and by this hook's event.
+    assert_eq!(e.causes[0], peer_seq);
+    assert_eq!(e.causes.len(), 2);
+    assert_eq!(d.response.add_context.len(), 1);
+    assert!(
+        d.response.add_context[0].contains("session 1700000000-42 (claude) edited src/api.rs"),
+        "{:?}",
+        d.response.add_context
+    );
+    // Delivered once.
+    let d = c.handle(Event::PromptSubmitted { chars: 3 }, 5);
+    assert!(fleet_actions(&d).is_empty());
+}
+
+#[test]
+fn fleet_notice_is_recorded_only_in_look_mode_or_by_default() {
+    for (mode, setting) in [
+        (Mode::Look, FleetSetting::On),
+        (Mode::Optimize, FleetSetting::Look),
+    ] {
+        let (mut c, _) = fleet_ctl(mode, setting);
+        let d = c.handle(Event::PromptSubmitted { chars: 3 }, 4);
+        let acts = fleet_actions(&d);
+        assert_eq!(acts.len(), 1, "{mode:?} {setting:?}");
+        assert!(!acts[0].1, "not applied");
+        assert!(d.response.is_empty());
+    }
+    assert_eq!(Config::default().fleet, FleetSetting::Look);
+}
+
+#[test]
+fn failure_naming_a_peer_edit_gets_a_notice_with_the_reply() {
+    let (mut c, _) = fleet_ctl(Mode::Optimize, FleetSetting::On);
+    // The peer-edit notice goes out first.
+    c.handle(Event::PromptSubmitted { chars: 3 }, 4);
+    let mut ev = bash(
+        "cargo build",
+        "error[E0308]: mismatched types\n --> src/api.rs:3:1\n",
+    );
+    if let Event::ToolCompleted { failed, .. } = &mut ev {
+        *failed = true;
+    }
+    let d = c.handle(ev, 60_000);
+    let texts = &d.response.add_context;
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("this failure names src/api.rs")),
+        "{texts:?}"
+    );
 }

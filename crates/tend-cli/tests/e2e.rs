@@ -1321,3 +1321,179 @@ fn learned_shape_levels_carry_over_to_the_next_session() {
         "{report}"
     );
 }
+
+/// A daemon for session `id` under `home`, with `config`.
+fn start_fleet_daemon(home: &Path, id: &str, config: &Path) -> (Daemon, PathBuf, PathBuf) {
+    let session = home.join("sessions").join(id);
+    fs::create_dir_all(&session).unwrap();
+    let child = Command::new(bin())
+        .args(["daemon", "--session-dir"])
+        .arg(&session)
+        .args(["--mode", "optimize"])
+        .env("TEND_HOME", home)
+        .env("TEND_CONFIG", config)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let daemon = Daemon(child);
+    let sock = socket_of(&session);
+    wait_for_daemon(&sock);
+    (daemon, sock, session)
+}
+
+/// Wait until `session`'s ledger contains `text` (the fleet watcher polls each second).
+fn wait_for_ledger(session: &Path, text: &str) {
+    for _ in 0..100 {
+        if fs::read_to_string(session.join("ledger.jsonl")).is_ok_and(|l| l.contains(text)) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "{} never had {text}:\n{}",
+        session.display(),
+        fs::read_to_string(session.join("ledger.jsonl")).unwrap_or_default()
+    );
+}
+
+/// F1: sessions in one checkout and in a worktree of it learn about each other's edits,
+/// with causes that reach the other session's ledger; a peer that stops is noticed, and
+/// the session keeps working.
+#[test]
+fn fleet_sessions_notice_each_other() {
+    let dir = tmp("fleet");
+    let repo = dir.join("repo");
+    fs::create_dir_all(repo.join("src")).unwrap();
+    let git = |cwd: &Path, args: &[&str]| {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    git(&repo, &["worktree", "add", "-q", "../wt"]);
+    let wt = dir.join("wt");
+    let home = dir.join("home");
+    let config = dir.join("config.toml");
+    fs::write(&config, "fleet = on\n").unwrap();
+
+    let (_a, sock_a, sess_a) = start_fleet_daemon(&home, "1000000001-1", &config);
+    let (_b, sock_b, sess_b) = start_fleet_daemon(&home, "1000000002-2", &config);
+    let (_c, sock_c, _) = start_fleet_daemon(&home, "1000000003-3", &config);
+
+    let load = |name: &str| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(fixture(name)).unwrap()).unwrap()
+    };
+    let at = |mut p: serde_json::Value, cwd: &Path, sid: &str| {
+        p["cwd"] = cwd.display().to_string().into();
+        p["session_id"] = sid.into();
+        p
+    };
+    let edit = |cwd: &Path, sid: &str| {
+        let mut p = at(load("post_tool_use_edit.json"), cwd, sid);
+        p["tool_input"]["file_path"] = cwd.join("src/api.rs").display().to_string().into();
+        p
+    };
+    for (sock, cwd, sid) in [
+        (&sock_a, &repo, "a"),
+        (&sock_b, &repo, "b"),
+        (&sock_c, &wt, "c"),
+    ] {
+        hook(
+            sock,
+            "SessionStart",
+            &at(load("session_start.json"), cwd, sid),
+        );
+    }
+    // A edits first; then B (same checkout) and C (the worktree) edit the same file.
+    wait_for_ledger(&sess_a, "\"type\":\"workspace\"");
+    hook(&sock_a, "PostToolUse", &edit(&repo, "a"));
+    hook(&sock_b, "PostToolUse", &edit(&repo, "b"));
+    hook(&sock_c, "PostToolUse", &edit(&wt, "c"));
+    wait_for_ledger(&sess_a, "1000000002-2\",\"seq\":");
+    for _ in 0..100 {
+        let l = fs::read_to_string(sess_a.join("ledger.jsonl")).unwrap();
+        if l.matches("\"type\":\"edited\"").count() >= 2 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // A's next hook carries both notices.
+    let out = hook(
+        &sock_a,
+        "UserPromptSubmit",
+        &at(load("user_prompt_submit.json"), &repo, "a"),
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).expect(&out);
+    let context = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        context.contains("session 1000000002-2 (claude-code) edited src/api.rs after you did"),
+        "{context}"
+    );
+    assert!(
+        context.contains("Merging both branches will conflict"),
+        "{context}"
+    );
+
+    // `tend why` follows the cause into B's ledger.
+    let why = Command::new(bin())
+        .args(["why", "a-1", "--session"])
+        .arg(&sess_a)
+        .env("TEND_HOME", &home)
+        .output()
+        .unwrap();
+    let why = String::from_utf8(why.stdout).unwrap();
+    assert!(why.contains("action a-1 (fleet, applied)"), "{why}");
+    assert!(why.contains("In session 1000000002-2: #"), "{why}");
+    assert!(why.contains("src/api.rs"), "{why}");
+
+    // The fleet view lists all three, in one repo.
+    let fleet = Command::new(bin())
+        .arg("fleet")
+        .env("TEND_HOME", &home)
+        .output()
+        .unwrap();
+    let fleet = String::from_utf8(fleet.stdout).unwrap();
+    assert!(fleet.starts_with("3 live tend sessions"), "{fleet}");
+    assert!(fleet.contains(&wt.display().to_string()), "{fleet}");
+
+    // B stops: A records it, and A's hooks still work.
+    {
+        use std::io::{BufRead, BufReader, Write};
+        let mut s = std::os::unix::net::UnixStream::connect(&sock_b).unwrap();
+        writeln!(s, r#"{{"type":"shutdown"}}"#).unwrap();
+        let mut reply = String::new();
+        BufReader::new(s).read_line(&mut reply).unwrap();
+        assert!(reply.contains("bye"), "{reply}");
+    }
+    wait_for_ledger(&sess_a, "\"type\":\"left\"");
+    let out = hook(&sock_a, "PostToolUse", &edit(&repo, "a"));
+    assert!(out.is_empty() || out.starts_with('{'), "{out}");
+    let report = tend(&["report"], &sess_a);
+    assert!(
+        report.contains(
+            "Fleet: 2 other tend sessions (1 in this checkout, 1 in other worktrees, 0 elsewhere)"
+        ),
+        "{report}"
+    );
+    assert!(report.contains("2 fleet notices"), "{report}");
+    let _ = sess_b;
+}

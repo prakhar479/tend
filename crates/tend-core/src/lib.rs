@@ -21,6 +21,7 @@ pub mod broker;
 pub mod capability;
 pub mod controller;
 pub mod event;
+pub mod fleet;
 pub mod guard;
 pub mod loops;
 pub mod perception;
@@ -31,6 +32,8 @@ pub mod shape;
 pub mod text;
 
 pub use capability::Capabilities;
-pub use controller::{prepare, Blob, Config, Controller, Decision, Permission, Prepared, Response};
-pub use event::{Event, Mode};
+pub use controller::{
+    prepare, Blob, Config, Controller, Decision, FleetSetting, Permission, Prepared, Response,
+};
+pub use event::{Event, Mode, PeerActivity};
 pub use record::{ActionKind, Body, Entry, SteerTrigger, LEDGER_FORMAT};

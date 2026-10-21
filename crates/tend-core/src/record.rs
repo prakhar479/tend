@@ -197,6 +197,14 @@ pub enum ActionKind {
     BlockCommand {
         command: String,
     },
+    /// Tell the agent what another tend session did that affects it (F1).
+    Fleet {
+        notice: crate::fleet::NoticeKind,
+        peer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

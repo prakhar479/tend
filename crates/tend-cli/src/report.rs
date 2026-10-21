@@ -11,7 +11,7 @@ use serde_json::Value;
 use tend_core::perception::{classify, test_write_targets, writes_files, OutputKind};
 use tend_core::record::SteerTrigger;
 use tend_core::text::truncate_chars;
-use tend_core::{ActionKind, Body, Config, Entry, Event};
+use tend_core::{ActionKind, Body, Config, Entry, Event, PeerActivity};
 
 /// Token usage from a Claude Code transcript. Field names confirmed in S5: totals match
 /// Claude Code's own usage for the same session.
@@ -404,6 +404,10 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut config = Vec::new();
     let defaults = Config::default().fields();
+    // Fleet (F1): this session's workspace, the peers it saw, and the notices.
+    let mut workspace: Option<(String, String)> = None;
+    let mut peers: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut fleet = Vec::new();
 
     let overrides: HashSet<u64> = entries
         .iter()
@@ -453,6 +457,16 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
                 } => {
                     conversations += 1;
                     transcripts.extend(transcript_path.clone());
+                }
+                Event::Workspace { top, common } => {
+                    workspace = Some((top.clone(), common.clone()));
+                }
+                Event::Peer {
+                    session,
+                    activity: PeerActivity::Joined { top, common, .. },
+                    ..
+                } => {
+                    peers.insert(session.clone(), (top.clone(), common.clone()));
                 }
                 Event::ToolCompleted { tool, input, .. } => {
                     tools += 1;
@@ -504,6 +518,11 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
                         SteerTrigger::Cycle { .. } => cycles.push(format!("{st} {text}")),
                     }
                 }
+                ActionKind::Fleet { text, .. } => fleet.push(format!(
+                    "{} {}",
+                    status(*applied, "told", "would tell"),
+                    text.trim_start_matches("tend: ")
+                )),
                 ActionKind::Wrap { .. } => wrapped += u64::from(*applied),
                 ActionKind::Retry { .. } => denied += 1,
                 ActionKind::BlockCommand { command } => guards.push(format!(
@@ -562,6 +581,23 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
     if !config.is_empty() {
         let _ = writeln!(out, "Config: {}", config.join(" · "));
     }
+    if let (Some((top, common)), false) = (&workspace, peers.is_empty()) {
+        use tend_core::fleet::{relation, Relation};
+        let (mut same, mut worktree, mut other) = (0, 0, 0);
+        for (t, c) in peers.values() {
+            match relation(top, common, t, c) {
+                Relation::SameCheckout => same += 1,
+                Relation::Worktree => worktree += 1,
+                Relation::Other => other += 1,
+            }
+        }
+        let n = peers.len();
+        let _ = writeln!(
+            out,
+            "Fleet: {n} other tend session{} ({same} in this checkout, {worktree} in other worktrees, {other} elsewhere)",
+            if n == 1 { "" } else { "s" }
+        );
+    }
     let loop_title = if t.loop_ms > 0 {
         format!("Loops ({} in loops)", minutes(t.loop_ms))
     } else {
@@ -571,6 +607,7 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
         (loop_title.as_str(), &loops),
         ("Edit cycles", &cycles),
         ("Test guard", &guards),
+        ("Fleet notices", &fleet),
     ];
     if !full {
         let mut parts: Vec<String> = attention
@@ -732,6 +769,7 @@ fn describe(e: &Entry) -> String {
                 ActionKind::BlockCommand { .. } => "block",
                 ActionKind::Wrap { .. } => "wrap",
                 ActionKind::Retry { .. } => "retry",
+                ActionKind::Fleet { .. } => "fleet",
             };
             let state = match (applied, unsupported) {
                 (true, _) => "applied",
@@ -774,6 +812,23 @@ fn describe(e: &Entry) -> String {
         Body::Config { overrides } => format!("config {overrides:?}"),
         Body::Format { version } => format!("ledger format {version}"),
         Body::Override { action } => format!("user allowed {action} once"),
+        Body::Event {
+            event:
+                Event::Peer {
+                    session,
+                    seq,
+                    activity,
+                    ..
+                },
+        } => {
+            let what = match activity {
+                PeerActivity::Joined { top, .. } => format!("started in {top}"),
+                PeerActivity::Edited { path } => format!("edited {path}"),
+                PeerActivity::Git { command } => format!("ran `{command}`"),
+                PeerActivity::Left => "ended".to_string(),
+            };
+            format!("peer session {session} (its entry #{seq}) {what}")
+        }
         Body::Event { event } => {
             format!(
                 "event {}",
@@ -797,6 +852,40 @@ pub fn find_target<'a>(entries: &'a [Entry], id: &str) -> Option<&'a Entry> {
 /// One line for an entry: what it is and why it exists.
 pub fn describe_entry(e: &Entry) -> String {
     describe(e)
+}
+
+/// `why`, and for each peer event in the chain, the entry it names in the peer's
+/// ledger (F1). `lookup(session, seq)` reads it; a missing peer ledger is skipped.
+pub fn why_across(
+    entries: &[Entry],
+    id: &str,
+    lookup: &dyn Fn(&str, u64) -> Option<Entry>,
+) -> Result<String> {
+    let mut out = why(entries, id)?;
+    let by_seq: HashMap<u64, &Entry> = entries.iter().map(|e| (e.seq, e)).collect();
+    let target = find_target(entries, id).ok_or_else(|| anyhow!("no entry `{id}`"))?;
+    let mut peers = Vec::new();
+    let mut stack = vec![target];
+    let mut seen = HashSet::new();
+    while let Some(e) = stack.pop() {
+        if !seen.insert(e.seq) {
+            continue;
+        }
+        if let Body::Event {
+            event: Event::Peer { session, seq, .. },
+        } = &e.body
+        {
+            peers.push((session.clone(), *seq));
+        }
+        stack.extend(e.causes.iter().filter_map(|c| by_seq.get(c).copied()));
+    }
+    peers.sort();
+    for (session, seq) in peers {
+        if let Some(pe) = lookup(&session, seq) {
+            let _ = writeln!(out, "In session {session}: {}", describe(&pe));
+        }
+    }
+    Ok(out)
 }
 
 pub fn why(entries: &[Entry], id: &str) -> Result<String> {

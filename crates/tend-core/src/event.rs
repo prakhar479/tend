@@ -80,4 +80,36 @@ pub enum Event {
     Compacted {
         trigger: String,
     },
+    /// Where this session works, found once at start (F1): the worktree's top directory
+    /// and the repo's common git dir. Outside git both are the working directory.
+    Workspace {
+        top: String,
+        common: String,
+    },
+    /// Something another live tend session on this machine did (F1). `session` and `seq`
+    /// name the entry in that session's ledger; `at_ms` is when it happened there.
+    Peer {
+        session: String,
+        seq: u64,
+        at_ms: u64,
+        agent: String,
+        activity: PeerActivity,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PeerActivity {
+    /// The peer's session started (or tend first saw it), with its workspace.
+    Joined {
+        cwd: String,
+        top: String,
+        common: String,
+    },
+    /// The peer changed a file: an edit tool or a shell command. `path` is absolute.
+    Edited { path: String },
+    /// The peer ran a git command that changes its checkout (see `fleet::git_effect`).
+    Git { command: String },
+    /// The peer's daemon is gone.
+    Left,
 }
