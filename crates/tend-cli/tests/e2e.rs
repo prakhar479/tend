@@ -1497,3 +1497,201 @@ fn fleet_sessions_notice_each_other() {
     assert!(report.contains("2 fleet notices"), "{report}");
     let _ = sess_b;
 }
+
+/// A fake stream-json agent: answers each user line with a result, a control request
+/// with a control response; records its arguments; ends at end of input.
+fn fake_stream_agent(dir: &Path) -> PathBuf {
+    let script = dir.join("fake-stream-claude.sh");
+    let body = format!(
+        "#!/bin/sh\n[ \"$1\" = --version ] && echo '2.1.304 (Claude Code)' && exit 0\n\
+         echo \"$@\" > '{d}/args-'\"$TEND_FLEET_SLOT\"'.txt'\n\
+         pwd > '{d}/cwd-'\"$TEND_FLEET_SLOT\"'.txt'\n\
+         echo '{{\"type\":\"system\",\"subtype\":\"init\"}}'\n\
+         while IFS= read -r line; do\n\
+           case \"$line\" in\n\
+             *control_request*) echo '{{\"type\":\"control_response\"}}' ;;\n\
+             *) echo '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\"}}' ;;\n\
+           esac\n\
+         done\n",
+        d = dir.display()
+    );
+    fs::write(&script, body).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+fn tend_in(dir: &Path, home: &Path, agent: &Path, args: &[&str]) -> String {
+    let out = Command::new(bin())
+        .args(args)
+        .current_dir(dir)
+        .env("TEND_HOME", home)
+        .env("TEND_CLAUDE_BIN", agent)
+        .env("TEND_CONFIG", dir.join("no-config.toml"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "tend {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// F3a: a fleet of two stream workers in their own worktrees; one is killed and comes
+/// back in the same worktree; `down` stops both; `prune` keeps the worktree with work.
+#[test]
+fn fleet_hub_starts_restarts_and_stops_sessions() {
+    let dir = tmp("hub");
+    let repo = dir.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false"
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    };
+    git(&["init", "-q"]);
+    fs::write(repo.join("a.txt"), "a\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    fs::write(
+        repo.join("fleet.toml"),
+        "preset = \"peers\"\n\n[role.peer]\nworkspace = \"worktree-per-worker\"\n",
+    )
+    .unwrap();
+    let home = dir.join("home");
+    let agent = fake_stream_agent(&dir);
+    let tend = |args: &[&str]| tend_in(&repo, &home, &agent, args);
+
+    /// Takes the fleet down even if the test fails, so no hub outlives it.
+    struct Down<'a>(&'a Path, &'a Path, &'a Path);
+    impl Drop for Down<'_> {
+        fn drop(&mut self) {
+            let _ = Command::new(bin())
+                .args(["fleet", "down"])
+                .current_dir(self.0)
+                .env("TEND_HOME", self.1)
+                .env("TEND_CLAUDE_BIN", self.2)
+                .output();
+        }
+    }
+    let _down = Down(&repo, &home, &agent);
+
+    let up = tend(&["fleet", "up", "fleet.toml"]);
+    assert!(up.starts_with("fleet ") && up.contains(" is up."), "{up}");
+    let status_until = |want: &dyn Fn(&str) -> bool| -> String {
+        for _ in 0..150 {
+            let s = tend(&["fleet", "status"]);
+            if want(&s) {
+                return s;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        panic!("status never matched:\n{}", tend(&["fleet", "status"]));
+    };
+    let running = |s: &str, slot: &str| {
+        s.lines()
+            .any(|l| l.trim_start().starts_with(slot) && l.contains("running"))
+    };
+    let s = status_until(&|s| running(s, "peer-1") && running(s, "peer-2"));
+    // Each session runs headless in stream mode, under its own worktree and session id.
+    let wait_file = |name: &str| {
+        for _ in 0..100 {
+            if let Ok(t) = fs::read_to_string(dir.join(name)) {
+                if !t.is_empty() {
+                    return t;
+                }
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        panic!("{name} never appeared");
+    };
+    let args = wait_file("args-peer-1.txt");
+    for want in [
+        "--input-format stream-json",
+        "--output-format stream-json",
+        "--session-id ",
+        "--append-system-prompt ",
+    ] {
+        assert!(args.contains(want), "{want}: {args}");
+    }
+    let cwd1 = wait_file("cwd-peer-1.txt");
+    let cwd2 = wait_file("cwd-peer-2.txt");
+    assert!(cwd1.trim().ends_with("/worktrees/peer-1"), "{cwd1}");
+    assert_ne!(cwd1, cwd2);
+
+    // Kill peer-1's session: it comes back after its backoff, in the same worktree.
+    let pid: i32 = s
+        .lines()
+        .find(|l| l.trim_start().starts_with("peer-1"))
+        .and_then(|l| l.split("pid ").nth(1))
+        .and_then(|r| r.split_whitespace().next())
+        .and_then(|p| p.parse().ok())
+        .expect(&s);
+    fs::remove_file(dir.join("cwd-peer-1.txt")).unwrap();
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    let s = status_until(&|s| s.contains("restarts 1"));
+    assert!(s.contains("peer-1") && s.contains("waiting"), "{s}");
+    let s = status_until(&|s| running(s, "peer-1"));
+    assert!(s.contains("restarts 1"), "{s}");
+    assert_eq!(wait_file("cwd-peer-1.txt"), cwd1, "the same worktree");
+
+    // Work left in peer-1's worktree; then the fleet goes down.
+    fs::write(Path::new(cwd1.trim()).join("work.txt"), "unsaved\n").unwrap();
+    let down = tend(&["fleet", "down"]);
+    assert!(down.contains("The fleet is down."), "{down}");
+    let s = tend(&["fleet", "status"]);
+    assert!(s.contains("hub not running"), "{s}");
+    assert_eq!(s.matches("stopped").count(), 2, "{s}");
+
+    // Prune lists, then removes only the clean worktree.
+    let dry = tend(&["fleet", "prune"]);
+    assert!(
+        dry.contains("would remove") && dry.contains("peer-2"),
+        "{dry}"
+    );
+    assert!(dry.contains("keep") && dry.contains("uncommitted"), "{dry}");
+    tend(&["fleet", "prune", "--yes"]);
+    assert!(
+        Path::new(cwd1.trim()).join("work.txt").exists(),
+        "work is never lost"
+    );
+    assert!(!Path::new(cwd2.trim()).exists(), "the clean one is gone");
+
+    // The ledger replays to the same records.
+    let fleet_dir = fs::read_dir(home.join("fleets"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let meta: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fleet_dir.join("meta.json")).unwrap()).unwrap();
+    let spec: tend_core::fleet::spec::Spec = serde_json::from_value(meta["spec"].clone()).unwrap();
+    let records: Vec<tend_core::fleet::model::FleetRecord> =
+        fs::read_to_string(fleet_dir.join("ledger.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+    let mut m = tend_core::fleet::model::Model::new(spec);
+    let mut again = Vec::new();
+    for r in &records {
+        if let tend_core::fleet::model::FleetBody::Event { event } = &r.body {
+            again.extend(m.step(event.clone(), r.ts_ms));
+        }
+    }
+    assert_eq!(again, records);
+}

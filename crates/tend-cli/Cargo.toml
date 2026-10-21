@@ -17,3 +17,5 @@ clap.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Fleet files (F3a). The old clash with the `winnow` crate ended with the rename.
+toml = { version = "0.8", default-features = false, features = ["parse"] }

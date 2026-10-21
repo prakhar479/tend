@@ -12,6 +12,7 @@ mod daemon;
 mod doctor;
 mod export;
 mod fleet;
+mod hub;
 mod ipc;
 mod launcher;
 mod paths;
@@ -153,8 +154,12 @@ enum Cmd {
     /// One line for the Claude Code status line: mode and what tend did so far.
     /// Prints nothing outside a tend session.
     Status,
-    /// The live tend sessions on this machine, grouped by repo.
-    Fleet,
+    /// Fleets of agents: `tend fleet up` runs one from a fleet file. Alone, it lists the
+    /// fleets and the live tend sessions on this machine, grouped by repo.
+    Fleet {
+        #[command(subcommand)]
+        cmd: Option<FleetCmd>,
+    },
     /// Reverse an action (Phase 3).
     #[command(hide = true)]
     Undo { id: String },
@@ -212,6 +217,59 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum FleetCmd {
+    /// Start a fleet in this repo, from a fleet file (TOML) or a preset.
+    Up {
+        /// The fleet file. See docs/fleet-topologies-2026-10-21.md.
+        file: Option<PathBuf>,
+        /// solo, peers, lead, pipeline, review, best-of, specialists, pool, tree.
+        #[arg(long)]
+        preset: Option<String>,
+        /// The tend mode of the fleet's sessions.
+        #[arg(long, value_enum, default_value = "look")]
+        mode: ModeArg,
+    },
+    /// A fleet's sessions: state, pid, turns, restarts, worktree.
+    Status {
+        /// A fleet id or prefix (default: the newest one that is up).
+        fleet: Option<String>,
+    },
+    /// Stop one session of a fleet (it is not restarted).
+    Stop {
+        slot: String,
+        #[arg(long)]
+        fleet: Option<String>,
+    },
+    /// Start another session of a role (within its maximum).
+    Spawn {
+        role: String,
+        #[arg(long)]
+        fleet: Option<String>,
+    },
+    /// Run `n` sessions of a stream role.
+    Scale {
+        role: String,
+        n: u32,
+        #[arg(long)]
+        fleet: Option<String>,
+    },
+    /// Stop every session and the hub.
+    Down { fleet: Option<String> },
+    /// Remove worktrees of fleets that are down and have nothing unsaved in them.
+    /// Without `--yes`, only lists them.
+    Prune {
+        #[arg(long)]
+        yes: bool,
+    },
+    /// The hub process (started by `up`).
+    #[command(hide = true)]
+    Hub {
+        #[arg(long)]
+        dir: PathBuf,
+    },
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum AuditFormat {
     Text,
@@ -232,6 +290,43 @@ impl From<ModeArg> for Mode {
             ModeArg::Optimize => Mode::Optimize,
         }
     }
+}
+
+fn fleet_cmd(c: FleetCmd) -> Result<i32> {
+    let text = match c {
+        FleetCmd::Up { file, preset, mode } => {
+            let preset = match preset {
+                Some(p) => Some(
+                    serde_json::from_value(serde_json::Value::String(p.clone()))
+                        .map_err(|_| anyhow::anyhow!("no preset `{p}`"))?,
+                ),
+                None => None,
+            };
+            let id = hub::up(file.as_deref(), preset, mode.into())?;
+            format!(
+                "fleet {id} is up.\n{}",
+                hub::status(Some(&id)).unwrap_or_default()
+            )
+        }
+        FleetCmd::Status { fleet } => hub::status(fleet.as_deref())?,
+        FleetCmd::Stop { slot, fleet } => {
+            hub::ask(fleet.as_deref(), hub::HubRequest::Stop { slot })?
+        }
+        FleetCmd::Spawn { role, fleet } => {
+            hub::ask(fleet.as_deref(), hub::HubRequest::Spawn { role })?
+        }
+        FleetCmd::Scale { role, n, fleet } => {
+            hub::ask(fleet.as_deref(), hub::HubRequest::Scale { role, n })?
+        }
+        FleetCmd::Down { fleet } => hub::down(fleet.as_deref())?,
+        FleetCmd::Prune { yes } => hub::prune(yes)?,
+        FleetCmd::Hub { dir } => {
+            hub::run_hub(&dir)?;
+            return Ok(0);
+        }
+    };
+    println!("{}", text.trim_end());
+    Ok(0)
 }
 
 fn main() {
@@ -530,10 +625,11 @@ fn run(cli: Cli) -> Result<i32> {
             print!("{}", report::why_across(&entries, &id, &fleet::peer_entry)?);
             Ok(0)
         }
-        Cmd::Fleet => {
-            print!("{}", fleet::view_default());
+        Cmd::Fleet { cmd: None } => {
+            print!("{}{}", hub::list(), fleet::view_default());
             Ok(0)
         }
+        Cmd::Fleet { cmd: Some(c) } => fleet_cmd(c),
         Cmd::Retro {
             transcript,
             all,
