@@ -68,6 +68,9 @@ pub struct Task {
     /// Why the last attempt did not count: a failed check, or a reviewer's reason.
     #[serde(default)]
     pub last_check: Option<String>,
+    /// A failed check was put down to another session in its shared worktree once (G5).
+    #[serde(default)]
+    pub interference_retried: bool,
 }
 
 impl Model {
@@ -176,6 +179,7 @@ impl Model {
                 outcome: None,
                 check: t.check,
                 last_check: None,
+                interference_retried: false,
             },
         );
         self.cmd(
@@ -415,7 +419,7 @@ impl Model {
     }
 
     /// The check that decides a task: its own, its board's, or the fleet's.
-    fn check_for(&self, t: &Task) -> Option<String> {
+    pub(super) fn check_for(&self, t: &Task) -> Option<String> {
         t.check
             .clone()
             .or_else(|| self.scope(t.board.as_deref()).and_then(|s| s.check.clone()))
@@ -470,6 +474,10 @@ impl Model {
         if !s.had_task || !self.role_def(s).is_some_and(|r| r.run == Run::Oneshot) {
             return;
         }
+        // It asked and waits for the answer: it stays open (G2).
+        if s.awaiting.is_some() && s.task.is_some() {
+            return;
+        }
         let checking = s
             .task
             .as_ref()
@@ -515,11 +523,39 @@ impl Model {
             );
             return self.tell_creator(cx, &t.created_by, MsgKind::Question, &text);
         }
+        // Another session at work in the same team worktree may have broken it (G5): the
+        // first such failure goes back without costing an attempt.
+        let team = t
+            .slot
+            .as_ref()
+            .and_then(|s| self.slots.get(s))
+            .and_then(|s| self.role_def(s))
+            .and_then(|r| match &r.workspace {
+                Workspace::Team { name } => Some(name.clone()),
+                _ => None,
+            });
+        let interfered = !t.interference_retried
+            && team.is_some_and(|team| {
+                let ws = Workspace::Team { name: team };
+                self.slots.values().any(|o| {
+                    Some(&o.id) != t.slot.as_ref()
+                        && o.live()
+                        && o.task.is_some()
+                        && self.role_def(o).is_some_and(|r| r.workspace == ws)
+                })
+            });
         let exit = exit.map_or("killed".to_string(), |c| format!("exit {c}"));
         let failure = format!(
             "The check `{check}` failed ({exit}):\n{}",
             crate::text::truncate_chars(excerpt.trim(), 2000)
         );
+        if interfered {
+            if let Some(x) = self.tasks.get_mut(task) {
+                x.interference_retried = true;
+            }
+            let why = format!("{failure}\nAnother session was working in this shared worktree at the same time, and the failure may come from its change. Look before you fix. This attempt does not count.");
+            return self.retry_with(cx, task, &who, why, false);
+        }
         self.retry(cx, task, &who, failure);
     }
 
@@ -561,6 +597,11 @@ impl Model {
     /// One attempt did not count. The task goes back to its open session, which made the
     /// change, or to a fresh one after a backoff; past the budget it fails.
     fn retry(&mut self, cx: &mut Cx, task: &str, who: &str, why: String) {
+        self.retry_with(cx, task, who, why, true)
+    }
+
+    /// `retry`; `counted` false when the attempt is not the session's fault.
+    fn retry_with(&mut self, cx: &mut Cx, task: &str, who: &str, why: String, counted: bool) {
         let Some(t) = self.tasks.get(task).cloned() else {
             return;
         };
@@ -572,7 +613,7 @@ impl Model {
             .or_else(|| t.target.clone())
             .unwrap_or_default();
         let budget = self.budget_for(&t, &role);
-        let attempts = t.attempts + 1;
+        let attempts = t.attempts + u32::from(counted);
         if let Some(x) = self.tasks.get_mut(task) {
             x.attempts = attempts;
             x.last_check = Some(why.clone());

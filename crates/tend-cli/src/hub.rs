@@ -303,9 +303,11 @@ struct Hub {
     claims_text: Option<String>,
     /// Slots of sessions in the user's terminal (F4): their launcher pid is watched.
     attached: std::collections::BTreeSet<String>,
+    /// Each slot's last session id: a stream slot that starts again resumes it (G1).
+    last_session: BTreeMap<String, String>,
 }
 
-pub fn run_hub(dir: &Path) -> Result<()> {
+pub fn run_hub(dir: &Path, resume: bool) -> Result<()> {
     let meta: Meta = serde_json::from_str(&fs::read_to_string(dir.join("meta.json"))?)?;
     let sock = socket_path(dir);
     if let Some(parent) = sock.parent() {
@@ -339,9 +341,32 @@ pub fn run_hub(dir: &Path) -> Result<()> {
         audit: crate::config::load().experimental_audit,
         claims_text: None,
         attached: std::collections::BTreeSet::new(),
+        last_session: BTreeMap::new(),
     };
-    eprintln!("tend fleet hub {}: up", hub.meta.id);
-    hub.apply(FleetEvent::Up);
+    let _ = fs::write(dir.join("hub.pid"), std::process::id().to_string());
+    if resume {
+        // G1: the state the ledger describes, then the restart. The replayed records are
+        // in the ledger already; only what comes after is written.
+        for r in read_ledger(dir) {
+            if let FleetBody::Event { event } = r.body {
+                if let FleetEvent::Started { slot, session } = &event {
+                    hub.last_session.insert(slot.clone(), session.clone());
+                }
+                hub.model.step(event, r.ts_ms);
+            }
+        }
+        let slots: Vec<String> = hub.model.slots().keys().cloned().collect();
+        for slot in slots {
+            if let Some(dir) = hub.slot_dir(&slot) {
+                hub.worktrees.insert(slot, dir);
+            }
+        }
+        eprintln!("tend fleet hub {}: restarted", hub.meta.id);
+        hub.apply(FleetEvent::HubRestarted);
+    } else {
+        eprintln!("tend fleet hub {}: up", hub.meta.id);
+        hub.apply(FleetEvent::Up);
+    }
     hub.serve(rx);
     let _ = fs::remove_file(&sock);
     eprintln!("tend fleet hub {}: down", hub.meta.id);
@@ -523,9 +548,10 @@ impl Hub {
             HubRequest::Msg { to, kind, text, .. } => {
                 let to = match to.as_str() {
                     "user" => Address::User,
-                    t => match t.strip_prefix('@') {
-                        Some(r) => Address::Role { name: r.into() },
-                        None => Address::Slot { id: t.into() },
+                    t => match (t.strip_prefix('@'), t.strip_prefix('#')) {
+                        (Some(r), _) => Address::Role { name: r.into() },
+                        (_, Some(team)) => Address::Team { name: team.into() },
+                        _ => Address::Slot { id: t.into() },
                     },
                 };
                 let kind = match kind {
@@ -644,10 +670,13 @@ impl Hub {
                 brief,
                 ..
             } => match self.spawn(slot, workspace, model.as_deref(), permission_mode.as_deref(), brief) {
-                Ok(session) => self.queue.push_back(FleetEvent::Started {
-                    slot: slot.clone(),
-                    session,
-                }),
+                Ok(session) => {
+                    self.last_session.insert(slot.clone(), session.clone());
+                    self.queue.push_back(FleetEvent::Started {
+                        slot: slot.clone(),
+                        session,
+                    })
+                }
                 Err(e) => {
                     eprintln!("tend fleet hub: start {slot}: {e:#}");
                     inbox(&self.dir, &format!("Could not start {slot}: {e:#}"));
@@ -758,7 +787,17 @@ impl Hub {
         brief: &str,
     ) -> Result<String> {
         let cwd = self.workspace_dir(slot, workspace)?;
-        let session = uuid_v4()?;
+        // A stream slot that ran before resumes its conversation (G1); a oneshot always
+        // starts fresh, as a task's attempts do.
+        let resume = self
+            .model
+            .role_of(slot)
+            .filter(|r| r.run == Run::Stream)
+            .and(self.last_session.get(slot).cloned());
+        let session = match &resume {
+            Some(s) => s.clone(),
+            None => uuid_v4()?,
+        };
         let exe = std::env::current_exe().context("find tend executable")?;
         let files = self.dir.join("slots");
         paths::ensure_private_dir(&files)?;
@@ -780,7 +819,10 @@ impl Hub {
                 "stream-json",
                 "--verbose",
             ])
-            .args(["--session-id", &session])
+            .args(match &resume {
+                Some(s) => ["--resume", s.as_str()],
+                None => ["--session-id", session.as_str()],
+            })
             .arg("--append-system-prompt")
             .arg(brief);
         if let Some(m) = model {
@@ -907,7 +949,11 @@ impl Hub {
     fn run_check(&mut self, task: &str, slot: &str, command: &str) {
         let tx = self.tx.clone();
         let (task, command) = (task.to_string(), command.to_string());
-        let wt = self.worktrees.get(slot).cloned();
+        let wt = self
+            .worktrees
+            .get(slot)
+            .cloned()
+            .or_else(|| self.slot_dir(slot));
         let base = self.bases.get(&task).cloned();
         let scratch = self.dir.join("scratch");
         let lock = Arc::clone(&self.checking);
@@ -1009,6 +1055,24 @@ impl Hub {
             _ => self.dir.join("inbox.jsonl"),
         };
         render_inbox(&path)
+    }
+
+    /// Where a slot works, without making anything: its worktree if it exists, or the
+    /// checkout (G1: a restarted hub, a check after its session ended).
+    fn slot_dir(&self, slot: &str) -> Option<PathBuf> {
+        let name = match &self.model.role_of(slot)?.workspace {
+            Workspace::Shared => return Some(PathBuf::from(&self.meta.cwd)),
+            Workspace::WorktreePerWorker => slot.to_string(),
+            Workspace::Team { name } => format!("team-{name}"),
+        };
+        let p = self.dir.join("worktrees").join(file_name(&name));
+        if p.exists() {
+            Some(p)
+        } else if self.meta.base.is_none() {
+            Some(PathBuf::from(&self.meta.cwd))
+        } else {
+            None
+        }
     }
 
     /// A session's write rules (F5c), as JSON for `TEND_FLEET_RULES`.
@@ -2053,6 +2117,38 @@ pub fn merge(spec: Option<&str>, yes: bool) -> Result<String> {
     }
     let model = replay(&meta, &read_ledger(&dir));
     merge_plan(&dir, &meta, &model, yes)
+}
+
+/// `tend fleet restart`: start a fleet's hub again from its ledger (G1).
+pub fn restart(spec: Option<&str>) -> Result<String> {
+    let dir = resolve(spec)?;
+    if is_up(&dir) {
+        bail!("the fleet's hub is running; `tend fleet status` shows it");
+    }
+    let exe = std::env::current_exe().context("find tend executable")?;
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("hub.log"))?;
+    Command::new(exe)
+        .args(["fleet", "hub", "--resume", "--dir"])
+        .arg(&dir)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .process_group(0)
+        .spawn()
+        .context("start the fleet hub")?;
+    for _ in 0..200 {
+        if is_up(&dir) {
+            return status(dir.file_name().and_then(|n| n.to_str()));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    bail!(
+        "the fleet hub did not start; see {}",
+        dir.join("hub.log").display()
+    )
 }
 
 /// `tend fleet down`: stop every session, and wait for the hub to finish.

@@ -1121,6 +1121,20 @@ impl Controller {
         } else {
             None
         };
+        // A shell command that writes where the fleet role may not (G4).
+        let bypass = bypass.or_else(|| {
+            let rules = self.fleet_rules.as_ref()?;
+            if !writes_files(&command) {
+                return None;
+            }
+            crate::perception::write_targets_where(&command, |_| true)
+                .iter()
+                .find_map(|p| {
+                    rules
+                        .refuse_shell_write(p)
+                        .map(|why| format!("it writes {p}, and {why}"))
+                })
+        });
         if let Some(why) = bypass {
             let message = format!(
                 "tend: in a fleet, this session may not run that: {why}. Use `tend task` for your task, and ask your lead or the user for the rest."

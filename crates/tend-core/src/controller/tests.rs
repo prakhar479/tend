@@ -1309,3 +1309,45 @@ fn a_fleet_message_reaches_the_agent_at_its_next_hook_labelled_as_a_message() {
     let d = c.handle(Event::PromptSubmitted { chars: 1 }, 1);
     assert!(d.response.is_empty());
 }
+
+#[test]
+fn a_fleet_role_may_not_write_its_denied_paths_through_the_shell() {
+    let mut c = ctl(Mode::Optimize);
+    let mut rules = crate::fleet::scope::Rules::new(&crate::fleet::scope::RulesFile {
+        root: "/wt".into(),
+        slot: "implementer-1".into(),
+        may_not_write: vec!["tests/**".into()],
+        ..Default::default()
+    });
+    rules.set_claims(&[crate::fleet::scope::ClaimFile {
+        slot: "implementer-2".into(),
+        task: "t-4".into(),
+        worktree: "/wt".into(),
+        scope: vec!["src/db/**".into()],
+    }]);
+    c.set_fleet_rules(rules);
+    let run = |c: &mut Controller, cmd: &str| {
+        c.handle(
+            Event::ToolRequested {
+                tool_use_id: "b".into(),
+                tool: "Bash".into(),
+                input: json!({ "command": cmd }),
+                rewrite_ok: false,
+            },
+            0,
+        )
+        .response
+        .permission
+    };
+    assert!(
+        matches!(run(&mut c, "echo 'x = 1' > tests/test_new.py"), Some(Permission::Deny(m)) if m.contains("may not write `tests/**`"))
+    );
+    assert!(
+        matches!(run(&mut c, "sed -i 's/a/b/' src/db/models.py"), Some(Permission::Deny(m)) if m.contains("implementer-2 claimed"))
+    );
+    assert!(run(&mut c, "echo hi > notes.txt").is_none());
+    assert!(
+        run(&mut c, "cat tests/test_api.py").is_none(),
+        "reading is fine"
+    );
+}

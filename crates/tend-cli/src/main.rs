@@ -163,7 +163,8 @@ enum Cmd {
         #[arg(long, global = true)]
         fleet: Option<String>,
     },
-    /// Send a message in a fleet: to `user`, `@role`, or a session. Without --kind, the
+    /// Send a message in a fleet: to `user`, `@role`, `#team` (the sessions sharing a
+    /// team worktree), or a session. Without --kind: an answer to a question, else the
     /// first kind the fleet's channels allow.
     Msg {
         to: String,
@@ -305,7 +306,13 @@ enum FleetCmd {
     Hub {
         #[arg(long)]
         dir: PathBuf,
+        /// Start again from the ledger (`tend fleet restart`).
+        #[arg(long)]
+        resume: bool,
     },
+    /// Start a fleet's hub again after it stopped: stream sessions resume their
+    /// conversations, and their tasks go back to the queue.
+    Restart { fleet: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -397,10 +404,11 @@ fn fleet_cmd(c: FleetCmd) -> Result<i32> {
         FleetCmd::Pause { fleet } => hub::ask(fleet.as_deref(), hub::HubRequest::Pause)?,
         FleetCmd::Resume { fleet } => hub::ask(fleet.as_deref(), hub::HubRequest::Resume)?,
         FleetCmd::Prune { yes } => hub::prune(yes)?,
-        FleetCmd::Hub { dir } => {
-            hub::run_hub(&dir)?;
+        FleetCmd::Hub { dir, resume } => {
+            hub::run_hub(&dir, resume)?;
             return Ok(0);
         }
+        FleetCmd::Restart { fleet } => hub::restart(fleet.as_deref())?,
     };
     println!("{}", text.trim_end());
     Ok(0)

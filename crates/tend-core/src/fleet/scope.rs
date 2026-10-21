@@ -66,6 +66,16 @@ impl Rules {
             .collect();
     }
 
+    /// Why a shell command may not write `path`, if it may not (G4). Only what is
+    /// denied counts: a shell command's words are read loosely (`s/a/b/` of `sed -i`
+    /// reads as a path), so an allow-list (`may_write`) would refuse words that are no
+    /// files. Advisory, like the guard's Bash rule.
+    pub fn refuse_shell_write(&self, path: &str) -> Option<String> {
+        let mut deny_only = self.clone();
+        deny_only.may_write.clear();
+        deny_only.refuse(path)
+    }
+
     /// Why this session may not edit `path`, if it may not.
     pub fn refuse(&self, path: &str) -> Option<String> {
         let rel = path
@@ -118,6 +128,20 @@ mod tests {
             .refuse("/wt/team/src/api.py")
             .is_some_and(|w| w.contains("may write only tests/**")));
         assert!(r.refuse("/wt/team/tests/a/b.py").is_none());
+    }
+
+    #[test]
+    fn shell_writes_see_only_what_is_denied() {
+        let r = rules(&["tests/**"], &["migrations/**"]);
+        assert!(r.refuse_shell_write("migrations/0001.sql").is_some());
+        assert!(
+            r.refuse_shell_write("s/a/b/").is_none(),
+            "a sed script is no file"
+        );
+        assert!(
+            r.refuse("/wt/team/src/x.py").is_some(),
+            "the edit tools still use the allow-list"
+        );
     }
 
     #[test]

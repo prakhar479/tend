@@ -363,6 +363,24 @@ Owner decisions 2026-10-21: awareness and learning first; spawning is a core fea
   Presets are built and table-tested (F3b); `review`, `best-of`, `pipeline`, `supervisor`, and `pool` run through the same model as `lead`. **Not done:** the seeded bench run per preset (it needs a run budget).
 - [x] **F5g Hierarchy (first-class).** Sub-leads, task trees, budget slices that only narrow, escalation upward, roll-up reports, sub-lead restart. Acceptance: lead → 2 sub-leads → 2 workers each; a child cannot exceed its slice; a killed sub-lead resumes its subtree.
   Done 2026-10-21. Model tests (F3b) and an e2e run of the `tree` preset: the lead split its task between two sub-leads, each split its part between two workers of its own team, every report went to the task's creator, and each level finished after its parts.
+### Fleet gaps G (collected 2026-10-21, after F4 and F5; most important first)
+
+- [x] **G1 Hub restart.** A dead hub ends its stream sessions and nothing brings the fleet back. `tend fleet restart [id]` starts the hub again from its ledger: live slots are marked gone, stream slots restart with `claude --resume <their session>` (their conversation goes on), tasks they had go back to the queue without costing an attempt, and checks that were running run again.
+  Done 2026-10-21. `tend fleet restart [id]`; the hub writes `hub.pid`. On restart it replays the ledger, then records `hub_restarted`: live stream slots wait to start again (no crash counted) and resume with `--resume <last session>`; oneshot and terminal slots end; their tasks are queued again at no attempt; checks that were running run again. Tested by killing the hub with SIGKILL.
+- [x] **G2 A worker that asks waits for the answer.** A oneshot that sent a question (`tend msg`) while its task is open is not released at the end of its turn; the answer comes in as its next turn. It gives up after 10 minutes without one (the task's attempt ends).
+  Done 2026-10-21. A oneshot with an open task that sends a question is not released at its turn end; whatever message reaches it next comes in as its next turn; after 10 minutes without one it is released. The worker brief says so.
+- [x] **G3 Team channel.** `tend msg #<team> "…"` reaches the other sessions that share the team worktree (`workspace = "team:<name>"`), with no channel to declare.
+  Done 2026-10-21. `#<team>` addresses the other running sessions of the same level whose role works in `team:<team>`; notices (the default), questions, and answers; a session outside the team is refused.
+- [x] **G4 Bash writes and the fleet scope.** PreToolUse also denies a Bash command whose write targets (redirects, `sed -i`, `tee`, …) fall outside the role's scope or inside another session's claim. Advisory: a text reading, like the guard's Bash rule (R1.4).
+  Done 2026-10-21. In a fleet session, a Bash command that writes (`writes_files`) is denied when one of its write targets is in `may_not_write` or another session's claim. Only the deny side: the shell reading lists words that are no files, so a `may_write` allow-list would refuse at random; Edit and Write still use the allow-list.
+- [x] **G5 Interference in a shared worktree.** A failed check while another session of the same team worktree was working costs no attempt the first time; the failure goes back with a note that the other session may have caused it.
+  Done 2026-10-21. A failed check of a task in a team worktree, while another session there has a task, goes back once without costing an attempt, with a note that the other session's change may be the cause. The next failure counts.
+- [ ] **G6 Unread counts.** `tend status` in a fleet session shows messages that arrived since its last hook; `tend fleet` shows the user's unread fleet messages; `tend inbox` marks them read.
+- [ ] **G7 `tend fleet replay [id] [--file other.toml]`.** Replay the recorded events, with the fleet's file or another one, and say whether the records match, or where they first differ, and what the other file would have done.
+- [ ] **G8 Handoff flows (`pipeline`, `review`).** When a task of a role with one handoff channel is done, tend adds the next role's task with the summary (pipeline). When a reviewer blocks its review with findings, the author gets a new task with them, up to `max_rounds`.
+- [ ] **G9 `best-of`.** A task for the candidate role fans out to one part per candidate; when all are done the judge decides: `judge = "rule"` picks the passing candidate with the smallest diff, `agent` gives the judge a task with every candidate's summary, `user` asks the user.
+- [ ] **G10 Preset bench.** One seeded run per preset on Haiku (`scripts/fleet_bench.py`): did the flow finish, how many attempts, what it cost.
+
 - [ ] **F6 Cross-provider.** After the Codex connector (S10, E12).
 
 ## Phase 2 — Optimize + Codex (not started)

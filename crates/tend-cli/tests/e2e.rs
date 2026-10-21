@@ -2338,3 +2338,66 @@ echo "$TEND_FLEET_SLOT" > "$D/rev-slot.txt"
         "{out:?}"
     );
 }
+
+/// G1: the hub dies, its stream sessions end; `tend fleet restart` brings the fleet back
+/// from its ledger, and each stream session resumes its own conversation.
+#[test]
+fn fleet_restart_resumes_stream_sessions_after_the_hub_dies() {
+    let (dir, repo, home) = fleet_repo(
+        "restart",
+        &[("a.txt", "a\n")],
+        "preset = \"peers\"\n\n[role.peer]\nworkspace = \"worktree-per-worker\"\n",
+    );
+    let agent = fake_stream_agent(&dir);
+    let tend = |args: &[&str]| tend_in(&repo, &home, &agent, args);
+    let _down = FleetDown(repo.clone(), home.clone(), agent.clone());
+    tend(&["fleet", "up", "fleet.toml"]);
+    let wait = |name: &str, want: &dyn Fn(&str) -> bool| -> String {
+        for _ in 0..100 {
+            if let Ok(t) = fs::read_to_string(dir.join(name)) {
+                if want(&t) {
+                    return t;
+                }
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        panic!("{name}: {:?}", fs::read_to_string(dir.join(name)));
+    };
+    let first = wait("args-peer-1.txt", &|t| t.contains("--session-id "));
+    let session = first
+        .split("--session-id ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    let fleet_dir = fs::read_dir(home.join("fleets"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let pid: i32 = fs::read_to_string(fleet_dir.join("hub.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    for _ in 0..100 {
+        if tend(&["fleet", "status"]).contains("hub not running") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let restarted = tend(&["fleet", "restart"]);
+    assert!(restarted.contains(" · up · "), "{restarted}");
+    let again = wait("args-peer-1.txt", &|t| t.contains("--resume "));
+    assert!(again.contains(&format!("--resume {session}")), "{again}");
+    let s = tend(&["fleet", "status"]);
+    assert!(
+        s.lines().filter(|l| l.contains("running")).count() == 2,
+        "{s}"
+    );
+    assert!(!s.contains("restarts"), "a restart is not a crash: {s}");
+}

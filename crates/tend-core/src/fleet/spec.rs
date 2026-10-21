@@ -262,7 +262,7 @@ use Verb::*;
 
 const LEAD_BRIEF: &str = "You lead a team of agents through tend. Split the work into tasks with `tend task add`, give them out with `tend task assign`, and answer workers' questions. A task is done only when tend's check passes.";
 const SUB_LEAD_BRIEF: &str = "You lead a part of the work, with workers of your own. Give them tasks with `tend task add` and `tend task assign`, and report to your parent with `tend msg @parent`.";
-const WORKER_BRIEF: &str = "You are a worker in a tend fleet. Do the one task you were given, in this worktree. Ask with `tend msg @lead`. Finish with `tend task done <id> \"summary\"`, or `tend task blocked <id> \"reason\"`.";
+const WORKER_BRIEF: &str = "You are a worker in a tend fleet. Do the one task you were given, in this worktree. To ask your lead, run `tend msg @lead \"<question>\"` and end your turn: the answer comes as your next message. Finish with `tend task done <id> \"summary\"`, or `tend task blocked <id> \"reason\"`.";
 
 /// The roles and channels a preset starts from. Inside a team (`as_team`), the lead is
 /// the parent session, so presets drop their `lead` role and say `parent` instead.

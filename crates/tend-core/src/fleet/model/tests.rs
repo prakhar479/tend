@@ -1663,3 +1663,157 @@ fn a_reply_to_a_question_is_an_answer() {
         Some(MsgKind::Answer)
     );
 }
+
+// --- Hub restart (G1) ------------------------------------------------------------------
+
+#[test]
+fn after_a_hub_restart_stream_slots_come_back_and_tasks_are_not_charged() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead", "check": "make check", "role": {"reviewer": {"run": "attached"}}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    r.ev(FleetEvent::Attached {
+        role: "reviewer".into(),
+        name: None,
+        session: "p".into(),
+    });
+    // A worker on t-1, and t-2 being checked.
+    let c = r.ev(add(slot("lead-1"), "one", &[], Some("worker")));
+    r.start_all(&c);
+    let c = r.ev(add(slot("lead-1"), "two", &[], Some("worker")));
+    r.start_all(&c);
+    r.ev(done("worker-2", "t-2"));
+    let c = r.ev(FleetEvent::HubRestarted);
+    // The check runs again; the lead starts again (no crash); the worker's task is queued.
+    assert!(
+        c.iter()
+            .any(|c| matches!(c, Command::RunCheck { task, .. } if task == "t-2")),
+        "{c:?}"
+    );
+    assert!(spawned(&c).contains(&"lead-1"), "{c:?}");
+    assert_eq!(r.m.slots()["lead-1"].restarts, 0);
+    assert_eq!(r.state("reviewer-1"), SlotState::Stopped);
+    assert_eq!(r.state("worker-1"), SlotState::Stopped);
+    let t1 = r.m.tasks().find(|t| t.id == "t-1").unwrap();
+    assert_eq!(t1.attempts, 0);
+    assert!(
+        spawned(&c).iter().any(|s| s.starts_with("worker-")),
+        "t-1 gets a fresh worker: {c:?}"
+    );
+    assert!(c
+        .iter()
+        .any(|c| matches!(c, Command::Notify { text } if text.contains("hub restarted"))));
+}
+
+#[test]
+fn a_worker_that_asks_waits_for_the_answer() {
+    let mut r = Sim::new(preset(Preset::Lead));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let c = r.ev(add(slot("lead-1"), "migrate", &[], None));
+    r.start_all(&c);
+    r.ev(msg(
+        slot("worker-1"),
+        Address::Role {
+            name: "lead".into(),
+        },
+        MsgKind::Question,
+    ));
+    // Its turn ends: it waits, rather than being released.
+    assert!(released(&r.ev(turn_end("worker-1"))).is_empty());
+    let c = r.ev(msg(
+        slot("lead-1"),
+        Address::Slot {
+            id: "worker-1".into(),
+        },
+        MsgKind::Answer,
+    ));
+    assert_eq!(
+        delivered(&c).first().map(|d| d.0.as_str()),
+        Some("worker-1")
+    );
+    // With the answer it goes on; its next turn end, without `done`, releases it.
+    assert_eq!(released(&r.ev(turn_end("worker-1"))), ["worker-1"]);
+    // One that never gets an answer ends after the wait.
+    let c = r.ev(add(slot("lead-1"), "other", &[], None));
+    r.start_all(&c);
+    r.ev(msg(
+        slot("worker-2"),
+        Address::Role {
+            name: "lead".into(),
+        },
+        MsgKind::Question,
+    ));
+    r.ev(turn_end("worker-2"));
+    let t = r.now;
+    assert!(released(&r.at(t + QUESTION_WAIT_MS - 1, FleetEvent::Tick)).is_empty());
+    assert_eq!(
+        released(&r.at(t + QUESTION_WAIT_MS + 1, FleetEvent::Tick)),
+        ["worker-2"]
+    );
+}
+
+#[test]
+fn a_team_channel_reaches_the_others_in_the_shared_worktree() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead",
+        "role": {"worker": {"workspace": "team:api", "replicas": "0..3"}, "docs": {}},
+        "limits": {"sessions": 5}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    for _ in 0..3 {
+        let c = r.ev(add(slot("lead-1"), "part", &[], Some("worker")));
+        r.start_all(&c);
+    }
+    let team = Address::Team { name: "api".into() };
+    assert_eq!(
+        r.m.default_kind(&slot("worker-1"), &team),
+        Some(MsgKind::Notice)
+    );
+    let c = r.ev(msg(slot("worker-1"), team.clone(), MsgKind::Notice));
+    let to: Vec<String> = delivered(&c).into_iter().map(|(t, _)| t).collect();
+    assert_eq!(to, ["worker-2", "worker-3"], "the others, not itself");
+    // The lead is not in the team's worktree; a task is not team talk.
+    let c = r.ev(msg(slot("lead-1"), team.clone(), MsgKind::Notice));
+    assert!(
+        refused(&c).is_some_and(|t| t.contains("does not work in team api")),
+        "{c:?}"
+    );
+    let c = r.ev(msg(slot("worker-1"), team, MsgKind::Task));
+    assert!(refused(&c).is_some(), "{c:?}");
+}
+
+#[test]
+fn a_failure_in_a_busy_shared_worktree_is_not_charged_the_first_time() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead", "check": "make check",
+        "role": {"worker": {"workspace": "team:api", "replicas": "0..2"}}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    for t in ["a", "b"] {
+        let c = r.ev(add(slot("lead-1"), t, &[], None));
+        r.start_all(&c);
+    }
+    r.ev(done("worker-1", "t-1"));
+    let c = r.ev(checked("t-1", false, "boom", &[]));
+    let text = c
+        .iter()
+        .find_map(|c| match c {
+            Command::Deliver {
+                kind: MsgKind::Task,
+                text,
+                ..
+            } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(text.contains("may come from its change"), "{text}");
+    assert_eq!(r.m.tasks().next().unwrap().attempts, 0);
+    // The second failure counts.
+    r.ev(done("worker-1", "t-1"));
+    r.ev(checked("t-1", false, "boom", &[]));
+    assert_eq!(r.m.tasks().next().unwrap().attempts, 1);
+}

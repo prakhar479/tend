@@ -20,6 +20,8 @@ pub const MAX_RESTARTS: u32 = 3;
 const BACKOFF_MS: u64 = 5_000;
 /// Messages per minute on one edge (sender → receiver), at most.
 pub const RATE_PER_MIN: usize = 10;
+/// A oneshot that asked a question waits this long for the answer (G2).
+pub const QUESTION_WAIT_MS: u64 = 10 * 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -42,6 +44,10 @@ pub enum Address {
     /// Every running session of a role, seen from the sender: its own level, or the
     /// team it leads; `parent` is the slot that leads the sender's team.
     Role {
+        name: String,
+    },
+    /// Every other running session that shares the team worktree `name` (G3).
+    Team {
         name: String,
     },
 }
@@ -157,6 +163,8 @@ pub enum FleetEvent {
     /// Stop handing out work and starting sessions; running turns finish.
     Pause,
     Resume,
+    /// The hub started again after it stopped (G1): its sessions are gone.
+    HubRestarted,
     /// A session in the user's terminal joins as an attached role (F4). `name` becomes
     /// its slot id, else `<role>-<n>`.
     Attached {
@@ -297,6 +305,9 @@ pub struct Slot {
     /// When the current session started.
     #[serde(default)]
     pub started_ms: u64,
+    /// A oneshot asked a question at this time, and waits for the answer (G2).
+    #[serde(default)]
+    pub awaiting: Option<u64>,
 }
 
 impl Slot {
@@ -461,6 +472,7 @@ impl Model {
                 ),
             ),
             FleetEvent::Pause => self.pause(&mut cx, "The user paused the fleet."),
+            FleetEvent::HubRestarted => self.on_hub_restarted(&mut cx),
             FleetEvent::Attached {
                 role,
                 name,
@@ -586,6 +598,7 @@ impl Model {
                 tokens: 0,
                 cost_usd: 0.0,
                 started_ms: 0,
+                awaiting: None,
             },
         );
         id
@@ -805,6 +818,30 @@ impl Model {
                 cx,
                 &id,
                 &format!("ran past its wall-time budget of {} min", wall / 60_000),
+            );
+        }
+        // A oneshot that waited too long for an answer ends (G2).
+        let waited: Vec<SlotId> = self
+            .slots
+            .values()
+            .filter(|s| s.live() && !s.busy)
+            .filter(|s| {
+                s.awaiting
+                    .is_some_and(|t| cx.now.saturating_sub(t) > QUESTION_WAIT_MS)
+            })
+            .map(|s| s.id.clone())
+            .collect();
+        for id in waited {
+            if let Some(s) = self.slots.get_mut(&id) {
+                s.awaiting = None;
+            }
+            self.cmd(
+                cx,
+                Command::Release { slot: id.clone() },
+                &format!(
+                    "{id} asked a question and had no answer in {} min.",
+                    QUESTION_WAIT_MS / 60_000
+                ),
             );
         }
         let stuck_ms = |m: &Model, s: &Slot| {
@@ -1086,6 +1123,32 @@ impl Model {
                 }
                 Ok(vec![Address::Slot { id: id.clone() }])
             }
+            Address::Team { name } => {
+                if !matches!(kind, MsgKind::Notice | MsgKind::Question | MsgKind::Answer) {
+                    return Err(format!(
+                        "A team channel carries notices, questions, and answers, not {}.",
+                        a_kind(kind)
+                    ));
+                }
+                let ws = Workspace::Team { name: name.clone() };
+                let in_team = |s: &Slot| self.role_def(s).is_some_and(|r| r.workspace == ws);
+                if let Some(m) = &me {
+                    if !in_team(m) {
+                        return Err(format!("{} does not work in team {name}'s worktree.", m.id));
+                    }
+                }
+                let found: Vec<Address> = self
+                    .slots
+                    .values()
+                    .filter(|t| t.live() && in_team(t) && Some(&t.id) != me_id.as_ref())
+                    .filter(|t| me.as_ref().is_none_or(|m| t.leader == m.leader))
+                    .map(|t| Address::Slot { id: t.id.clone() })
+                    .collect();
+                if found.is_empty() {
+                    return Err(format!("No other session of team {name} is running."));
+                }
+                Ok(found)
+            }
             Address::Role { name } => {
                 if name == "parent" {
                     let s = me.as_ref().ok_or("The user has no parent.")?;
@@ -1137,6 +1200,21 @@ impl Model {
             Actor::User => "user".into(),
             Actor::Tend => "tend".into(),
         };
+        // A oneshot that asks while its task is open waits for the answer (G2).
+        if let (Actor::Slot { id }, MsgKind::Question) = (&from, kind) {
+            let oneshot = self
+                .slots
+                .get(id)
+                .and_then(|s| self.role_def(s))
+                .is_some_and(|r| r.run == Run::Oneshot);
+            if let Some(s) = self
+                .slots
+                .get_mut(id)
+                .filter(|s| oneshot && s.task.is_some())
+            {
+                s.awaiting = Some(cx.now);
+            }
+        }
         for t in targets {
             let receiver = match &t {
                 Address::Slot { id } => id.clone(),
@@ -1165,6 +1243,8 @@ impl Model {
             }
             if let Address::Slot { id } = &t {
                 if let Some(s) = self.slots.get_mut(id) {
+                    // An answer (or anything) for a waiting asker is what it waited for.
+                    s.awaiting = None;
                     if kind == MsgKind::Task {
                         s.busy = true;
                         s.last_seen_ms = cx.now;
@@ -1194,6 +1274,96 @@ impl Model {
             text: format!("tend: refused. {reason}"),
         };
         self.cmd(cx, command, reason);
+    }
+
+    // --- Hub restart (G1) -------------------------------------------------------------
+
+    /// The hub came back. Its sessions ended with it (their stdin closed): stream slots
+    /// start again, which is no crash; oneshot and terminal slots end. Their tasks go
+    /// back to the queue without costing an attempt, and checks that ran run again.
+    fn on_hub_restarted(&mut self, cx: &mut Cx) {
+        if !self.up {
+            return self.on_up(cx);
+        }
+        let live: Vec<SlotId> = self
+            .slots
+            .values()
+            .filter(|s| s.live())
+            .map(|s| s.id.clone())
+            .collect();
+        for id in &live {
+            let run = self
+                .slots
+                .get(id)
+                .and_then(|s| self.role_def(s))
+                .map(|r| r.run);
+            let cost = self.slots.get(id).map_or(0.0, |s| s.cost_usd);
+            self.spent_usd += cost;
+            if let Some(s) = self.slots.get_mut(id) {
+                s.state = match run {
+                    Some(Run::Stream) if !s.stopping => SlotState::Waiting,
+                    _ => SlotState::Stopped,
+                };
+                s.session = None;
+                s.busy = false;
+                s.retry_at = None;
+                s.stuck = 0;
+                s.cost_usd = 0.0;
+            }
+        }
+        let tasks: Vec<(String, TaskState, Option<SlotId>)> = self
+            .tasks()
+            .map(|t| (t.id.clone(), t.state, t.slot.clone()))
+            .collect();
+        for (tid, state, slot) in tasks {
+            match state {
+                TaskState::Working | TaskState::Bound => {
+                    if let Some(sid) = &slot {
+                        if let Some(s) = self.slots.get_mut(sid) {
+                            s.task = None;
+                        }
+                    }
+                    let role = slot
+                        .as_ref()
+                        .and_then(|s| self.slots.get(s))
+                        .map(|s| s.role.clone());
+                    if let Some(t) = self.tasks.get_mut(&tid) {
+                        t.state = TaskState::Queued;
+                        t.slot = None;
+                        if t.target.is_none() || t.target == slot {
+                            t.target = role.or(t.target.clone());
+                        }
+                    }
+                }
+                TaskState::Checking => {
+                    let t = self.tasks[&tid].clone();
+                    if let (Some(command), Some(sid)) = (self.check_for(&t), slot) {
+                        self.cmd(
+                            cx,
+                            Command::RunCheck {
+                                task: tid.clone(),
+                                slot: sid,
+                                command,
+                            },
+                            &format!("The hub restarted while {tid}'s check ran; it runs again."),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.cmd(
+            cx,
+            Command::Notify {
+                text: format!(
+                    "tend fleet: the hub restarted; {} session{} ended with the old one. Stream sessions resume their conversations; their tasks go back to the queue.",
+                    live.len(),
+                    if live.len() == 1 { "" } else { "s" }
+                ),
+            },
+            "The hub restarted.",
+        );
+        self.retry_waiting(cx);
     }
 
     // --- Attached sessions and message kinds (F4) -----------------------------------
@@ -1263,6 +1433,7 @@ impl Model {
                     tokens: 0,
                     cost_usd: 0.0,
                     started_ms: 0,
+                    awaiting: None,
                 };
                 self.slots.insert(id.clone(), slot);
                 id
@@ -1297,6 +1468,7 @@ impl Model {
             Address::Slot { id } => Some(id.clone()),
             Address::User => Some("user".to_string()),
             Address::Role { .. } => None,
+            Address::Team { .. } => return Some(MsgKind::Notice),
         };
         if let Some(them) = them {
             if self.last_kind.get(&(them, me)) == Some(&MsgKind::Question)
