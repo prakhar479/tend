@@ -1070,3 +1070,22 @@ fn restored_levels_respect_the_allow_list() {
         .any(|e| matches!(&e.body, Body::Adaptation { knob, .. } if knob == "shape_level.test")));
     assert_eq!(c.learned_levels()["test"], 1);
 }
+
+/// `wrap_tests = false`: test runs go through as written, with no wrap action.
+#[test]
+fn wrapping_can_be_turned_off() {
+    let cfg = Config {
+        wrap_tests: false,
+        ..Config::default()
+    };
+    let mut c = Controller::new(cfg, Capabilities::CLAUDE_CODE, Mode::Optimize);
+    let d = c.handle(requested("t1", "pytest -q", true), 0);
+    assert!(!d.response.wrap);
+    assert!(!d.entries.iter().any(|e| matches!(
+        &e.body,
+        Body::Action {
+            action: ActionKind::Wrap { .. },
+            ..
+        }
+    )));
+}

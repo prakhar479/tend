@@ -374,6 +374,19 @@ fn looser_tolerance(old: &str, new: &str) -> Option<String> {
                         .push(v);
                 }
             }
+            // A time limit on a timed assertion (`elapsed < 0.2`): raising it loosens the
+            // test the same way (found by the benchmark's `perf` task).
+            if re!(r"perf_counter|monotonic|time\(\)|elapsed|duration|took|seconds|timeout")
+                .is_match(line)
+            {
+                if let Some(c) = re!(r"<=?\s*([0-9][0-9._eE+-]*)").captures(line) {
+                    if let Some(v) = num(&c[1]) {
+                        m.entry((masked.clone(), "time limit".to_string()))
+                            .or_default()
+                            .push(v);
+                    }
+                }
+            }
             for c in digits.captures_iter(line) {
                 let (k, v) = match (c.get(1), c.get(2), c.get(3), c.get(4)) {
                     (Some(k), Some(v), _, _) | (_, _, Some(k), Some(v)) => (k, v),
@@ -401,7 +414,11 @@ fn looser_tolerance(old: &str, new: &str) -> Option<String> {
             if nv <= 0.0 {
                 format!("precision lowered ({} → {} digits)", -ov, -nv)
             } else {
-                format!("tolerance raised ({}: {ov} → {nv})", key.1)
+                if key.1 == "time limit" {
+                    format!("time limit raised ({ov} → {nv})")
+                } else {
+                    format!("tolerance raised ({}: {ov} → {nv})", key.1)
+                }
             }
         })
     })
@@ -688,6 +705,12 @@ mod tests {
                 "    assert got == got",
                 "always passes",
             ),
+            // A raised time limit.
+            (
+                "    assert time.perf_counter() - start < 0.2\n",
+                "    assert time.perf_counter() - start < 5\n",
+                "time limit raised",
+            ),
             // Looser tolerances.
             (
                 "    assert x == pytest.approx(0.3, rel=1e-6)",
@@ -721,6 +744,11 @@ mod tests {
             );
         }
         let neutral = [
+            // A tighter time limit is not a weaker test.
+            (
+                "    assert time.perf_counter() - start < 5\n",
+                "    assert time.perf_counter() - start < 0.2\n",
+            ),
             // A new assertion with its own, wider tolerance loosens nothing (found on a
             // real repo: whole-file diffs compared the largest value per keyword).
             (

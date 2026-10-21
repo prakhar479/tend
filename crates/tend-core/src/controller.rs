@@ -46,6 +46,9 @@ pub struct Config {
     pub plugin_mode: Mode,
     /// A desktop notification when tend steers a loop or blocks an edit (unattended runs).
     pub notify: bool,
+    /// Wrap test runs in `tend run` (optimize mode). In auto mode each wrapped call costs
+    /// Claude Code about 1-2 s of permission checking (benchmark, 2026-10-20).
+    pub wrap_tests: bool,
 }
 
 impl Default for Config {
@@ -60,6 +63,7 @@ impl Default for Config {
             experimental_audit: false,
             plugin_mode: Mode::Look,
             notify: false,
+            wrap_tests: true,
         }
     }
 }
@@ -72,6 +76,7 @@ impl Config {
             ("experimental_audit", self.experimental_audit.to_string()),
             ("keep_days", self.keep_days.to_string()),
             ("notify", self.notify.to_string()),
+            ("wrap_tests", self.wrap_tests.to_string()),
             (
                 "plugin_mode",
                 format!("{:?}", self.plugin_mode).to_lowercase(),
@@ -976,7 +981,11 @@ impl Controller {
         rewrite_ok: bool,
     ) {
         let info = classify(&command);
-        if info.kind != OutputKind::Test || info.show_target.is_some() || tool_use_id.is_empty() {
+        if !self.cfg.wrap_tests
+            || info.kind != OutputKind::Test
+            || info.show_target.is_some()
+            || tool_use_id.is_empty()
+        {
             return;
         }
         // `tend run` is a subprocess. Claude Code keeps only the working directory between

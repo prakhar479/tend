@@ -12,6 +12,7 @@
 //! experimental_audit = false  # audit what each session changed in tests and checks
 //! plugin_mode = look         # mode of sessions the Claude Code plugin starts
 //! notify = false             # desktop notification on a loop or a blocked edit
+//! wrap_tests = true          # optimize: run tests through `tend run` (costs ~1-2 s each in auto mode)
 //! ```
 
 use std::env;
@@ -57,7 +58,7 @@ pub fn load() -> Config {
     c
 }
 
-const KEYS: [&str; 9] = [
+const KEYS: [&str; 10] = [
     "shape_threshold_tokens",
     "max_summary_ratio",
     "loop_threshold",
@@ -67,6 +68,7 @@ const KEYS: [&str; 9] = [
     "experimental_audit",
     "plugin_mode",
     "notify",
+    "wrap_tests",
 ];
 
 fn parse(text: &str) -> (Config, Vec<String>) {
@@ -124,6 +126,13 @@ fn apply(c: &mut Config, line: &str, seen: &mut std::collections::BTreeSet<Strin
                 "look" => tend_core::Mode::Look,
                 "optimize" => tend_core::Mode::Optimize,
                 v => bail!("{key} must be look or optimize, got {v}"),
+            }
+        }
+        "wrap_tests" => {
+            c.wrap_tests = match value {
+                "true" => true,
+                "false" => false,
+                v => bail!("{key} must be true or false, got {v}"),
             }
         }
         "notify" => {

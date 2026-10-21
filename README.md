@@ -87,6 +87,7 @@ keep_days = 30                  # 0 keeps every session
 experimental_audit = false      # audit each session's changes to tests and checks (under test)
 plugin_mode = look              # mode of sessions the Claude Code plugin starts
 notify = false                  # desktop notification when tend steers a loop or blocks an edit
+wrap_tests = true               # optimize: run tests through `tend run`; each costs ~1-2 s in auto mode
 ```
 
 ## Repo policy
