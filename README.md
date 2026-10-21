@@ -49,6 +49,8 @@ tend fleet                           # fleets, and live tend sessions on this ma
 tend fleet up fleet.toml             # run a team of agents from a fleet file (or --preset lead)
 tend fleet status                    # its sessions: state, pid, turns, restarts, worktree
 tend fleet down                      # stop them all; `tend fleet prune` cleans up worktrees
+tend task add "fix the parser" --role worker   # the task board (agents in the fleet use it too)
+tend task list                       # tasks: state, session, dependencies, outcome
 tend show o-3                        # full original of a summarized output
 tend why a-2                         # cause chain of an action
 tend mode optimize                   # change the mode of the live session
@@ -104,7 +106,7 @@ Sessions on one machine see what the others do (design: `docs/fleet-2026-10-21.m
 - **Peer failure.** A failed run here names a file another session in this checkout edited in the last 30 minutes.
 - **Worktree overlap.** In another worktree of the same repo, both sessions edited one file. Merging the branches will conflict there.
 
-`tend fleet up` runs a team from a fleet file (TOML): roles, how many of each, who may message whom, and limits (design: `docs/fleet-topologies-2026-10-21.md`). A hub starts each session headless under `tend claude`, each in its own worktree on a `tend/<fleet>/<slot>` branch, restarts one that crashes (after 5, 10, 20 s), and records every step in `~/.local/share/tend/fleets/<id>/ledger.jsonl`. `tend fleet prune` never removes a worktree with uncommitted changes or commits past the base. Tasks and messages between sessions come next.
+`tend fleet up` runs a team from a fleet file (TOML): roles, how many of each, who may message whom, and limits (design: `docs/fleet-topologies-2026-10-21.md`). A hub starts each session headless under `tend claude`, each in its own worktree on a `tend/<fleet>/<slot>` branch, restarts one that crashes (after 5, 10, 20 s), and records every step in `~/.local/share/tend/fleets/<id>/ledger.jsonl`. `tend fleet prune` never removes a worktree with uncommitted changes or commits past the base. Tasks go on the fleet's board (`tend task add`, `assign`, `claim`, `done`, `blocked`): a lead's agent splits its task into parts, each ready part goes to a fresh worker session, a task waits for the tasks it depends on, and a session that ends without finishing costs the task an attempt. tend tells the sessions apart by their process tree, so an agent cannot act as another session or as you. Messages between sessions come next.
 
 Each notice is an action in the ledger, caused by the other session's entry. `tend why a-N` follows the cause into that session's ledger. With `fleet = look` (the default) notices are only recorded and shown in `tend report`. With `fleet = on`, a session in optimize mode also gets them as added context at its next hook. Notices of one kind about one file make one message; at most 3 messages per hook and 40 notices per session.
 

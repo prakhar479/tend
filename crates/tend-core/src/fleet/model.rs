@@ -87,6 +87,40 @@ pub enum FleetEvent {
         kind: MsgKind,
         text: String,
     },
+    /// Put a task on the board (F5a). `role`: who should do it, at the adder's board.
+    TaskAdd {
+        by: Actor,
+        title: String,
+        #[serde(default)]
+        body: String,
+        #[serde(default)]
+        depends_on: Vec<String>,
+        #[serde(default)]
+        scope: Vec<String>,
+        #[serde(default)]
+        role: Option<String>,
+    },
+    /// Give a task to a role or a slot.
+    TaskAssign {
+        by: Actor,
+        task: String,
+        to: String,
+    },
+    /// Take a ready task (a given one, or the next one for the slot's role).
+    TaskClaim {
+        by: Actor,
+        task: Option<String>,
+    },
+    TaskDone {
+        by: Actor,
+        task: String,
+        summary: String,
+    },
+    TaskBlocked {
+        by: Actor,
+        task: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,6 +162,16 @@ pub enum Command {
     /// Tell the user (inbox, notification).
     Notify {
         text: String,
+    },
+    /// The reply to the request this event was: refusals, and what a task verb did.
+    Answer {
+        to: Actor,
+        text: String,
+    },
+    /// Give the task to a fresh session at `at_ms`. The hub only waits.
+    TaskRetry {
+        task: String,
+        at_ms: u64,
     },
 }
 
@@ -185,6 +229,12 @@ pub struct Slot {
     pub stuck: u8,
     /// Stopped on purpose: do not restart on exit.
     pub stopping: bool,
+    /// The task this slot is bound to or working on.
+    #[serde(default)]
+    pub task: Option<String>,
+    /// It was given a task once. A oneshot gets no second one: it ends after its turn.
+    #[serde(default)]
+    pub had_task: bool,
 }
 
 impl Slot {
@@ -211,6 +261,11 @@ pub struct Model {
     edges: BTreeMap<(String, String), Vec<u64>>,
     /// The user was told the session limit was reached, and nothing freed up since.
     told_limit: bool,
+    /// The task board (F5a), by id, and the ids in the order tasks were added.
+    tasks: BTreeMap<String, tasks::Task>,
+    task_order: Vec<String>,
+    /// Numbers given so far at the top (`t-N`) and under each parent task (`t-N.k`).
+    task_numbers: BTreeMap<String, u32>,
 }
 
 impl Model {
@@ -224,6 +279,9 @@ impl Model {
             next_action: 1,
             edges: BTreeMap::new(),
             told_limit: false,
+            tasks: BTreeMap::new(),
+            task_order: Vec::new(),
+            task_numbers: BTreeMap::new(),
         }
     }
 
@@ -273,7 +331,35 @@ impl Model {
                 kind,
                 text,
             } => self.on_message(&mut cx, from, to, kind, text),
+            FleetEvent::TaskAdd {
+                by,
+                title,
+                body,
+                depends_on,
+                scope,
+                role,
+            } => self.on_task_add(
+                &mut cx,
+                by,
+                tasks::NewTask {
+                    title,
+                    body,
+                    depends_on,
+                    scope,
+                    role,
+                },
+            ),
+            FleetEvent::TaskAssign { by, task, to } => self.on_task_assign(&mut cx, by, &task, &to),
+            FleetEvent::TaskClaim { by, task } => self.on_task_claim(&mut cx, by, task.as_deref()),
+            FleetEvent::TaskDone { by, task, summary } => {
+                self.on_task_end(&mut cx, by, &task, Ok(summary))
+            }
+            FleetEvent::TaskBlocked { by, task, reason } => {
+                self.on_task_end(&mut cx, by, &task, Err(reason))
+            }
         }
+        // Whatever changed, ready tasks may now have somewhere to go.
+        self.dispatch(&mut cx);
         out
     }
 
@@ -372,6 +458,8 @@ impl Model {
                 last_seen_ms: 0,
                 stuck: 0,
                 stopping: false,
+                task: None,
+                had_task: false,
             },
         );
         id
@@ -507,51 +595,61 @@ impl Model {
         let run = self.role_def(&slot).map(|r| r.run);
         self.told_limit = false;
         let restarts = slot.restarts + 1;
+        // A oneshot is never restarted: its task, if any, goes to a fresh session.
         let (state, retry_at) = if slot.stopping || !self.up {
             (SlotState::Stopped, None)
-        } else if run == Some(Run::Oneshot) && code == Some(0) {
-            (SlotState::Done, None)
+        } else if run == Some(Run::Oneshot) {
+            if code == Some(0) {
+                (SlotState::Done, None)
+            } else {
+                (SlotState::Failed, None)
+            }
         } else if restarts > MAX_RESTARTS {
             (SlotState::Failed, None)
         } else {
             let wait = BACKOFF_MS << (restarts - 1);
             (SlotState::Waiting, Some(cx.now + wait))
         };
+        let restarted = run != Some(Run::Oneshot) && !slot.stopping && self.up;
         if let Some(s) = self.slots.get_mut(id) {
             s.busy = false;
             s.session = None;
             s.state = state;
             s.retry_at = retry_at;
-            if matches!(state, SlotState::Waiting | SlotState::Failed) {
+            if restarted {
                 s.restarts = restarts;
             }
         }
         let how = match code {
+            Some(0) => "ended without `tend task done`".to_string(),
             Some(c) => format!("exited with code {c}"),
             None => "was killed".to_string(),
         };
-        match (state, retry_at) {
-            (SlotState::Failed, _) => self.cmd(
-                cx,
-                Command::Notify {
-                    text: format!(
-                        "tend fleet: {id} {how}, its {restarts}th crash. tend stopped restarting it."
-                    ),
-                },
-                &format!("{id} crashed more than {MAX_RESTARTS} times."),
-            ),
-            (SlotState::Waiting, Some(at_ms)) => self.cmd(
-                cx,
-                Command::Backoff {
-                    slot: id.into(),
-                    at_ms,
-                },
-                &format!(
-                    "{id} {how}; restart {restarts} of {MAX_RESTARTS} in {} s.",
-                    (at_ms - cx.now) / 1000
+        self.task_session_ended(cx, id, &how);
+        if restarted {
+            match (state, retry_at) {
+                (SlotState::Failed, _) => self.cmd(
+                    cx,
+                    Command::Notify {
+                        text: format!(
+                            "tend fleet: {id} {how}, its {restarts}th crash. tend stopped restarting it."
+                        ),
+                    },
+                    &format!("{id} crashed more than {MAX_RESTARTS} times."),
                 ),
-            ),
-            _ => {}
+                (SlotState::Waiting, Some(at_ms)) => self.cmd(
+                    cx,
+                    Command::Backoff {
+                        slot: id.into(),
+                        at_ms,
+                    },
+                    &format!(
+                        "{id} {how}; restart {restarts} of {MAX_RESTARTS} in {} s.",
+                        (at_ms - cx.now) / 1000
+                    ),
+                ),
+                _ => {}
+            }
         }
         self.retry_waiting(cx);
     }
@@ -934,18 +1032,11 @@ impl Model {
         }
     }
 
-    /// Tell the requester why not: a slot gets a notice, the user a notification.
+    /// Tell the requester why not, as the reply to its request.
     fn refuse(&mut self, cx: &mut Cx, by: &Actor, reason: &str) {
-        let command = match by {
-            Actor::Slot { id } => Command::Deliver {
-                to: Address::Slot { id: id.clone() },
-                from: Actor::Tend,
-                kind: MsgKind::Notice,
-                text: format!("tend: refused. {reason}"),
-            },
-            _ => Command::Notify {
-                text: format!("tend fleet: refused. {reason}"),
-            },
+        let command = Command::Answer {
+            to: by.clone(),
+            text: format!("tend: refused. {reason}"),
         };
         self.cmd(cx, command, reason);
     }
@@ -1005,6 +1096,9 @@ struct Cx<'a> {
     now: u64,
     cause: u64,
 }
+
+mod tasks;
+pub use tasks::{Task, TaskState};
 
 #[cfg(test)]
 mod tests;

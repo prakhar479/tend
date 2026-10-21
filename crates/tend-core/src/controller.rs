@@ -215,6 +215,9 @@ pub struct Controller {
     active_ms: u64,
     /// What other tend sessions did that matters here (F1).
     fleet: crate::fleet::Fleet,
+    /// This session is a slot of a fleet (F5a): its agent may not touch the fleet
+    /// identity or run fleet control.
+    in_fleet: bool,
 }
 
 /// The costly, pure part of handling an output: hash, failures, and summary.
@@ -343,7 +346,13 @@ impl Controller {
             last_ms: None,
             active_ms: 0,
             fleet: crate::fleet::Fleet::default(),
+            in_fleet: false,
         }
+    }
+
+    /// The session runs as a slot of a fleet (`TEND_FLEET_SLOT` was set).
+    pub fn set_in_fleet(&mut self, in_fleet: bool) {
+        self.in_fleet = in_fleet;
     }
 
     /// Advance the active clock to `now_ms`. A gap longer than `idle_gap_minutes`
@@ -1072,6 +1081,21 @@ impl Controller {
             if self.act(d, now, ev, action, message.clone()) {
                 d.response.add_context.push(message);
             }
+        }
+        let bypass = if self.in_fleet {
+            crate::fleet::fleet_bypass(&command)
+        } else {
+            None
+        };
+        if let Some(why) = bypass {
+            let message = format!(
+                "tend: in a fleet, this session may not run that: {why}. Use `tend task` for your task, and ask your lead or the user for the rest."
+            );
+            let action = ActionKind::BlockCommand { command };
+            if self.act(d, now, ev, action, message.clone()) {
+                d.response.permission = Some(Permission::Deny(message));
+            }
+            return;
         }
         if !runs_tend_allow(&command) {
             self.maybe_wrap(d, now, ev, tool_use_id, command, rewrite_ok);

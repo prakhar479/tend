@@ -404,6 +404,54 @@ fn mentions(output: &str, rel: &str) -> bool {
     })
 }
 
+/// Why the agent in a fleet session may not run `cmd`, if it may not: it sets or unsets
+/// the fleet identity (`TEND_FLEET*`), or it runs fleet control, which is the user's.
+/// A text match on the command's words: the hub checks who asks, from the process tree.
+pub fn fleet_bypass(cmd: &str) -> Option<String> {
+    for seg in shell::parse(cmd).segments {
+        let fleet_var = |w: &str| w.starts_with("TEND_FLEET");
+        // Assignments before the command, or given to `export` and its kin: words
+        // after the command (a quoted message) set nothing.
+        let lead = seg.iter().take_while(|w| shell::is_assignment(w));
+        let declared = match seg.iter().find(|w| !shell::is_assignment(w)) {
+            Some(c)
+                if matches!(
+                    shell::program_name(c),
+                    "export" | "declare" | "typeset" | "readonly" | "local"
+                ) =>
+            {
+                seg.iter()
+                    .skip_while(|w| shell::is_assignment(w))
+                    .skip(1)
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        if lead
+            .chain(declared)
+            .any(|w| shell::is_assignment(w) && fleet_var(w))
+        {
+            return Some("it sets the fleet identity (TEND_FLEET…)".into());
+        }
+        let first = seg.first().map(|f| shell::program_name(f));
+        if matches!(first, Some("unset" | "env")) && seg.iter().any(|w| fleet_var(w) || w == "-i") {
+            return Some("it clears the fleet identity (TEND_FLEET…)".into());
+        }
+        let w = shell::program_words(&seg);
+        if w.len() >= 3
+            && shell::program_name(&w[0]) == "tend"
+            && w[1] == "fleet"
+            && matches!(
+                w[2].as_str(),
+                "up" | "down" | "stop" | "spawn" | "scale" | "prune" | "hub"
+            )
+        {
+            return Some(format!("`tend fleet {}` is the user's", w[2]));
+        }
+    }
+    None
+}
+
 /// Git subcommands that change the working tree, the index, or HEAD.
 const GIT_CHANGES: [&str; 14] = [
     "am",
@@ -753,6 +801,31 @@ mod tests {
             ("grep -r 'git reset' .", None),
         ] {
             assert_eq!(git_effect(cmd).as_deref(), want, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn fleet_bypasses() {
+        for cmd in [
+            "TEND_FLEET_SLOT=lead-1 tend task done t-1 ok",
+            "export TEND_FLEET_SLOT=x",
+            "unset TEND_FLEET",
+            "env -u TEND_FLEET_SLOT tend task add x",
+            "env -i tend task list",
+            "tend fleet down",
+            "cd .. && tend fleet scale worker 9",
+        ] {
+            assert!(fleet_bypass(cmd).is_some(), "{cmd}");
+        }
+        for cmd in [
+            "tend task done t-1 \"TEND_FLEET_SLOT=x is set\"",
+            "tend task add 'run tend fleet down later'",
+            "tend fleet status",
+            "tend fleet",
+            "echo $TEND_FLEET_SLOT",
+            "env | grep TEND",
+        ] {
+            assert!(fleet_bypass(cmd).is_none(), "{cmd}");
         }
     }
 

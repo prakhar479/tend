@@ -1208,3 +1208,27 @@ fn failure_naming_a_peer_edit_gets_a_notice_with_the_reply() {
         "{texts:?}"
     );
 }
+
+#[test]
+fn a_fleet_session_may_not_forge_its_identity_or_run_fleet_control() {
+    let request = |cmd: &str| Event::ToolRequested {
+        tool_use_id: "b".into(),
+        tool: "Bash".into(),
+        input: json!({ "command": cmd }),
+        rewrite_ok: false,
+    };
+    let mut c = ctl(Mode::Optimize);
+    c.set_in_fleet(true);
+    let d = c.handle(request("TEND_FLEET_SLOT=lead-1 tend task done t-1 ok"), 0);
+    assert!(
+        matches!(&d.response.permission, Some(Permission::Deny(m)) if m.contains("fleet identity")),
+        "{:?}",
+        d.response
+    );
+    let d = c.handle(request("tend task done t-1 ok"), 1);
+    assert!(d.response.permission.is_none());
+    // Outside a fleet the same text is nothing to tend.
+    let mut c = ctl(Mode::Optimize);
+    let d = c.handle(request("tend fleet down"), 0);
+    assert!(d.response.permission.is_none());
+}

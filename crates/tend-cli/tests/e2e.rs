@@ -1695,3 +1695,156 @@ fn fleet_hub_starts_restarts_and_stops_sessions() {
     }
     assert_eq!(again, records);
 }
+
+/// A fake agent that acts on what it is told, through `tend task`: a lead that plans
+/// three tasks and finishes when all three are reported done, and workers that finish
+/// the task they get. Logs each worker's task with the time it finished.
+fn fake_acting_agent(dir: &Path) -> PathBuf {
+    let script = dir.join("fake-acting-claude.sh");
+    let body = format!(
+        r#"#!/bin/sh
+[ "$1" = --version ] && echo '2.1.304 (Claude Code)' && exit 0
+D='{d}'
+result() {{ echo '{{"type":"result","subtype":"success","result":"ok"}}'; }}
+while IFS= read -r line; do
+  case "$line" in
+    *LEAD-PLAN*)
+      tend task add "A" >> "$D/lead.txt" 2>&1
+      tend task add "B" --depends t-1.1 >> "$D/lead.txt" 2>&1
+      tend task add "C" --role worker >> "$D/lead.txt" 2>&1
+      tend fleet down >> "$D/lead.txt" 2>&1
+      result ;;
+    *"is done ("*)
+      echo x >> "$D/reports"
+      if [ "$(wc -l < "$D/reports")" -ge 3 ]; then
+        tend task done t-1 "all three done" >> "$D/lead.txt" 2>&1
+      fi
+      result ;;
+    *"tend task done t-"*)
+      id=$(printf '%s' "$line" | sed -n 's/.*tend task done \(t-[0-9.]*\).*/\1/p')
+      sleep 0.3
+      echo "$TEND_FLEET_SLOT $id" >> "$D/work.log"
+      tend task done "$id" "ok from $TEND_FLEET_SLOT" >> "$D/done.txt" 2>&1
+      result ;;
+    *) result ;;
+  esac
+done
+"#,
+        d = dir.display()
+    );
+    fs::write(&script, body).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+/// F5a: the lead adds three tasks, two oneshot workers do them, and the dependent one
+/// starts only after its dependency is done. Sessions are told apart by their process
+/// tree: the lead's own `tend fleet down` is refused.
+#[test]
+fn fleet_lead_plans_tasks_and_workers_do_them_in_order() {
+    let dir = tmp("tasks");
+    let repo = dir.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false"
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    };
+    git(&["init", "-q"]);
+    fs::write(repo.join("a.txt"), "a\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    fs::write(
+        repo.join("fleet.toml"),
+        "preset = \"lead\"\n\n[role.worker]\nreplicas = \"0..2\"\n\n[limits]\nsessions = 3\n",
+    )
+    .unwrap();
+    let home = dir.join("home");
+    let agent = fake_acting_agent(&dir);
+    let tend = |args: &[&str]| tend_in(&repo, &home, &agent, args);
+    struct Down<'a>(&'a Path, &'a Path, &'a Path);
+    impl Drop for Down<'_> {
+        fn drop(&mut self) {
+            let _ = Command::new(bin())
+                .args(["fleet", "down"])
+                .current_dir(self.0)
+                .env("TEND_HOME", self.1)
+                .env("TEND_CLAUDE_BIN", self.2)
+                .output();
+        }
+    }
+    let _down = Down(&repo, &home, &agent);
+
+    tend(&["fleet", "up", "fleet.toml"]);
+    let added = tend(&["task", "add", "LEAD-PLAN", "--role", "lead"]);
+    assert_eq!(added.trim(), "Added t-1, for lead.");
+    let mut board = String::new();
+    for _ in 0..200 {
+        board = tend(&["task", "list"]);
+        if board.lines().filter(|l| l.contains(" done ")).count() == 4 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    for id in ["t-1 ", "t-1.1 ", "t-1.2 ", "t-1.3 "] {
+        assert!(
+            board
+                .lines()
+                .any(|l| l.trim_start().starts_with(id) && l.contains(" done ")),
+            "{id}: {board}"
+        );
+    }
+    // The lead's tasks are parts of its own (t-1.N); B waited for A.
+    let lead = fs::read_to_string(dir.join("lead.txt")).unwrap();
+    assert!(lead.contains("Added t-1.1, for worker."), "{lead}");
+    assert!(lead.contains("Added t-1.2, for worker."), "{lead}");
+    assert!(
+        lead.contains("Fleet control is the user's"),
+        "the lead cannot take the fleet down: {lead}"
+    );
+    let work = fs::read_to_string(dir.join("work.log")).unwrap();
+    let order: Vec<&str> = work.lines().map(|l| l.split(' ').nth(1).unwrap()).collect();
+    let pos = |t: &str| order.iter().position(|x| *x == t).expect(&work);
+    assert!(pos("t-1.1") < pos("t-1.2"), "B after A: {work}");
+    // Each task ran in its own fresh worker; at most two at once.
+    let slots: Vec<&str> = work.lines().map(|l| l.split(' ').next().unwrap()).collect();
+    assert_eq!(slots.len(), 3);
+    assert!(slots.iter().all(|s| s.starts_with("worker-")), "{work}");
+    let done = fs::read_to_string(dir.join("done.txt")).unwrap();
+    assert_eq!(done.matches("is done.").count(), 3, "{done}");
+    // The user hears that the lead's task is done.
+    let fleet_dir = fs::read_dir(home.join("fleets"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let inbox = fs::read_to_string(fleet_dir.join("inbox.jsonl")).unwrap();
+    assert!(
+        inbox.contains("t-1 is done (lead-1): all three done"),
+        "{inbox}"
+    );
+    // A user cannot finish a worker's task by pretending to be it: the hub knows the
+    // caller is not in that session's process tree, so it acts as the user, who may.
+    let out = Command::new(bin())
+        .args(["task", "done", "t-9", "x"])
+        .current_dir(&repo)
+        .env("TEND_HOME", &home)
+        .env("TEND_FLEET_SLOT", "worker-1")
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("There is no task t-9"));
+}

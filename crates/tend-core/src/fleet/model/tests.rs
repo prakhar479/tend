@@ -103,12 +103,7 @@ fn delivered(cmds: &[Command]) -> Vec<(String, String)> {
 
 fn refused(cmds: &[Command]) -> Option<String> {
     cmds.iter().find_map(|c| match c {
-        Command::Deliver {
-            from: Actor::Tend,
-            text,
-            ..
-        } if text.starts_with("tend: refused") => Some(text.clone()),
-        Command::Notify { text } if text.starts_with("tend fleet: refused") => Some(text.clone()),
+        Command::Answer { text, .. } if text.starts_with("tend: refused") => Some(text.clone()),
         _ => None,
     })
 }
@@ -245,7 +240,7 @@ fn a_oneshot_that_finishes_is_done() {
     });
     assert!(cmds.is_empty(), "{cmds:?}");
     assert_eq!(r.state("worker-1"), SlotState::Done);
-    // A oneshot that fails is restarted like any crash.
+    // A oneshot that fails is not restarted: a task it had goes to a fresh session.
     let cmds = r.ev(FleetEvent::SpawnRequest {
         by: slot("lead-1"),
         role: "worker".into(),
@@ -255,7 +250,8 @@ fn a_oneshot_that_finishes_is_done() {
         slot: "worker-2".into(),
         code: Some(2),
     });
-    assert!(matches!(&cmds[..], [Command::Backoff { .. }]), "{cmds:?}");
+    assert!(cmds.is_empty(), "{cmds:?}");
+    assert_eq!(r.state("worker-2"), SlotState::Failed);
 }
 
 #[test]
@@ -439,7 +435,7 @@ fn only_roles_that_may_spawn_do_and_within_their_maximum() {
         role: "worker".into(),
     });
     assert!(
-        matches!(&c[..], [Command::Deliver { to: Address::Slot { id }, text, .. }] if id == "worker-1" && text.contains("may not spawn")),
+        matches!(&c[..], [Command::Answer { to: Actor::Slot { id }, text }] if id == "worker-1" && text.contains("may not spawn")),
         "the refusal goes to the asker: {c:?}"
     );
     let c = r.ev(FleetEvent::SpawnRequest {
@@ -658,11 +654,7 @@ fn a_team_waits_while_its_leader_is_down() {
         role: "worker".into(),
     });
     r.start_all(&c);
-    // The sub-lead crashes; its waiting team members cannot start until it is back.
-    r.ev(FleetEvent::Exited {
-        slot: "sub-1/worker-1".into(),
-        code: Some(1),
-    });
+    // The sub-lead crashes; a worker asked for meanwhile waits until it is back.
     let t = r.now;
     let c = r.at(
         t,
@@ -675,6 +667,12 @@ fn a_team_waits_while_its_leader_is_down() {
         matches!(&c[..], [Command::Backoff { slot, .. }] if slot == "sub-1"),
         "{c:?}"
     );
+    let c = r.ev(FleetEvent::SpawnRequest {
+        by: Actor::User,
+        role: "sub-1/worker".into(),
+    });
+    assert!(spawned(&c).is_empty(), "{c:?}");
+    assert_eq!(r.state("sub-1/worker-2"), SlotState::Waiting);
     let c = r.at(t + BACKOFF_MS, FleetEvent::Tick);
     assert_eq!(
         spawned(&c),
@@ -685,7 +683,7 @@ fn a_team_waits_while_its_leader_is_down() {
         slot: "sub-1".into(),
         session: "s2".into(),
     });
-    assert_eq!(spawned(&c2), ["sub-1/worker-1"], "back with its leader");
+    assert_eq!(spawned(&c2), ["sub-1/worker-2"], "back with its leader");
     // The other sub-lead's team was never paused.
     assert_eq!(r.state("sub-2"), SlotState::Running);
 }
@@ -824,4 +822,373 @@ fn replay_is_deterministic() {
         .map(|t| serde_json::from_str(t).unwrap())
         .collect();
     assert_eq!(back, r.log);
+}
+
+// --- Tasks (F5a) ---------------------------------------------------------------------
+
+fn add(by: Actor, title: &str, deps: &[&str], role: Option<&str>) -> FleetEvent {
+    FleetEvent::TaskAdd {
+        by,
+        title: title.into(),
+        body: String::new(),
+        depends_on: deps.iter().map(|d| d.to_string()).collect(),
+        scope: vec![],
+        role: role.map(String::from),
+    }
+}
+
+fn done(slot_id: &str, task: &str) -> FleetEvent {
+    FleetEvent::TaskDone {
+        by: slot(slot_id),
+        task: task.into(),
+        summary: "ok".into(),
+    }
+}
+
+fn answer(cmds: &[Command]) -> String {
+    cmds.iter()
+        .find_map(|c| match c {
+            Command::Answer { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Which slot each delivered task went to.
+fn tasks_to(cmds: &[Command]) -> Vec<(String, String)> {
+    cmds.iter()
+        .filter_map(|c| match c {
+            Command::Deliver {
+                to: Address::Slot { id },
+                kind: MsgKind::Task,
+                text,
+                ..
+            } => Some((
+                id.clone(),
+                text.split(':')
+                    .next()?
+                    .trim_start_matches("Task ")
+                    .to_string(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn task_state(r: &Sim, id: &str) -> TaskState {
+    r.m.tasks().find(|t| t.id == id).map(|t| t.state).unwrap()
+}
+
+/// The acceptance case: the lead adds three tasks, one depending on another; oneshot
+/// workers do them, and the dependent one starts only after its dependency is done.
+#[test]
+fn lead_tasks_go_to_fresh_workers_in_dependency_order() {
+    let mut r = Sim::new(spec(
+        serde_json::json!({"preset": "lead", "limits": {"sessions": 3}}),
+    ));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let lead = slot("lead-1");
+    let c = r.ev(add(lead.clone(), "A", &[], None));
+    assert_eq!(answer(&c), "Added t-1, for worker.");
+    assert_eq!(
+        spawned(&c),
+        ["worker-1"],
+        "a fresh oneshot for a ready task"
+    );
+    let c2 = r.ev(add(lead.clone(), "B", &["t-1"], None));
+    assert!(spawned(&c2).is_empty(), "B waits for A");
+    let c3 = r.ev(add(lead.clone(), "C", &[], Some("worker")));
+    assert_eq!(spawned(&c3), ["worker-2"]);
+    let mut all = c.clone();
+    all.extend(c3.clone());
+    let started: Vec<Command> = all;
+    let mut delivered = Vec::new();
+    for c in &started {
+        if let Command::Spawn { slot, .. } = c {
+            delivered.extend(tasks_to(&r.ev(FleetEvent::Started {
+                slot: slot.clone(),
+                session: format!("s-{slot}"),
+            })));
+        }
+    }
+    assert_eq!(
+        delivered,
+        [
+            ("worker-1".into(), "t-1".into()),
+            ("worker-2".into(), "t-3".into())
+        ]
+    );
+    assert_eq!(task_state(&r, "t-2"), TaskState::Queued);
+    // A is done: the lead hears it, and B goes to a fresh worker (the limit allows it,
+    // worker-1's session is still finishing its turn).
+    let c = r.ev(done("worker-1", "t-1"));
+    assert_eq!(answer(&c), "t-1 is done.");
+    assert!(
+        c.iter().any(|c| matches!(c, Command::Deliver { to: Address::Slot { id }, kind: MsgKind::Report, text, .. } if id == "lead-1" && text.contains("t-1 is done (worker-1): ok"))),
+        "{c:?}"
+    );
+    assert!(
+        spawned(&c).is_empty(),
+        "three sessions run: B waits for room"
+    );
+    // worker-1 ends its turn: a oneshot that had its task gets no other.
+    let c = r.ev(FleetEvent::Activity {
+        slot: "worker-1".into(),
+        turn_ended: true,
+    });
+    assert!(tasks_to(&c).is_empty(), "{c:?}");
+    let c = r.ev(FleetEvent::Exited {
+        slot: "worker-1".into(),
+        code: Some(0),
+    });
+    assert_eq!(spawned(&c), ["worker-3"]);
+    r.start_all(&c);
+    r.ev(done("worker-2", "t-3"));
+    r.ev(done("worker-3", "t-2"));
+    for t in ["t-1", "t-2", "t-3"] {
+        assert_eq!(task_state(&r, t), TaskState::Done, "{t}");
+    }
+}
+
+#[test]
+fn a_task_from_a_working_session_is_a_part_and_the_whole_waits_for_it() {
+    let mut r = Sim::new(preset(Preset::Lead));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let c = r.ev(add(Actor::User, "Ship it", &[], Some("lead")));
+    assert_eq!(
+        tasks_to(&c),
+        [("lead-1".into(), "t-1".into())],
+        "to the idle lead"
+    );
+    let c = r.ev(add(slot("lead-1"), "part one", &[], None));
+    assert!(answer(&c).starts_with("Added t-1.1"), "{c:?}");
+    let c = r.ev(done("lead-1", "t-1"));
+    assert!(
+        refused(&c).is_some_and(|t| t.contains("t-1.1, a part of t-1, is not done")),
+        "{c:?}"
+    );
+    let c = r.ev(FleetEvent::Started {
+        slot: "worker-1".into(),
+        session: "s".into(),
+    });
+    assert_eq!(tasks_to(&c), [("worker-1".into(), "t-1.1".into())]);
+    r.ev(done("worker-1", "t-1.1"));
+    let c = r.ev(done("lead-1", "t-1"));
+    assert_eq!(answer(&c), "t-1 is done.");
+    assert!(
+        c.iter().any(
+            |c| matches!(c, Command::Notify { text } if text.contains("t-1 is done (lead-1)"))
+        ),
+        "the user created it: {c:?}"
+    );
+}
+
+#[test]
+fn open_tasks_are_claimed_or_assigned() {
+    let mut r = Sim::new(spec(
+        serde_json::json!({"preset": "specialists", "limits": {"sessions": 4}}),
+    ));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let lead = slot("lead-1");
+    // Two roles may take tasks from the lead: the task stays open.
+    let c = r.ev(add(lead.clone(), "write tests", &[], None));
+    assert!(answer(&c).contains("tend task assign t-1"), "{c:?}");
+    r.ev(add(lead.clone(), "implement", &[], None));
+    // Assigning starts a session of that role.
+    let c = r.ev(FleetEvent::TaskAssign {
+        by: lead.clone(),
+        task: "t-2".into(),
+        to: "implementer".into(),
+    });
+    assert_eq!(answer(&c), "t-2 is for implementer.");
+    assert_eq!(spawned(&c), ["implementer-1"]);
+    // A tester session started some other way claims the open one.
+    let c = r.ev(FleetEvent::SpawnRequest {
+        by: lead.clone(),
+        role: "tester".into(),
+    });
+    r.start_all(&c);
+    let c = r.ev(FleetEvent::TaskClaim {
+        by: slot("tester-1"),
+        task: None,
+    });
+    let text = answer(&c);
+    assert!(
+        text.starts_with("Task t-1: write tests") && text.contains("tend task done t-1"),
+        "{text}"
+    );
+    assert_eq!(task_state(&r, "t-1"), TaskState::Working);
+    let c = r.ev(FleetEvent::TaskClaim {
+        by: slot("tester-1"),
+        task: None,
+    });
+    assert!(
+        refused(&c).is_some_and(|t| t.contains("already has t-1")),
+        "{c:?}"
+    );
+    // Rules: workers may not add or assign; only the task's session ends it.
+    let c = r.ev(add(slot("tester-1"), "x", &[], None));
+    assert!(
+        refused(&c).is_some_and(|t| t.contains("may not add tasks")),
+        "{c:?}"
+    );
+    let c = r.ev(FleetEvent::TaskAssign {
+        by: slot("tester-1"),
+        task: "t-2".into(),
+        to: "tester".into(),
+    });
+    assert!(refused(&c).is_some(), "{c:?}");
+    let c = r.ev(done("implementer-1", "t-1"));
+    assert!(
+        refused(&c).is_some_and(|t| t.contains("not this session's task")),
+        "{c:?}"
+    );
+    let c = r.ev(add(lead.clone(), "x", &["t-9"], None));
+    assert!(
+        refused(&c).is_some_and(|t| t.contains("no task t-9")),
+        "{c:?}"
+    );
+    let c = r.ev(FleetEvent::TaskAssign {
+        by: lead,
+        task: "t-1".into(),
+        to: "implementer".into(),
+    });
+    assert!(
+        refused(&c).is_some_and(|t| t.contains("being worked on")),
+        "{c:?}"
+    );
+}
+
+#[test]
+fn a_session_that_ends_without_done_costs_an_attempt_then_the_task_fails() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead", "role": {"worker": {"budget": {"attempts": 2}}}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let c = r.ev(add(slot("lead-1"), "flaky", &[], None));
+    r.start_all(&c);
+    let t = r.now;
+    let c = r.at(
+        t,
+        FleetEvent::Exited {
+            slot: "worker-1".into(),
+            code: Some(0),
+        },
+    );
+    assert!(
+        matches!(&c[..], [Command::TaskRetry { task, at_ms }] if task == "t-1" && *at_ms == t + BACKOFF_MS),
+        "{c:?}"
+    );
+    assert!(spawned(&r.at(t + BACKOFF_MS - 1, FleetEvent::Tick)).is_empty());
+    let c = r.at(t + BACKOFF_MS, FleetEvent::Tick);
+    assert_eq!(spawned(&c), ["worker-2"], "a fresh session");
+    let c2 = r.ev(FleetEvent::Started {
+        slot: "worker-2".into(),
+        session: "s".into(),
+    });
+    let text = c2.iter().find_map(|c| match c {
+        Command::Deliver {
+            kind: MsgKind::Task,
+            text,
+            ..
+        } => Some(text.clone()),
+        _ => None,
+    });
+    assert!(text.is_some_and(|t| t.contains("attempt 2")), "{c2:?}");
+    let c = r.ev(FleetEvent::Exited {
+        slot: "worker-2".into(),
+        code: None,
+    });
+    assert_eq!(task_state(&r, "t-1"), TaskState::Failed);
+    assert!(
+        c.iter().any(|c| matches!(c, Command::Deliver { to: Address::Slot { id }, text, .. } if id == "lead-1" && text.contains("t-1 failed"))),
+        "{c:?}"
+    );
+}
+
+#[test]
+fn blocked_tasks_go_back_to_their_creator_as_a_question() {
+    let mut r = Sim::new(preset(Preset::Lead));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let c = r.ev(add(slot("lead-1"), "migrate", &[], None));
+    r.start_all(&c);
+    let c = r.ev(FleetEvent::TaskBlocked {
+        by: slot("worker-1"),
+        task: "t-1".into(),
+        reason: "the schema file is missing".into(),
+    });
+    assert!(
+        c.iter().any(|c| matches!(c, Command::Deliver { to: Address::Slot { id }, kind: MsgKind::Question, text, .. } if id == "lead-1" && text.contains("schema file is missing"))),
+        "{c:?}"
+    );
+    assert_eq!(task_state(&r, "t-1"), TaskState::Blocked);
+    // Its session ending now is not a failed attempt.
+    let c = r.ev(FleetEvent::Exited {
+        slot: "worker-1".into(),
+        code: Some(0),
+    });
+    assert!(c.is_empty(), "{c:?}");
+}
+
+#[test]
+fn stream_roles_take_tasks_when_idle() {
+    let mut r = Sim::new(preset(Preset::Peers));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let c = r.ev(add(Actor::User, "one", &[], None));
+    let c2 = r.ev(add(Actor::User, "two", &[], None));
+    let c3 = r.ev(add(Actor::User, "three", &[], None));
+    assert_eq!(tasks_to(&c), [("peer-1".into(), "t-1".into())]);
+    assert_eq!(tasks_to(&c2), [("peer-2".into(), "t-2".into())]);
+    assert!(tasks_to(&c3).is_empty(), "both peers are busy");
+    // peer-1 finishes and ends its turn: it takes the next one.
+    r.ev(done("peer-1", "t-1"));
+    let c = r.ev(FleetEvent::Activity {
+        slot: "peer-1".into(),
+        turn_ended: true,
+    });
+    assert_eq!(tasks_to(&c), [("peer-1".into(), "t-3".into())]);
+}
+
+#[test]
+fn replay_with_tasks_is_deterministic() {
+    let mut r = Sim::new(spec(
+        serde_json::json!({"preset": "lead", "limits": {"sessions": 3}}),
+    ));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    for (title, deps) in [("A", vec![]), ("B", vec!["t-1"]), ("C", vec![])] {
+        let c = r.ev(add(slot("lead-1"), title, &deps, None));
+        r.start_all(&c);
+    }
+    r.ev(done("worker-1", "t-1"));
+    let c = r.at(
+        9_000,
+        FleetEvent::Exited {
+            slot: "worker-1".into(),
+            code: Some(0),
+        },
+    );
+    r.start_all(&c);
+    r.at(
+        10_000,
+        FleetEvent::Exited {
+            slot: "worker-2".into(),
+            code: Some(1),
+        },
+    );
+    r.at(20_000, FleetEvent::Tick);
+    let mut again = Model::new(r.m.spec().clone());
+    let mut replayed = Vec::new();
+    for rec in &r.log {
+        if let FleetBody::Event { event } = &rec.body {
+            replayed.extend(again.step(event.clone(), rec.ts_ms));
+        }
+    }
+    assert_eq!(replayed, r.log);
 }

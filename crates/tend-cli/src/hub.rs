@@ -67,10 +67,52 @@ pub struct Meta {
 pub enum HubRequest {
     Ping,
     Status,
-    Stop { slot: String },
+    Stop {
+        slot: String,
+    },
     Down,
-    Spawn { role: String },
-    Scale { role: String, n: u32 },
+    Spawn {
+        role: String,
+    },
+    Scale {
+        role: String,
+        n: u32,
+    },
+    /// A `tend task` verb (F5a). `claimed_slot` is `TEND_FLEET_SLOT`; it counts only
+    /// where the hub cannot see the caller's process tree.
+    Task {
+        verb: TaskVerb,
+        #[serde(default)]
+        claimed_slot: Option<String>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "verb", rename_all = "snake_case")]
+pub enum TaskVerb {
+    Add {
+        title: String,
+        body: String,
+        depends_on: Vec<String>,
+        scope: Vec<String>,
+        role: Option<String>,
+    },
+    Assign {
+        task: String,
+        to: String,
+    },
+    Claim {
+        task: Option<String>,
+    },
+    Done {
+        task: String,
+        summary: String,
+    },
+    Blocked {
+        task: String,
+        reason: String,
+    },
+    List,
 }
 
 // --- tend fleet up ---------------------------------------------------------------
@@ -194,7 +236,8 @@ enum Msg {
     Event(FleetEvent),
     /// The slot's turn ended (a `result` line); close a oneshot's stdin.
     TurnEnded(String),
-    Request(HubRequest, UnixStream),
+    /// A request, and the pid of the process that sent it (None: not known here).
+    Request(HubRequest, UnixStream, Option<i32>),
 }
 
 struct Proc {
@@ -273,7 +316,8 @@ fn listen(listener: UnixListener, tx: Sender<Msg>) {
         match serde_json::from_str::<HubRequest>(&line) {
             Ok(HubRequest::Ping) => reply(conn, "pong"),
             Ok(req) => {
-                if tx.send(Msg::Request(req, conn)).is_err() {
+                let pid = peer_pid(&conn);
+                if tx.send(Msg::Request(req, conn, pid)).is_err() {
                     return;
                 }
             }
@@ -317,8 +361,8 @@ impl Hub {
                         turn_ended: true,
                     });
                 }
-                Ok(Msg::Request(req, conn)) => {
-                    let text = self.request(req);
+                Ok(Msg::Request(req, conn, pid)) => {
+                    let text = self.request(req, pid);
                     reply(conn, &text);
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -348,22 +392,80 @@ impl Hub {
         }
     }
 
-    fn request(&mut self, req: HubRequest) -> String {
+    /// Who sent a request: the slot whose session's process tree it came from, or the
+    /// user. Without the caller's pid (an OS where the hub cannot see it), the slot the
+    /// caller names.
+    fn actor(&self, pid: Option<i32>, claimed: Option<&str>) -> Actor {
+        match pid {
+            Some(pid) => {
+                let tree = ancestors(pid);
+                self.procs
+                    .iter()
+                    .find(|(_, p)| tree.contains(&p.pid))
+                    .map_or(Actor::User, |(id, _)| Actor::Slot { id: id.clone() })
+            }
+            None => match claimed {
+                Some(id) if self.procs.contains_key(id) => Actor::Slot { id: id.into() },
+                _ => Actor::User,
+            },
+        }
+    }
+
+    fn request(&mut self, req: HubRequest, pid: Option<i32>) -> String {
+        let claimed = match &req {
+            HubRequest::Task { claimed_slot, .. } => claimed_slot.clone(),
+            _ => None,
+        };
+        let by = self.actor(pid, claimed.as_deref());
+        let user = by == Actor::User;
         let event = match req {
             HubRequest::Ping => return "pong".into(),
             HubRequest::Status => return self.status(),
-            HubRequest::Stop { slot } => FleetEvent::StopRequest {
-                by: Actor::User,
-                slot,
-            },
+            // Fleet control is the user's; a session asks through its role's verbs.
+            HubRequest::Down | HubRequest::Scale { .. } if !user => {
+                return "tend: refused. Fleet control is the user's.".into();
+            }
+            HubRequest::Stop { slot } => FleetEvent::StopRequest { by, slot },
             HubRequest::Down => FleetEvent::Down,
-            HubRequest::Spawn { role } => FleetEvent::SpawnRequest {
-                by: Actor::User,
-                role,
-            },
+            HubRequest::Spawn { role } => FleetEvent::SpawnRequest { by, role },
             HubRequest::Scale { role, n } => FleetEvent::Scale { role, n },
+            HubRequest::Task { verb, .. } => match verb {
+                TaskVerb::List => return render_tasks(&self.model),
+                TaskVerb::Add {
+                    title,
+                    body,
+                    depends_on,
+                    scope,
+                    role,
+                } => FleetEvent::TaskAdd {
+                    by,
+                    title,
+                    body,
+                    depends_on,
+                    scope,
+                    role,
+                },
+                TaskVerb::Assign { task, to } => FleetEvent::TaskAssign { by, task, to },
+                TaskVerb::Claim { task } => FleetEvent::TaskClaim { by, task },
+                TaskVerb::Done { task, summary } => FleetEvent::TaskDone { by, task, summary },
+                TaskVerb::Blocked { task, reason } => FleetEvent::TaskBlocked { by, task, reason },
+            },
         };
         let recs = self.apply(event);
+        // The answer to the asker, if the model gave one; else what happened.
+        let answers: Vec<String> = recs
+            .iter()
+            .filter_map(|r| match &r.body {
+                FleetBody::Command {
+                    command: Cmd::Answer { text, .. },
+                    ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        if !answers.is_empty() {
+            return answers.join("\n");
+        }
         let said: Vec<String> = recs
             .iter()
             .filter_map(|r| match &r.body {
@@ -485,7 +587,8 @@ impl Hub {
                 &self.dir,
                 &format!("Role {role} runs in your terminal. Start it with `tend claude` in this repo; joining a fleet from a terminal comes later (F4)."),
             ),
-            Cmd::Backoff { .. } => {}
+            // Answers go back with the request's reply; waits need nothing done.
+            Cmd::Backoff { .. } | Cmd::TaskRetry { .. } | Cmd::Answer { .. } => {}
         }
     }
 
@@ -630,7 +733,9 @@ impl Hub {
     }
 
     fn status(&self) -> String {
-        render_status(&self.meta, &self.model, &self.procs, true)
+        let mut out = render_status(&self.meta, &self.model, &self.procs, true);
+        out.push_str(&render_tasks(&self.model));
+        out
     }
 }
 
@@ -658,6 +763,89 @@ fn read_output(out: impl Read, mut log: File, slot: &str, tx: &Sender<Msg>) {
             return;
         }
     }
+}
+
+/// The pid of the process at the other end of a Unix socket.
+#[cfg(target_os = "linux")]
+fn peer_pid(s: &UnixStream) -> Option<i32> {
+    use std::os::unix::io::AsRawFd;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: getsockopt writes at most `len` bytes into `cred`, a ucred.
+    let rc = unsafe {
+        libc::getsockopt(
+            s.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    (rc == 0 && cred.pid > 0).then_some(cred.pid)
+}
+
+#[cfg(target_os = "macos")]
+fn peer_pid(s: &UnixStream) -> Option<i32> {
+    use std::os::unix::io::AsRawFd;
+    // <sys/un.h>: SOL_LOCAL 0, LOCAL_PEERPID 0x002.
+    const SOL_LOCAL: libc::c_int = 0;
+    const LOCAL_PEERPID: libc::c_int = 0x002;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: getsockopt writes at most `len` bytes into `pid`, a pid_t.
+    let rc = unsafe {
+        libc::getsockopt(
+            s.as_raw_fd(),
+            SOL_LOCAL,
+            LOCAL_PEERPID,
+            (&mut pid as *mut libc::pid_t).cast(),
+            &mut len,
+        )
+    };
+    (rc == 0 && pid > 0).then_some(pid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn peer_pid(_: &UnixStream) -> Option<i32> {
+    None
+}
+
+/// `pid` and its parents, up to init. A process that left its tree (a double fork)
+/// is not found: the agent-side check (`fleet_bypass`) covers the plain cases.
+fn ancestors(pid: i32) -> Vec<i32> {
+    let mut out = vec![pid];
+    let mut at = pid;
+    for _ in 0..64 {
+        let Some(parent) = parent_of(at).filter(|&p| p > 1) else {
+            break;
+        };
+        out.push(parent);
+        at = parent;
+    }
+    out
+}
+
+fn parent_of(pid: i32) -> Option<i32> {
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // pid (comm) state ppid …; comm may hold spaces and parens.
+        return stat
+            .rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok();
+    }
+    let out = Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
 fn kill(pid: i32, sig: libc::c_int) {
@@ -863,6 +1051,53 @@ fn render_status(meta: &Meta, model: &Model, procs: &BTreeMap<String, Proc>, up:
     out
 }
 
+/// The task board, in the order tasks were added.
+fn render_tasks(model: &Model) -> String {
+    let mut out = String::new();
+    let tasks: Vec<_> = model.tasks().collect();
+    if tasks.is_empty() {
+        return out;
+    }
+    let _ = writeln!(out, "Tasks:");
+    let width = tasks.iter().map(|t| t.id.len()).max().unwrap_or(3);
+    for t in tasks {
+        let state = format!("{:?}", t.state).to_lowercase();
+        let mut facts = vec![t.title.clone()];
+        if let Some(s) = &t.slot {
+            facts.push(format!("on {s}"));
+        } else if let Some(x) = &t.target {
+            facts.push(format!("for {x}"));
+        }
+        if !t.depends_on.is_empty() {
+            facts.push(format!("after {}", t.depends_on.join(", ")));
+        }
+        if t.attempts > 0 {
+            facts.push(format!(
+                "{} failed attempt{}",
+                t.attempts,
+                if t.attempts == 1 { "" } else { "s" }
+            ));
+        }
+        if let Some(o) = &t.outcome {
+            facts.push(format!("\"{}\"", tend_core::text::truncate_chars(o, 80)));
+        }
+        let _ = writeln!(out, "  {:<width$}  {state:<8}  {}", t.id, facts.join(" · "));
+    }
+    out
+}
+
+/// `tend task …`: the fleet from `TEND_FLEET` (a fleet session), `--fleet`, or the
+/// newest that is up.
+pub fn task(fleet: Option<&str>, verb: TaskVerb) -> Result<String> {
+    let env_fleet = std::env::var("TEND_FLEET").ok();
+    let dir = resolve(fleet.or(env_fleet.as_deref()))?;
+    let req = HubRequest::Task {
+        verb,
+        claimed_slot: std::env::var("TEND_FLEET_SLOT").ok(),
+    };
+    send(&dir, &req).map_err(|_| anyhow!("the fleet's hub is not running"))
+}
+
 /// `tend fleet` (no subcommand) lists fleets too; one line each.
 pub fn list() -> String {
     let mut out = String::new();
@@ -976,6 +1211,10 @@ pub fn down(spec: Option<&str>) -> Result<String> {
     let dir = resolve(spec)?;
     let said =
         send(&dir, &HubRequest::Down).map_err(|_| anyhow!("the fleet's hub is not running"))?;
+    // Refused (a fleet session asked): nothing is going down, so do not wait for it.
+    if said.starts_with("tend: refused") {
+        bail!("{}", said.trim_start_matches("tend: "));
+    }
     for _ in 0..400 {
         if !is_up(&dir) {
             return Ok(format!("{said}\nThe fleet is down."));

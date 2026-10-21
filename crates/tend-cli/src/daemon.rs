@@ -61,7 +61,9 @@ pub fn run(
     let listener = UnixListener::bind(&tmp).with_context(|| format!("bind {}", tmp.display()))?;
     fs::rename(&tmp, &sock).with_context(|| format!("rename to {}", sock.display()))?;
     let connector = connector::for_agent(agent)?;
-    let controller = Controller::new(crate::config::load(), connector.capabilities(), mode);
+    let mut controller = Controller::new(crate::config::load(), connector.capabilities(), mode);
+    // A fleet's hub starts its sessions with TEND_FLEET_SLOT set (F5a).
+    controller.set_in_fleet(std::env::var_os("TEND_FLEET_SLOT").is_some());
     let store = Store::open(&dir)?;
     // Without a token file (a daemon started by hand), control requests are open.
     let token: Arc<Option<String>> = Arc::new(crate::paths::read_token(&dir));

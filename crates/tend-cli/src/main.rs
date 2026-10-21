@@ -154,6 +154,15 @@ enum Cmd {
     /// One line for the Claude Code status line: mode and what tend did so far.
     /// Prints nothing outside a tend session.
     Status,
+    /// A fleet's task board: add, give out, take, finish, or block tasks. In a fleet
+    /// session, the agent uses these; tend knows which session asks.
+    Task {
+        #[command(subcommand)]
+        cmd: TaskCmd,
+        /// A fleet id or prefix (default: this session's fleet, or the newest up).
+        #[arg(long, global = true)]
+        fleet: Option<String>,
+    },
     /// Fleets of agents: `tend fleet up` runs one from a fleet file. Alone, it lists the
     /// fleets and the live tend sessions on this machine, grouped by repo.
     Fleet {
@@ -268,6 +277,36 @@ enum FleetCmd {
         #[arg(long)]
         dir: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum TaskCmd {
+    /// Put a task on the board. With one role that may take it, it goes to that role.
+    Add {
+        title: String,
+        /// More detail for the session that does it.
+        #[arg(long, default_value = "")]
+        body: String,
+        /// Tasks that must be done first, comma-separated (t-1,t-2).
+        #[arg(long, value_delimiter = ',')]
+        depends: Vec<String>,
+        /// Paths the task expects to touch (repeat for more).
+        #[arg(long)]
+        scope: Vec<String>,
+        /// The role that should do it.
+        #[arg(long)]
+        role: Option<String>,
+    },
+    /// Give a task to a role or a session.
+    Assign { task: String, to: String },
+    /// Take a ready task: the given one, or the next one for this session's role.
+    Claim { task: Option<String> },
+    /// Finish a task, with a one-line summary.
+    Done { task: String, summary: String },
+    /// Say a task cannot be done, and why. Its creator is told.
+    Blocked { task: String, reason: String },
+    /// The board.
+    List,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -630,6 +669,36 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Fleet { cmd: Some(c) } => fleet_cmd(c),
+        Cmd::Task { cmd, fleet } => {
+            let verb = match cmd {
+                TaskCmd::Add {
+                    title,
+                    body,
+                    depends,
+                    scope,
+                    role,
+                } => hub::TaskVerb::Add {
+                    title,
+                    body,
+                    depends_on: depends,
+                    scope,
+                    role,
+                },
+                TaskCmd::Assign { task, to } => hub::TaskVerb::Assign { task, to },
+                TaskCmd::Claim { task } => hub::TaskVerb::Claim { task },
+                TaskCmd::Done { task, summary } => hub::TaskVerb::Done { task, summary },
+                TaskCmd::Blocked { task, reason } => hub::TaskVerb::Blocked { task, reason },
+                TaskCmd::List => hub::TaskVerb::List,
+            };
+            let text = hub::task(fleet.as_deref(), verb)?;
+            println!("{}", text.trim_end());
+            // A refusal is an error to the caller (an agent's script, or the user).
+            Ok(if text.starts_with("tend: refused") {
+                1
+            } else {
+                0
+            })
+        }
         Cmd::Retro {
             transcript,
             all,
