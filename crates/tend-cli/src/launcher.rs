@@ -32,6 +32,23 @@ struct Session {
 
 pub fn run_claude(mode: Mode, args: Vec<String>) -> Result<i32> {
     let (mode, args) = take_mode(mode, args);
+    let (join, args) = take_fleet(args);
+    // Join a fleet from this terminal (F4): the daemon and the agent run as its slot.
+    let joined = match join {
+        Some((fleet, role, name)) => {
+            let (id, slot, rules) =
+                crate::hub::join(fleet.as_deref(), role, name, std::process::id() as i32)?;
+            // SAFETY: no other thread runs yet; the daemon and the agent inherit these.
+            unsafe {
+                env::set_var("TEND_FLEET", &id);
+                env::set_var("TEND_FLEET_SLOT", &slot);
+                env::set_var("TEND_FLEET_RULES", &rules);
+            }
+            eprintln!("tend: joined fleet {id} as {slot}. `tend msg`, `tend inbox`, and `tend task` work in this session.");
+            Some((id, slot))
+        }
+        None => None,
+    };
     let bin = env::var("TEND_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
     // A missing agent is the user's to fix; set nothing up for it.
     if find_program(&bin).is_none() {
@@ -81,6 +98,9 @@ pub fn run_claude(mode: Mode, args: Vec<String>) -> Result<i32> {
 
     if let Some(mut s) = session {
         finish(&mut s);
+    }
+    if let Some((id, slot)) = joined {
+        crate::hub::leave(&id, &slot);
     }
     Ok(exit_code(status))
 }
@@ -293,6 +313,41 @@ fn take_mode(mut mode: Mode, args: Vec<String>) -> (Mode, Vec<String>) {
         }
     }
     (mode, out)
+}
+
+/// `--tend-fleet [ID]`, `--tend-role R`, `--tend-name N`: join a fleet (F4). The id is
+/// optional: alone, the newest fleet that is up.
+#[allow(clippy::type_complexity)]
+fn take_fleet(
+    args: Vec<String>,
+) -> (
+    Option<(Option<String>, Option<String>, Option<String>)>,
+    Vec<String>,
+) {
+    let (mut fleet, mut role, mut name, mut join) = (None, None, None, false);
+    let mut out = Vec::with_capacity(args.len());
+    let mut it = args.into_iter().peekable();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--tend-fleet" => {
+                join = true;
+                if it.peek().is_some_and(|n| !n.starts_with('-')) {
+                    fleet = it.next();
+                }
+            }
+            "--tend-role" => role = it.next(),
+            "--tend-name" => name = it.next(),
+            _ => match a.strip_prefix("--tend-fleet=") {
+                Some(v) => {
+                    join = true;
+                    fleet = Some(v.to_string());
+                }
+                None => out.push(a),
+            },
+        }
+    }
+    let join = (join || role.is_some() || name.is_some()).then_some((fleet, role, name));
+    (join, out)
 }
 
 /// The user's own `--settings` value. Claude Code may keep only one `--settings`, so tend

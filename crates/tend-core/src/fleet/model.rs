@@ -157,6 +157,14 @@ pub enum FleetEvent {
     /// Stop handing out work and starting sessions; running turns finish.
     Pause,
     Resume,
+    /// A session in the user's terminal joins as an attached role (F4). `name` becomes
+    /// its slot id, else `<role>-<n>`.
+    Attached {
+        role: String,
+        #[serde(default)]
+        name: Option<String>,
+        session: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -313,6 +321,8 @@ pub struct Model {
     next_action: u64,
     /// Message times per (sender, receiver), for the rate limit.
     edges: BTreeMap<(String, String), Vec<u64>>,
+    /// The last kind sent on each edge, so a reply to a question is an answer (F4).
+    last_kind: BTreeMap<(String, String), MsgKind>,
     /// The user was told the session limit was reached, and nothing freed up since.
     told_limit: bool,
     /// No new sessions or tasks (F5d): the user paused, a limit was hit.
@@ -336,6 +346,7 @@ impl Model {
             next_seq: 0,
             next_action: 1,
             edges: BTreeMap::new(),
+            last_kind: BTreeMap::new(),
             told_limit: false,
             paused: false,
             spent_usd: 0.0,
@@ -450,6 +461,11 @@ impl Model {
                 ),
             ),
             FleetEvent::Pause => self.pause(&mut cx, "The user paused the fleet."),
+            FleetEvent::Attached {
+                role,
+                name,
+                session,
+            } => self.on_attached(&mut cx, &role, name.as_deref(), session),
             FleetEvent::Resume => {
                 if self.paused {
                     self.paused = false;
@@ -709,8 +725,9 @@ impl Model {
         let run = self.role_def(&slot).map(|r| r.run);
         self.told_limit = false;
         let restarts = slot.restarts + 1;
-        // A oneshot is never restarted: its task, if any, goes to a fresh session.
-        let (state, retry_at) = if slot.stopping || !self.up {
+        // A oneshot is never restarted: its task, if any, goes to a fresh session. An
+        // attached one was the user's terminal: it ended when the user left.
+        let (state, retry_at) = if slot.stopping || !self.up || run == Some(Run::Attached) {
             (SlotState::Stopped, None)
         } else if run == Some(Run::Oneshot) {
             if code == Some(0) {
@@ -724,7 +741,8 @@ impl Model {
             let wait = BACKOFF_MS << (restarts - 1);
             (SlotState::Waiting, Some(cx.now + wait))
         };
-        let restarted = run != Some(Run::Oneshot) && !slot.stopping && self.up;
+        let restarted =
+            !matches!(run, Some(Run::Oneshot | Run::Attached)) && !slot.stopping && self.up;
         self.spent_usd += slot.cost_usd;
         if let Some(s) = self.slots.get_mut(id) {
             s.cost_usd = 0.0;
@@ -1027,7 +1045,7 @@ impl Model {
                 Some(s) => s.id.clone(),
                 None => "The user".into(),
             };
-            format!("{who} may not send a {} to {to}.", kind_name(kind))
+            format!("{who} may not send {} to {to}.", a_kind(kind))
         };
         match to {
             Address::User => {
@@ -1133,6 +1151,10 @@ impl Model {
             if !over {
                 times.push(cx.now);
             }
+            if !over {
+                self.last_kind
+                    .insert((sender.clone(), receiver.clone()), kind);
+            }
             if over {
                 self.refuse(
                     cx,
@@ -1158,8 +1180,8 @@ impl Model {
                     text: text.clone(),
                 },
                 &format!(
-                    "The fleet's channels let {sender} send a {} to {receiver}.",
-                    kind_name(kind)
+                    "The fleet's channels let {sender} send {} to {receiver}.",
+                    a_kind(kind)
                 ),
             );
         }
@@ -1172,6 +1194,128 @@ impl Model {
             text: format!("tend: refused. {reason}"),
         };
         self.cmd(cx, command, reason);
+    }
+
+    // --- Attached sessions and message kinds (F4) -----------------------------------
+
+    fn on_attached(&mut self, cx: &mut Cx, role: &str, name: Option<&str>, session: String) {
+        let Some(def) = self.spec.roles.get(role) else {
+            return self.refuse(
+                cx,
+                &Actor::User,
+                &format!("There is no role {role} in this fleet."),
+            );
+        };
+        if def.run != Run::Attached {
+            return self.refuse(
+                cx,
+                &Actor::User,
+                &format!("Role {role} is not attached (run = \"attached\"); tend starts its sessions itself."),
+            );
+        }
+        let active = self
+            .slots
+            .values()
+            .filter(|s| s.role == role && s.leader.is_none() && s.active())
+            .count() as u32;
+        if active >= def.max {
+            return self.refuse(
+                cx,
+                &Actor::User,
+                &format!(
+                    "{role} already has its {} session{}.",
+                    def.max,
+                    if def.max == 1 { "" } else { "s" }
+                ),
+            );
+        }
+        let id = match name {
+            Some(n) => {
+                let ok = !n.is_empty()
+                    && n.chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+                if !ok || self.slots.get(n).is_some_and(|s| s.active()) {
+                    return self.refuse(
+                        cx,
+                        &Actor::User,
+                        &format!(
+                            "The name {n} is taken or not lowercase letters, digits, and `-`."
+                        ),
+                    );
+                }
+                self.slots.remove(n);
+                let id = n.to_string();
+                let slot = Slot {
+                    id: id.clone(),
+                    role: role.into(),
+                    leader: None,
+                    n: 1,
+                    state: SlotState::Waiting,
+                    session: None,
+                    restarts: 0,
+                    retry_at: None,
+                    busy: false,
+                    last_seen_ms: 0,
+                    stuck: 0,
+                    stopping: false,
+                    task: None,
+                    had_task: false,
+                    tokens: 0,
+                    cost_usd: 0.0,
+                    started_ms: 0,
+                };
+                self.slots.insert(id.clone(), slot);
+                id
+            }
+            None => self.new_slot(None, role),
+        };
+        if let Some(s) = self.slots.get_mut(&id) {
+            s.state = SlotState::Running;
+            s.session = Some(session);
+            s.started_ms = cx.now;
+            s.last_seen_ms = cx.now;
+        }
+        let said = id.clone();
+        self.cmd(
+            cx,
+            Command::Answer {
+                to: Actor::User,
+                text: said,
+            },
+            &format!("A session in the user's terminal joined as {role}, named {id}."),
+        );
+    }
+
+    /// The kind of message `from` sends `to` by default (`tend msg` without `--kind`):
+    /// an answer when `to` last asked `from` a question, else the first the channels allow.
+    pub fn default_kind(&self, from: &Actor, to: &Address) -> Option<MsgKind> {
+        let me = match from {
+            Actor::Slot { id } => id.clone(),
+            _ => "user".to_string(),
+        };
+        let them = match to {
+            Address::Slot { id } => Some(id.clone()),
+            Address::User => Some("user".to_string()),
+            Address::Role { .. } => None,
+        };
+        if let Some(them) = them {
+            if self.last_kind.get(&(them, me)) == Some(&MsgKind::Question)
+                && self.route(from, to, MsgKind::Answer).is_ok()
+            {
+                return Some(MsgKind::Answer);
+            }
+        }
+        [
+            MsgKind::Question,
+            MsgKind::Answer,
+            MsgKind::Report,
+            MsgKind::Notice,
+            MsgKind::Review,
+            MsgKind::Handoff,
+            MsgKind::Task,
+        ]
+        .into_iter()
+        .find(|k| self.route(from, to, *k).is_ok())
     }
 
     // --- Budgets (F5d) ------------------------------------------------------------
@@ -1291,6 +1435,17 @@ impl Model {
         });
         seq
     }
+}
+
+/// `a question`, `an answer`.
+fn a_kind(k: MsgKind) -> String {
+    let name = kind_name(k);
+    let article = if name.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    format!("{article} {name}")
 }
 
 fn kind_name(k: MsgKind) -> &'static str {

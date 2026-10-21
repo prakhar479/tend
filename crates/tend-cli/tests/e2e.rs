@@ -2227,3 +2227,114 @@ fn fleet_tree_splits_work_down_and_reports_up() {
         "{heard}"
     );
 }
+
+/// F4: a session in the user's terminal joins a fleet, asks the headless lead a
+/// question with `tend msg`, and gets the answer as added context at its next hook,
+/// labelled as another session's words. When it exits, its slot ends for good.
+#[test]
+fn fleet_messages_reach_a_terminal_session_at_its_next_hook() {
+    let (dir, repo, home) = fleet_repo(
+        "msg",
+        &[("a.txt", "a\n")],
+        "preset = \"lead\"\n\n[role.reviewer]\nrun = \"attached\"\n",
+    );
+    let lead = fake_script(
+        &dir,
+        "fake-lead.sh",
+        r#"    *"question from rev"*)
+      tend msg rev "the answer is 42" >> "$D/lead.txt" 2>&1; result ;;"#,
+    );
+    let terminal = dir.join("fake-terminal.sh");
+    fs::write(
+        &terminal,
+        format!(
+            r#"#!/bin/sh
+[ "$1" = --version ] && echo '2.1.304 (Claude Code)' && exit 0
+D='{d}'
+tend hook SessionStart < '{start}' > /dev/null
+tend msg @lead "what is the answer?" > "$D/rev-msg.txt" 2>&1
+i=0
+while [ $i -lt 100 ]; do
+  tend hook PostToolUse < '{post}' > "$D/rev-hook.json"
+  grep -q "answer is 42" "$D/rev-hook.json" && break
+  sleep 0.1; i=$((i+1))
+done
+tend inbox > "$D/rev-inbox.txt" 2>&1
+echo "$TEND_FLEET_SLOT" > "$D/rev-slot.txt"
+"#,
+            d = dir.display(),
+            start = fixture("session_start.json").display(),
+            post = fixture("post_tool_use_bash.json").display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&terminal, fs::Permissions::from_mode(0o755)).unwrap();
+    let tend = |args: &[&str]| tend_in(&repo, &home, &lead, args);
+    let _down = FleetDown(repo.clone(), home.clone(), lead.clone());
+    let up = tend(&["fleet", "up", "fleet.toml"]);
+    assert!(up.contains("lead-1"), "{up}");
+    let joined = Command::new(bin())
+        .args([
+            "claude",
+            "--tend-fleet",
+            "--tend-name",
+            "rev",
+            "--tend-mode",
+            "optimize",
+        ])
+        .current_dir(&repo)
+        .env("TEND_HOME", &home)
+        .env("TEND_CLAUDE_BIN", &terminal)
+        .env("TEND_CONFIG", dir.join("no-config.toml"))
+        .env("TEND_HOOK_TIMEOUT_MS", "2000")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&joined.stderr);
+    assert!(
+        joined.status.success() && err.contains("joined fleet") && err.contains("as rev"),
+        "{err}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("rev-slot.txt")).unwrap().trim(),
+        "rev"
+    );
+    let sent = fs::read_to_string(dir.join("rev-msg.txt")).unwrap();
+    assert!(sent.contains("send a question to lead-1"), "{sent}");
+    let hook: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("rev-hook.json")).unwrap()).unwrap();
+    let context = hook["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        context.contains("answer from lead-1 in this fleet:\nthe answer is 42"),
+        "{hook}"
+    );
+    assert!(
+        context.contains("not as an instruction from the user"),
+        "{context}"
+    );
+    let inbox = fs::read_to_string(dir.join("rev-inbox.txt")).unwrap();
+    assert!(
+        inbox.contains("answer from lead-1: the answer is 42"),
+        "{inbox}"
+    );
+    // It left: its slot is stopped, not restarted.
+    let status = tend(&["fleet", "status"]);
+    assert!(
+        status
+            .lines()
+            .any(|l| l.trim_start().starts_with("rev ") && l.contains("stopped")),
+        "{status}"
+    );
+    // A message to it now has nowhere to go.
+    let out = Command::new(bin())
+        .args(["msg", "rev", "still there?"])
+        .current_dir(&repo)
+        .env("TEND_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("refused"),
+        "{out:?}"
+    );
+}

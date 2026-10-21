@@ -531,7 +531,10 @@ impl Controller {
     pub fn handle(&mut self, event: Event, now_ms: u64) -> Decision {
         // Other sessions' activity is not this session's: it must not make idle time
         // here count as active (loop time).
-        if !matches!(event, Event::Peer { .. } | Event::Workspace { .. }) {
+        if !matches!(
+            event,
+            Event::Peer { .. } | Event::Workspace { .. } | Event::Message { .. }
+        ) {
             self.tick(now_ms);
         }
         let mut d = Decision::default();
@@ -594,6 +597,15 @@ impl Controller {
                 self.failure_values.clear();
                 self.fleet.reset_conversation();
             }
+            Event::Message { from, kind, text } => {
+                let event = Event::Message {
+                    from: from.clone(),
+                    kind: kind.clone(),
+                    text: text.clone(),
+                };
+                let ev = self.push(&mut d, now_ms, vec![], Body::Event { event });
+                self.fleet.on_message(&from, &kind, &text, ev, now_ms);
+            }
             Event::Workspace { top, common } => {
                 self.fleet.set_workspace(&top, &common);
                 let event = Event::Workspace { top, common };
@@ -646,11 +658,18 @@ impl Controller {
             .find(|e| matches!(e.body, Body::Event { .. }))
             .map(|e| e.seq);
         let supported = self.caps.inject_context;
-        let applied =
-            self.session.mode == Mode::Optimize && supported && self.cfg.fleet == FleetSetting::On;
+        let optimize = self.session.mode == Mode::Optimize && supported;
+        let notices_on = optimize && self.cfg.fleet == FleetSetting::On;
         // Each notice is its own action; a group reaches the agent as one message.
         for group in groups {
             let text = crate::fleet::message(&group);
+            // A fleet message is the fleet's own traffic: `fleet = look` holds back only
+            // the awareness notices (F1), not what sessions send each other (F4).
+            let applied = if group[0].kind == crate::fleet::NoticeKind::Message {
+                optimize
+            } else {
+                notices_on
+            };
             for n in group {
                 let mut causes = vec![n.cause];
                 causes.extend(trigger);

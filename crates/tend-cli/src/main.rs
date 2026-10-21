@@ -163,6 +163,21 @@ enum Cmd {
         #[arg(long, global = true)]
         fleet: Option<String>,
     },
+    /// Send a message in a fleet: to `user`, `@role`, or a session. Without --kind, the
+    /// first kind the fleet's channels allow.
+    Msg {
+        to: String,
+        text: String,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        fleet: Option<String>,
+    },
+    /// Messages: this fleet session's, or (for you) the fleet's inbox.
+    Inbox {
+        #[arg(long)]
+        fleet: Option<String>,
+    },
     /// Fleets of agents: `tend fleet up` runs one from a fleet file. Alone, it lists the
     /// fleets and the live tend sessions on this machine, grouped by repo.
     Fleet {
@@ -692,6 +707,24 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Fleet { cmd: Some(c) } => fleet_cmd(c),
+        Cmd::Msg {
+            to,
+            text,
+            kind,
+            fleet,
+        } => {
+            let said = hub::msg(fleet.as_deref(), to, kind, text)?;
+            println!("{}", said.trim_end());
+            Ok(if said.starts_with("tend: refused") {
+                1
+            } else {
+                0
+            })
+        }
+        Cmd::Inbox { fleet } => {
+            println!("{}", hub::show_inbox(fleet.as_deref())?.trim_end());
+            Ok(0)
+        }
         Cmd::Task { cmd, fleet } => {
             let verb = match cmd {
                 TaskCmd::Add {

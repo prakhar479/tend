@@ -19,6 +19,9 @@ pub struct RulesFile {
     /// Where the hub keeps the fleet's claims.
     #[serde(default)]
     pub claims: Option<String>,
+    /// Where the hub puts messages for this session (F4).
+    #[serde(default)]
+    pub inbox: Option<String>,
 }
 
 /// One working task's scope, in one worktree.
@@ -99,6 +102,7 @@ mod tests {
             may_write: may.iter().map(|s| s.to_string()).collect(),
             may_not_write: may_not.iter().map(|s| s.to_string()).collect(),
             claims: None,
+            inbox: None,
         })
     }
 

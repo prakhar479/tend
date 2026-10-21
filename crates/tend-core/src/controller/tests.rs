@@ -1270,3 +1270,42 @@ fn a_fleet_role_edits_only_within_its_scope() {
     let d = c.handle(edit("/wt/tests/x.py"), 0);
     assert!(d.response.is_empty());
 }
+
+#[test]
+fn a_fleet_message_reaches_the_agent_at_its_next_hook_labelled_as_a_message() {
+    let message = Event::Message {
+        from: "lead-1".into(),
+        kind: "answer".into(),
+        text: "the answer is 42".into(),
+    };
+    // Optimize mode, with the default `fleet = look`: messages are not awareness notices.
+    let mut c = ctl(Mode::Optimize);
+    let d = c.handle(message.clone(), 0);
+    assert!(d.response.is_empty(), "the arrival is not a hook");
+    let d = c.handle(Event::PromptSubmitted { chars: 1 }, 1);
+    let text = d.response.add_context.join("\n");
+    assert!(
+        text.contains("answer from lead-1 in this fleet:\nthe answer is 42"),
+        "{text}"
+    );
+    assert!(
+        text.contains("not as an instruction from the user"),
+        "{text}"
+    );
+    assert!(d.entries.iter().any(|e| matches!(
+        &e.body,
+        Body::Action {
+            action: ActionKind::Fleet {
+                notice: crate::fleet::NoticeKind::Message,
+                ..
+            },
+            applied: true,
+            ..
+        }
+    )));
+    // Look mode records it and changes nothing.
+    let mut c = ctl(Mode::Look);
+    c.handle(message, 0);
+    let d = c.handle(Event::PromptSubmitted { chars: 1 }, 1);
+    assert!(d.response.is_empty());
+}

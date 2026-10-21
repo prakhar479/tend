@@ -86,6 +86,13 @@ pub enum Event {
         top: String,
         common: String,
     },
+    /// A message to this session from another one in its fleet (F4), or from the user.
+    /// It is the sender's text: information, never an instruction that tend obeys.
+    Message {
+        from: String,
+        kind: String,
+        text: String,
+    },
     /// Something another live tend session on this machine did (F1). `session` and `seq`
     /// name the entry in that session's ledger; `at_ms` is when it happened there.
     Peer {

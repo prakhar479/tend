@@ -80,6 +80,31 @@ pub enum HubRequest {
     },
     Pause,
     Resume,
+    /// A session in the user's terminal joins (F4): `pid` is its launcher's, so its
+    /// tools' requests are told apart like a spawned session's.
+    Join {
+        role: Option<String>,
+        name: Option<String>,
+        pid: i32,
+        cwd: String,
+    },
+    Leave {
+        slot: String,
+    },
+    /// `tend msg`: `to` is `user`, `@role`, or a slot; no `kind` means the first the
+    /// channel allows.
+    Msg {
+        to: String,
+        kind: Option<String>,
+        text: String,
+        #[serde(default)]
+        claimed_slot: Option<String>,
+    },
+    /// `tend inbox`: the caller's messages (a session's), or the fleet's (the user's).
+    Inbox {
+        #[serde(default)]
+        claimed_slot: Option<String>,
+    },
     /// A `tend task` verb (F5a). `claimed_slot` is `TEND_FLEET_SLOT`; it counts only
     /// where the hub cannot see the caller's process tree.
     Task {
@@ -276,6 +301,8 @@ struct Hub {
     audit: bool,
     /// What claims.json holds now.
     claims_text: Option<String>,
+    /// Slots of sessions in the user's terminal (F4): their launcher pid is watched.
+    attached: std::collections::BTreeSet<String>,
 }
 
 pub fn run_hub(dir: &Path) -> Result<()> {
@@ -311,6 +338,7 @@ pub fn run_hub(dir: &Path) -> Result<()> {
         checking: Arc::new(std::sync::Mutex::new(())),
         audit: crate::config::load().experimental_audit,
         claims_text: None,
+        attached: std::collections::BTreeSet::new(),
     };
     eprintln!("tend fleet hub {}: up", hub.meta.id);
     hub.apply(FleetEvent::Up);
@@ -391,6 +419,21 @@ impl Hub {
             if now_ms().saturating_sub(last_tick) >= tick_ms {
                 last_tick = now_ms();
                 self.apply(FleetEvent::Tick);
+                // A terminal session that went away without `leave` (F4).
+                let gone: Vec<String> = self
+                    .attached
+                    .iter()
+                    .filter(|s| {
+                        self.procs
+                            .get(*s)
+                            .is_none_or(|p| unsafe { libc::kill(p.pid, 0) } != 0)
+                    })
+                    .cloned()
+                    .collect();
+                for slot in gone {
+                    self.attached.remove(&slot);
+                    self.apply(FleetEvent::Exited { slot, code: None });
+                }
             }
             if let Some(since) = self.down_since {
                 let live = self
@@ -433,7 +476,9 @@ impl Hub {
 
     fn request(&mut self, req: HubRequest, pid: Option<i32>) -> String {
         let claimed = match &req {
-            HubRequest::Task { claimed_slot, .. } => claimed_slot.clone(),
+            HubRequest::Task { claimed_slot, .. }
+            | HubRequest::Msg { claimed_slot, .. }
+            | HubRequest::Inbox { claimed_slot } => claimed_slot.clone(),
             _ => None,
         };
         let by = self.actor(pid, claimed.as_deref());
@@ -456,6 +501,50 @@ impl Hub {
             HubRequest::Scale { role, n } => FleetEvent::Scale { role, n },
             HubRequest::Pause => FleetEvent::Pause,
             HubRequest::Resume => FleetEvent::Resume,
+            HubRequest::Join { .. } if !user => {
+                return "tend: refused. A fleet session cannot join another.".into();
+            }
+            HubRequest::Join {
+                role,
+                name,
+                pid,
+                cwd,
+            } => return self.join(role, name, pid, cwd),
+            HubRequest::Leave { slot } => {
+                if !self.attached.contains(&slot) {
+                    return format!("tend: refused. {slot} did not join from a terminal.");
+                }
+                FleetEvent::Exited {
+                    slot,
+                    code: Some(0),
+                }
+            }
+            HubRequest::Inbox { .. } => return self.inbox_of(&by),
+            HubRequest::Msg { to, kind, text, .. } => {
+                let to = match to.as_str() {
+                    "user" => Address::User,
+                    t => match t.strip_prefix('@') {
+                        Some(r) => Address::Role { name: r.into() },
+                        None => Address::Slot { id: t.into() },
+                    },
+                };
+                let kind = match kind {
+                    Some(k) => match serde_json::from_value(serde_json::Value::String(k.clone())) {
+                        Ok(k) => k,
+                        Err(_) => return format!("tend: refused. No message kind `{k}` (question, answer, report, notice, review, handoff)."),
+                    },
+                    None => match self.model.default_kind(&by, &to) {
+                        Some(k) => k,
+                        None => return "tend: refused. No channel of this fleet lets this sender reach that receiver.".into(),
+                    },
+                };
+                FleetEvent::Message {
+                    from: by,
+                    to,
+                    kind,
+                    text,
+                }
+            }
             HubRequest::Task { verb, .. } => match verb {
                 TaskVerb::List => return render_tasks(&self.model),
                 TaskVerb::Add {
@@ -603,6 +692,22 @@ impl Hub {
                 };
                 let kind = format!("{kind:?}").to_lowercase();
                 match to {
+                    // A message (not a task) for a session that is busy, or in a terminal,
+                    // waits in its inbox; its daemon shows it at the next hook (F4). In look
+                    // mode a headless session gets it as a turn, since hooks show nothing.
+                    Address::Slot { id }
+                        if kind != "task"
+                            && (self.procs.get(id).is_none_or(|p| p.stdin.is_none())
+                                || (self.meta.mode == Mode::Optimize
+                                    && self.model.slots().get(id).is_some_and(|s| s.busy))) =>
+                    {
+                        let line = serde_json::json!({"ts_ms": now_ms(), "from": from, "kind": kind, "text": text});
+                        let path = self.dir.join("slots").join(format!("{}.inbox.jsonl", file_name(id)));
+                        let _ = paths::ensure_private_dir(&self.dir.join("slots"));
+                        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+                            let _ = writeln!(f, "{line}");
+                        }
+                    }
                     Address::Slot { id } => {
                         let line = serde_json::json!({
                             "type": "user",
@@ -840,6 +945,72 @@ impl Hub {
         });
     }
 
+    /// A terminal session joins as an attached role (F4). The reply is JSON with its slot
+    /// and rules, or a refusal.
+    fn join(
+        &mut self,
+        role: Option<String>,
+        name: Option<String>,
+        pid: i32,
+        cwd: String,
+    ) -> String {
+        let attached: Vec<&String> = self
+            .meta
+            .spec
+            .roles
+            .iter()
+            .filter(|(_, r)| r.run == Run::Attached)
+            .map(|(n, _)| n)
+            .collect();
+        let role = match (role, attached.as_slice()) {
+            (Some(r), _) => r,
+            (None, [one]) => one.to_string(),
+            (None, []) => return "tend: refused. This fleet has no attached role; add one with run = \"attached\".".into(),
+            (None, _) => return "tend: refused. This fleet has several attached roles; pick one with --tend-role.".into(),
+        };
+        let recs = self.apply(FleetEvent::Attached {
+            role,
+            name,
+            session: format!("pid-{pid}"),
+        });
+        let answer = recs.iter().find_map(|r| match &r.body {
+            FleetBody::Command {
+                command: Cmd::Answer { text, .. },
+                ..
+            } => Some(text.clone()),
+            _ => None,
+        });
+        let Some(slot) = answer.clone().filter(|a| !a.starts_with("tend: refused")) else {
+            return answer.unwrap_or_else(|| "tend: refused.".into());
+        };
+        let cwd = PathBuf::from(cwd);
+        self.worktrees.insert(slot.clone(), cwd.clone());
+        self.attached.insert(slot.clone());
+        self.procs.insert(
+            slot.clone(),
+            Proc {
+                pid,
+                stdin: None,
+                turns: 0,
+                exited: Arc::new(AtomicBool::new(false)),
+                worktree: cwd.clone(),
+            },
+        );
+        serde_json::json!({"slot": slot, "rules": self.rules_for(&slot, &cwd)}).to_string()
+    }
+
+    /// A session's messages (its inbox file), or the fleet's inbox for the user.
+    fn inbox_of(&self, by: &Actor) -> String {
+        let path = match by {
+            Actor::Slot { id } => self
+                .dir
+                .join("slots")
+                .join(format!("{}.inbox.jsonl", file_name(id))),
+            _ => self.dir.join("inbox.jsonl"),
+        };
+        render_inbox(&path)
+    }
+
     /// A session's write rules (F5c), as JSON for `TEND_FLEET_RULES`.
     fn rules_for(&self, slot: &str, cwd: &Path) -> String {
         let role = self.model.role_of(slot);
@@ -849,6 +1020,13 @@ impl Hub {
             may_write: role.map(|r| r.may_write.clone()).unwrap_or_default(),
             may_not_write: role.map(|r| r.may_not_write.clone()).unwrap_or_default(),
             claims: Some(self.dir.join("claims.json").display().to_string()),
+            inbox: Some(
+                self.dir
+                    .join("slots")
+                    .join(format!("{}.inbox.jsonl", file_name(slot)))
+                    .display()
+                    .to_string(),
+            ),
         };
         serde_json::to_string(&rules).unwrap_or_default()
     }
@@ -1391,6 +1569,91 @@ fn render_tasks(model: &Model) -> String {
         let _ = writeln!(out, "  {:<width$}  {state:<8}  {}", t.id, facts.join(" · "));
     }
     out
+}
+
+/// The last 20 lines of an inbox file, oldest first.
+fn render_inbox(path: &Path) -> String {
+    let Ok(text) = fs::read_to_string(path) else {
+        return "No messages.".into();
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = String::new();
+    for l in &lines[lines.len().saturating_sub(20)..] {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else {
+            continue;
+        };
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let head = match (s("kind"), s("from")) {
+            (k, f) if !f.is_empty() => format!("{k} from {f}: "),
+            _ => String::new(),
+        };
+        let _ = writeln!(out, "- {head}{}", s("text"));
+    }
+    if out.is_empty() {
+        out.push_str("No messages.");
+    }
+    out
+}
+
+/// `tend msg` and `tend inbox`, like `tend task`.
+pub fn msg(fleet: Option<&str>, to: String, kind: Option<String>, text: String) -> Result<String> {
+    let env_fleet = std::env::var("TEND_FLEET").ok();
+    let dir = resolve(fleet.or(env_fleet.as_deref()))?;
+    let req = HubRequest::Msg {
+        to,
+        kind,
+        text,
+        claimed_slot: std::env::var("TEND_FLEET_SLOT").ok(),
+    };
+    send(&dir, &req).map_err(|_| anyhow!("the fleet's hub is not running"))
+}
+
+pub fn show_inbox(fleet: Option<&str>) -> Result<String> {
+    let env_fleet = std::env::var("TEND_FLEET").ok();
+    let dir = resolve(fleet.or(env_fleet.as_deref()))?;
+    let req = HubRequest::Inbox {
+        claimed_slot: std::env::var("TEND_FLEET_SLOT").ok(),
+    };
+    match send(&dir, &req) {
+        Ok(t) => Ok(t),
+        // The hub is down: the user can still read the fleet's inbox.
+        Err(_) => Ok(render_inbox(&dir.join("inbox.jsonl"))),
+    }
+}
+
+/// Join a fleet from a terminal (`tend claude --tend-fleet`): the slot and its rules.
+pub fn join(
+    fleet: Option<&str>,
+    role: Option<String>,
+    name: Option<String>,
+    pid: i32,
+) -> Result<(String, String, String)> {
+    let dir = resolve(fleet)?;
+    let id = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let cwd = std::env::current_dir()?.display().to_string();
+    let reply = send(
+        &dir,
+        &HubRequest::Join {
+            role,
+            name,
+            pid,
+            cwd,
+        },
+    )
+    .map_err(|_| anyhow!("the fleet's hub is not running"))?;
+    let v: serde_json::Value = serde_json::from_str(&reply)
+        .map_err(|_| anyhow!("{}", reply.trim_start_matches("tend: ")))?;
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    Ok((id, s("slot"), s("rules")))
+}
+
+pub fn leave(fleet: &str, slot: &str) {
+    if let Ok(dir) = resolve(Some(fleet)) {
+        let _ = send(&dir, &HubRequest::Leave { slot: slot.into() });
+    }
 }
 
 /// `tend task …`: the fleet from `TEND_FLEET` (a fleet session), `--fleet`, or the

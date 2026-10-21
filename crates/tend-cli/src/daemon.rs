@@ -36,6 +36,8 @@ struct State {
     cwd: Option<String>,
     /// The fleet's claims file, and when it was last read (F5c).
     claims: Option<(PathBuf, Option<std::time::SystemTime>)>,
+    /// This session's fleet inbox, and how much of it was read (F4).
+    inbox: Option<(PathBuf, u64)>,
 }
 
 /// When the daemon last got a request (ms), for the idle exit.
@@ -87,6 +89,10 @@ pub fn run(
             .as_ref()
             .and_then(|r| r.claims.clone())
             .map(|p| (PathBuf::from(p), None)),
+        inbox: rules
+            .as_ref()
+            .and_then(|r| r.inbox.clone())
+            .map(|p| (PathBuf::from(p), 0)),
     }));
     eprintln!("tendd: listening on {} (mode {mode:?})", sock.display());
 
@@ -240,6 +246,37 @@ fn refresh_claims(st: &mut State) {
     }) {
         st.controller.set_fleet_claims(&claims);
     }
+}
+
+/// New messages in this session's fleet inbox become events, so this hook's reply can
+/// carry them (F4). A missing file means none yet.
+fn read_inbox(st: &mut State) -> Result<()> {
+    let Some((path, offset)) = &mut st.inbox else {
+        return Ok(());
+    };
+    let Ok(text) = fs::read_to_string(&*path) else {
+        return Ok(());
+    };
+    let Some(new) = text.get(*offset as usize..) else {
+        return Ok(());
+    };
+    let end = new.rfind('\n').map_or(0, |i| i + 1);
+    let lines: Vec<serde_json::Value> = new[..end]
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    *offset += end as u64;
+    for v in lines {
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let ev = tend_core::Event::Message {
+            from: s("from"),
+            kind: s("kind"),
+            text: s("text"),
+        };
+        let d = st.controller.handle(ev, now_ms());
+        st.store.persist(&d)?;
+    }
+    Ok(())
 }
 
 /// How often the fleet watcher looks at the other sessions (F1).
@@ -461,6 +498,7 @@ fn serve(
                 if event == "PreToolUse" {
                     refresh_claims(st);
                 }
+                read_inbox(st)?;
                 let (decisions, response) = decide_hook(
                     &mut st.controller,
                     st.connector.as_mut(),

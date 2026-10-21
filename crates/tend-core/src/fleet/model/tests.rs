@@ -1576,3 +1576,90 @@ fn a_session_past_its_wall_time_is_stopped() {
         "{c:?}"
     );
 }
+
+// --- Attached sessions and messages (F4) ---------------------------------------------
+
+#[test]
+fn a_terminal_session_joins_as_an_attached_role_and_leaves_for_good() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead", "role": {"reviewer": {"run": "attached"}}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    assert!(up
+        .iter()
+        .any(|c| matches!(c, Command::Attach { role } if role == "reviewer")));
+    r.start_all(&up);
+    let c = r.ev(FleetEvent::Attached {
+        role: "reviewer".into(),
+        name: Some("rev".into()),
+        session: "pid-9".into(),
+    });
+    assert_eq!(answer(&c), "rev");
+    assert_eq!(r.state("rev"), SlotState::Running);
+    // Added to the lead preset, it is a member: it asks the lead, the lead answers.
+    let to_lead = Address::Role {
+        name: "lead".into(),
+    };
+    assert_eq!(
+        r.m.default_kind(&slot("rev"), &to_lead),
+        Some(MsgKind::Question)
+    );
+    assert_eq!(
+        r.m.default_kind(&slot("lead-1"), &Address::Slot { id: "rev".into() }),
+        Some(MsgKind::Answer)
+    );
+    let c = r.ev(msg(slot("rev"), to_lead, MsgKind::Question));
+    assert_eq!(delivered(&c).first().map(|d| d.0.as_str()), Some("lead-1"));
+    // A second reviewer, a stream role, or a taken name: refused.
+    let c = r.ev(FleetEvent::Attached {
+        role: "reviewer".into(),
+        name: None,
+        session: "x".into(),
+    });
+    assert!(
+        refused(&c).is_some_and(|t| t.contains("already has its 1 session")),
+        "{c:?}"
+    );
+    let c = r.ev(FleetEvent::Attached {
+        role: "lead".into(),
+        name: None,
+        session: "x".into(),
+    });
+    assert!(
+        refused(&c).is_some_and(|t| t.contains("not attached")),
+        "{c:?}"
+    );
+    // The user leaves: no restart.
+    let c = r.ev(FleetEvent::Exited {
+        slot: "rev".into(),
+        code: Some(0),
+    });
+    assert!(c.is_empty(), "{c:?}");
+    assert_eq!(r.state("rev"), SlotState::Stopped);
+    // And may come back under the same name.
+    let c = r.ev(FleetEvent::Attached {
+        role: "reviewer".into(),
+        name: Some("rev".into()),
+        session: "pid-10".into(),
+    });
+    assert_eq!(answer(&c), "rev");
+}
+
+#[test]
+fn a_reply_to_a_question_is_an_answer() {
+    let mut r = Sim::new(preset(Preset::Lead));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let lead = Address::Role {
+        name: "lead".into(),
+    };
+    assert_eq!(
+        r.m.default_kind(&Actor::User, &lead),
+        Some(MsgKind::Question)
+    );
+    r.ev(msg(Actor::User, lead, MsgKind::Question));
+    assert_eq!(
+        r.m.default_kind(&slot("lead-1"), &Address::User),
+        Some(MsgKind::Answer)
+    );
+}

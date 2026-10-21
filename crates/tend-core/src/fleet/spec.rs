@@ -286,8 +286,8 @@ fn preset(p: Preset, as_team: bool) -> (BTreeMap<String, Role>, Vec<Channel>) {
             chans.push(channel(m, lead, &[Report, Question]));
         }
         if !as_team {
-            chans.push(channel("user", lead, &[Task, Answer]));
-            chans.push(channel(lead, "user", &[Report, Question]));
+            chans.push(channel("user", lead, &[Task, Question, Answer, Notice]));
+            chans.push(channel(lead, "user", &[Report, Question, Answer]));
         }
     };
     match p {

@@ -1,6 +1,6 @@
 # tend fleet: topologies and management
 
-**Status:** design, 2026-10-21. Owner decisions are in §9. It extends `docs/fleet-2026-10-21.md` (layers L1–L4, F1–F6). It replaces the short F3 and F5 there. Nothing is built.
+**Status:** built through F5 and F4 on 2026-10-21 (see `docs/TASKS.md`, Fleet F, for what changed and what is left). Owner decisions are in §9. It extends `docs/fleet-2026-10-21.md` (layers L1–L4, F1–F6). It replaces the short F3 and F5 there. Nothing is built.
 
 ## 1. Goal
 
