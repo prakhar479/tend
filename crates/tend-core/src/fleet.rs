@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use crate::event::PeerActivity;
 use crate::perception::shell;
 
-/// Notices delivered with one hook reply, at most.
+/// Messages delivered with one hook reply, at most. Notices of one kind about one file
+/// make one message (F-S2: 8 workers editing one file gave each 7 notices).
 const MAX_PER_HOOK: usize = 3;
 /// Notices in one session, at most. Past this, fleet notices stop: more would be noise.
 const MAX_NOTICES: usize = 40;
@@ -308,16 +309,28 @@ impl Fleet {
         self.told.retain(|(k, _, _)| *k != NoticeKind::PeerEdit);
     }
 
-    /// Notices to deliver now, oldest first, within the limits.
-    pub fn take(&mut self) -> Vec<Notice> {
-        let room = MAX_PER_HOOK.min(MAX_NOTICES.saturating_sub(self.sent));
-        let n = room.min(self.pending.len());
-        let out: Vec<Notice> = self.pending.drain(..n).collect();
-        self.sent += out.len();
-        if self.sent >= MAX_NOTICES {
-            self.pending.clear();
+    /// Notices to deliver now, oldest first, in groups that make one message each:
+    /// at most `MAX_PER_HOOK` groups, and `MAX_NOTICES` notices in the session.
+    pub fn take(&mut self) -> Vec<Vec<Notice>> {
+        let mut groups: Vec<Vec<Notice>> = Vec::new();
+        let mut rest = Vec::new();
+        for n in std::mem::take(&mut self.pending) {
+            // Past the session limit the rest is dropped: more would be noise.
+            if self.sent >= MAX_NOTICES {
+                break;
+            }
+            match groups.iter().position(|g| same_message(&g[0], &n)) {
+                Some(i) => groups[i].push(n),
+                None if groups.len() < MAX_PER_HOOK => groups.push(vec![n]),
+                None => {
+                    rest.push(n);
+                    continue;
+                }
+            }
+            self.sent += 1;
         }
-        out
+        self.pending = rest;
+        groups
     }
 
     fn who(&self, session: &str) -> String {
@@ -325,6 +338,42 @@ impl Fleet {
             Some(p) => format!("session {session} ({})", p.agent),
             None => format!("session {session}"),
         }
+    }
+}
+
+/// Two notices that the agent can read as one message: the same kind about the same
+/// file. Git commands stay one message each.
+fn same_message(a: &Notice, b: &Notice) -> bool {
+    a.kind == b.kind && a.kind != NoticeKind::PeerGit && a.path == b.path
+}
+
+/// The text the agent reads for a group from `take`.
+pub fn message(group: &[Notice]) -> String {
+    let [first, others @ ..] = group else {
+        return String::new();
+    };
+    if others.is_empty() {
+        return first.text.clone();
+    }
+    let mut names: Vec<&str> = group.iter().map(|n| n.peer.as_str()).collect();
+    names.dedup();
+    let who = match names.split_last() {
+        Some((last, [])) => format!("session {last}"),
+        Some((last, rest)) => format!("sessions {} and {last}", rest.join(", ")),
+        None => String::new(),
+    };
+    let rel = first.path.as_deref().unwrap_or("");
+    match first.kind {
+        NoticeKind::PeerEdit => format!(
+            "tend: {who} edited {rel} after you did. Read it again before you change it."
+        ),
+        NoticeKind::WorktreeOverlap => format!(
+            "tend: {who} also changed {rel}, in their worktrees (`tend fleet` lists them). Merging those branches will conflict in this file."
+        ),
+        NoticeKind::PeerFailure => format!(
+            "tend: this failure names {rel}, which {who} edited recently. It may come from their work, not yours."
+        ),
+        NoticeKind::PeerGit => first.text.clone(),
     }
 }
 
@@ -443,7 +492,11 @@ mod tests {
     }
 
     fn kinds(f: &mut Fleet) -> Vec<NoticeKind> {
-        f.take().into_iter().map(|n| n.kind).collect()
+        flat(f).into_iter().map(|n| n.kind).collect()
+    }
+
+    fn flat(f: &mut Fleet) -> Vec<Notice> {
+        f.take().into_iter().flatten().collect()
     }
 
     #[test]
@@ -452,7 +505,7 @@ mod tests {
         f.on_my_edit("/repo/src/api.rs", 10);
         edited(&mut f, "/repo/src/api.rs", 20, 5);
         edited(&mut f, "/repo/src/api.rs", 30, 6);
-        let n = f.take();
+        let n = flat(&mut f);
         assert_eq!(n.len(), 1);
         assert_eq!(n[0].kind, NoticeKind::PeerEdit);
         assert_eq!(n[0].cause, 5);
@@ -468,7 +521,7 @@ mod tests {
         let mut f = fleet_with(TOP);
         f.on_my_edit("/repo/src/a.rs", 10);
         edited(&mut f, "/repo/src/b.rs", 20, 5);
-        assert!(f.take().is_empty());
+        assert!(flat(&mut f).is_empty());
     }
 
     #[test]
@@ -477,7 +530,7 @@ mod tests {
         f.on_my_edit("/repo/x.py", 10);
         edited(&mut f, "/repo/x.py", 20, 5);
         f.on_my_edit("/repo/x.py", 30);
-        assert!(f.take().is_empty());
+        assert!(flat(&mut f).is_empty());
     }
 
     #[test]
@@ -485,9 +538,9 @@ mod tests {
         // Peer first, then me.
         let mut f = fleet_with("/wt/b");
         edited(&mut f, "/wt/b/src/api.rs", 10, 5);
-        assert!(f.take().is_empty());
+        assert!(flat(&mut f).is_empty());
         f.on_my_edit("/repo/src/api.rs", 20);
-        let n = f.take();
+        let n = flat(&mut f);
         assert_eq!(n.len(), 1);
         assert_eq!(n[0].kind, NoticeKind::WorktreeOverlap);
         assert_eq!(n[0].path.as_deref(), Some("src/api.rs"));
@@ -495,7 +548,7 @@ mod tests {
         // Once per path and peer.
         edited(&mut f, "/wt/b/src/api.rs", 30, 6);
         f.on_my_edit("/repo/src/api.rs", 40);
-        assert!(f.take().is_empty());
+        assert!(flat(&mut f).is_empty());
         // Me first, then the peer.
         let mut f = fleet_with("/wt/b");
         f.on_my_edit("/repo/src/api.rs", 10);
@@ -532,8 +585,8 @@ mod tests {
         let mut g = fleet_with(TOP);
         g.on_my_edit("/repo/a.rs", 1);
         edited(&mut g, "/elsewhere/a.rs", 2, 5);
-        assert!(f.take().is_empty());
-        assert!(g.take().is_empty());
+        assert!(flat(&mut f).is_empty());
+        assert!(flat(&mut g).is_empty());
     }
 
     #[test]
@@ -553,13 +606,13 @@ mod tests {
         git(&mut f, 5);
         git(&mut f, 5);
         git(&mut f, 6);
-        let n = f.take();
+        let n = flat(&mut f);
         assert_eq!(n.len(), 2);
         assert!(n[0].text.contains("`git stash`"), "{}", n[0].text);
         // In another worktree, git there does not touch this checkout.
         let mut f = fleet_with("/wt/b");
         git(&mut f, 5);
-        assert!(f.take().is_empty());
+        assert!(flat(&mut f).is_empty());
     }
 
     #[test]
@@ -570,13 +623,13 @@ mod tests {
             "error[E0308]: mismatched types\n --> src/api.rs:12:5",
             120_000,
         );
-        let n = f.take();
+        let n = flat(&mut f);
         assert_eq!(n.len(), 1);
         assert_eq!(n[0].kind, NoticeKind::PeerFailure);
         assert!(n[0].text.contains("1 min ago"), "{}", n[0].text);
         // The same failure again says nothing new.
         f.on_my_failure("src/api.rs:12:5", 130_000);
-        assert!(f.take().is_empty());
+        assert!(flat(&mut f).is_empty());
     }
 
     #[test]
@@ -585,18 +638,18 @@ mod tests {
         let mut f = fleet_with(TOP);
         edited(&mut f, "/repo/src/api.rs", 0, 5);
         f.on_my_failure("src/api.rs:1", FAILURE_WINDOW_MS + 1);
-        assert!(f.take().is_empty());
+        assert!(flat(&mut f).is_empty());
         // A different file whose name ends the same.
         let mut f = fleet_with(TOP);
         edited(&mut f, "/repo/a.py", 0, 5);
         f.on_my_failure("File \"/repo/data.py\", line 3", 1);
-        assert!(f.take().is_empty());
+        assert!(flat(&mut f).is_empty());
         // I edited it after the peer: the failure is more likely mine.
         let mut f = fleet_with(TOP);
         edited(&mut f, "/repo/a.py", 0, 5);
         f.on_my_edit("/repo/a.py", 10);
         f.on_my_failure("File \"/repo/a.py\", line 3", 20);
-        assert!(f.take().is_empty());
+        assert!(flat(&mut f).is_empty());
     }
 
     #[test]
@@ -615,14 +668,57 @@ mod tests {
         }
         let mut total = 0;
         loop {
-            let n = f.take();
-            if n.is_empty() {
+            let groups = f.take();
+            if groups.is_empty() {
                 break;
             }
-            assert!(n.len() <= MAX_PER_HOOK);
-            total += n.len();
+            assert!(groups.len() <= MAX_PER_HOOK);
+            total += groups.iter().map(Vec::len).sum::<usize>();
         }
         assert_eq!(total, MAX_NOTICES);
+    }
+
+    /// F-S2: many workers editing one shared file make one message, not one each.
+    #[test]
+    fn notices_about_one_file_make_one_message() {
+        let mut f = Fleet::default();
+        f.set_workspace(TOP, COMMON);
+        f.on_my_edit("/repo/shared.txt", 1);
+        for i in 1..=7u64 {
+            let s = format!("p{i}");
+            let top = format!("/wt/{i}");
+            f.on_peer(
+                &s,
+                "claude",
+                0,
+                &PeerActivity::Joined {
+                    cwd: top.clone(),
+                    top: top.clone(),
+                    common: COMMON.into(),
+                },
+                i,
+            );
+            f.on_peer(
+                &s,
+                "claude",
+                2,
+                &PeerActivity::Edited {
+                    path: format!("{top}/shared.txt"),
+                },
+                10 + i,
+            );
+        }
+        let groups = f.take();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 7, "each is still its own notice");
+        let text = message(&groups[0]);
+        assert!(
+            text.starts_with(
+                "tend: sessions p1, p2, p3, p4, p5, p6 and p7 also changed shared.txt"
+            ),
+            "{text}"
+        );
+        assert_eq!(message(&groups[0][..1]), groups[0][0].text);
     }
 
     #[test]
@@ -631,7 +727,7 @@ mod tests {
         f.on_my_edit("/repo/a.rs", 1);
         f.reset_conversation();
         edited(&mut f, "/repo/a.rs", 2, 5);
-        assert!(f.take().is_empty());
+        assert!(flat(&mut f).is_empty());
     }
 
     #[test]

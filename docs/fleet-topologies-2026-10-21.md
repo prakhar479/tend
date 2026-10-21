@@ -238,7 +238,7 @@ may_not_write  = ["tests/**"]       # tests come from the lead's tasks
 budget         = { tokens = "2M", wall = "45m", attempts = 3 }
 
 [limits]
-sessions = 5
+sessions = 5            # default: free memory / 300 MiB, capped (F-S2: ~300 MiB per agent)
 tokens   = "20M"
 ```
 
@@ -288,7 +288,7 @@ This replaces F3 and F5 in `docs/fleet-2026-10-21.md`. F1, F2, F4, and F6 stay. 
 | # | Task | Acceptance | Size |
 |---|---|---|---|
 | F-S1 | **Spike: stream mode.** (Done 2026-10-21: all confirmed.) Long-lived `claude -p` with stream-json in and out, under tend's `--settings`. Do hooks fire? Can a turn be sent when idle? What does an interrupt look like? Does `--resume --fork-session` work headless with hooks? | Results under "Spike results" | S |
-| F-S2 | **Spike: concurrency.** Run 4 stream sessions at once. Measure rate-limit and usage-limit behavior and the hub's CPU. | Numbers in the doc | S |
+| F-S2 | **Spike: concurrency.** (Done 2026-10-21: no rate limits at 8 Haiku sessions; each agent ~300 MiB, each tend daemon ~6.5 MiB.) Run 4 stream sessions at once. Measure rate-limit and usage-limit behavior and the hub's CPU. | Numbers in the doc | S |
 | F3a | **Spawn and lifecycle.** Hub spawns `stream` and `oneshot` sessions (with `--session-id`, brief, worktree); stop, restart with backoff, stuck detection, `fleet status`, `stop`, `down`, `prune`. | e2e: 2 fake stream workers; kill one; it restarts; `down` stops all; no worktree lost | M |
 | F3b | **Core fleet model.** `fleet/` in tend-core: fleet file, roles, channels, presets, `step()` with commands. | Table tests per preset; replay is deterministic | M |
 | F5a | **Task board and verbs.** `tend task …`, role checks in PreToolUse, assignment to idle stream sessions. | e2e: lead adds 3 tasks, 2 workers finish them, dependencies respected | M |

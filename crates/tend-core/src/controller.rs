@@ -612,8 +612,8 @@ impl Controller {
     /// Record pending fleet notices as actions, and tell the agent in optimize mode when
     /// `fleet = on`. Each action is caused by the peer's event and by this hook's event.
     fn deliver_fleet(&mut self, d: &mut Decision, now: u64) {
-        let notices = self.fleet.take();
-        if notices.is_empty() {
+        let groups = self.fleet.take();
+        if groups.is_empty() {
             return;
         }
         let trigger = d
@@ -624,18 +624,22 @@ impl Controller {
         let supported = self.caps.inject_context;
         let applied =
             self.session.mode == Mode::Optimize && supported && self.cfg.fleet == FleetSetting::On;
-        for n in notices {
-            let mut causes = vec![n.cause];
-            causes.extend(trigger);
-            let action = ActionKind::Fleet {
-                notice: n.kind,
-                peer: n.peer,
-                path: n.path,
-                text: n.text.clone(),
-            };
-            self.record(d, now, causes, action, n.reason, applied, !supported);
+        // Each notice is its own action; a group reaches the agent as one message.
+        for group in groups {
+            let text = crate::fleet::message(&group);
+            for n in group {
+                let mut causes = vec![n.cause];
+                causes.extend(trigger);
+                let action = ActionKind::Fleet {
+                    notice: n.kind,
+                    peer: n.peer,
+                    path: n.path,
+                    text: n.text,
+                };
+                self.record(d, now, causes, action, n.reason, applied, !supported);
+            }
             if applied {
-                d.response.add_context.push(n.text);
+                d.response.add_context.push(text);
             }
         }
     }

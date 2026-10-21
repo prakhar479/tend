@@ -101,7 +101,7 @@ Sessions on one machine see what the others do (design: `docs/fleet-2026-10-21.m
 - **Peer failure.** A failed run here names a file another session in this checkout edited in the last 30 minutes.
 - **Worktree overlap.** In another worktree of the same repo, both sessions edited one file. Merging the branches will conflict there.
 
-Each notice is an action in the ledger, caused by the other session's entry. `tend why a-N` follows the cause into that session's ledger. With `fleet = look` (the default) notices are only recorded and shown in `tend report`. With `fleet = on`, a session in optimize mode also gets them as added context at its next hook: at most 3 per hook and 40 per session.
+Each notice is an action in the ledger, caused by the other session's entry. `tend why a-N` follows the cause into that session's ledger. With `fleet = look` (the default) notices are only recorded and shown in `tend report`. With `fleet = on`, a session in optimize mode also gets them as added context at its next hook. Notices of one kind about one file make one message; at most 3 messages per hook and 40 notices per session.
 
 ## Repo policy
 
