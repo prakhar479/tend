@@ -1848,3 +1848,193 @@ fn fleet_lead_plans_tasks_and_workers_do_them_in_order() {
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("There is no task t-9"));
 }
+
+/// A git repo with `files` committed and `fleet.toml`; returns (dir, repo, home).
+fn fleet_repo(name: &str, files: &[(&str, &str)], fleet: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let dir = tmp(name);
+    let repo = dir.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    for (path, text) in files {
+        let p = repo.join(path);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, text).unwrap();
+    }
+    fs::write(repo.join("fleet.toml"), fleet).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["add", "."],
+        &["commit", "-qm", "base"],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false"
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+    let home = dir.join("home");
+    (dir, repo, home)
+}
+
+fn fake_script(dir: &Path, name: &str, cases: &str) -> PathBuf {
+    let script = dir.join(name);
+    let body = format!(
+        r#"#!/bin/sh
+[ "$1" = --version ] && echo '2.1.304 (Claude Code)' && exit 0
+D='{d}'
+result() {{ echo '{{"type":"result","subtype":"success","result":"ok"}}'; }}
+task_id() {{ printf '%s' "$1" | sed -n 's/.*tend task done \(t-[0-9.]*\).*/\1/p'; }}
+while IFS= read -r line; do
+  case "$line" in
+{cases}
+    *) result ;;
+  esac
+done
+"#,
+        d = dir.display()
+    );
+    fs::write(&script, body).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+/// Take a fleet down when dropped, so a failing test leaves no hub behind.
+struct FleetDown(PathBuf, PathBuf, PathBuf);
+impl Drop for FleetDown {
+    fn drop(&mut self) {
+        let _ = Command::new(bin())
+            .args(["fleet", "down"])
+            .current_dir(&self.0)
+            .env("TEND_HOME", &self.1)
+            .env("TEND_CLAUDE_BIN", &self.2)
+            .output();
+    }
+}
+
+fn board_until(tend: &dyn Fn(&[&str]) -> String, want: &dyn Fn(&str) -> bool) -> String {
+    for _ in 0..200 {
+        let b = tend(&["task", "list"]);
+        if want(&b) {
+            return b;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("board never matched:\n{}", tend(&["task", "list"]));
+}
+
+/// F5b: a worker that says done while the check fails gets the failure back, in the
+/// same session; its fix passes the check, and only then is the task done.
+#[test]
+fn fleet_check_gate_sends_a_failure_back_to_the_worker() {
+    let check =
+        "test -f ok.txt || { echo 'FAILED tests/test_x.py::test_ok - ok.txt is missing'; exit 1; }";
+    let (dir, repo, home) = fleet_repo(
+        "gate",
+        &[("a.txt", "a\n")],
+        &format!(
+            "preset = \"lead\"\ncheck = \"{}\"\n",
+            check.replace('"', "\\\"")
+        ),
+    );
+    let agent = fake_script(
+        &dir,
+        "fake-gate.sh",
+        r#"    *"Attempt 2 of this task"*)
+      id=$(task_id "$line"); echo "$line" > "$D/second.txt"
+      touch ok.txt; echo "$TEND_FLEET_SLOT fixed $id" >> "$D/log"
+      tend task done "$id" "fixed it" >> "$D/done.txt" 2>&1; result ;;
+    *"tend task done t-"*)
+      id=$(task_id "$line"); echo "$TEND_FLEET_SLOT first $id" >> "$D/log"
+      tend task done "$id" "first try" >> "$D/done.txt" 2>&1; result ;;"#,
+    );
+    let tend = |args: &[&str]| tend_in(&repo, &home, &agent, args);
+    let _down = FleetDown(repo.clone(), home.clone(), agent.clone());
+    tend(&["fleet", "up", "fleet.toml"]);
+    tend(&["task", "add", "make ok.txt", "--role", "worker"]);
+    let board = board_until(&tend, &|b| b.contains(" done "));
+    assert!(
+        board.contains("1 failed attempt") && board.contains("\"fixed it\""),
+        "{board}"
+    );
+    // The same session got its own failure back, with the check's words.
+    let log = fs::read_to_string(dir.join("log")).unwrap();
+    assert_eq!(log, "worker-1 first t-1\nworker-1 fixed t-1\n");
+    let second = fs::read_to_string(dir.join("second.txt")).unwrap();
+    assert!(
+        second.contains("failed (exit 1)") && second.contains("ok.txt is missing"),
+        "{second}"
+    );
+    let done = fs::read_to_string(dir.join("done.txt")).unwrap();
+    assert_eq!(done.matches("tend runs its check").count(), 2, "{done}");
+    let fleet_dir = fs::read_dir(home.join("fleets"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let inbox = fs::read_to_string(fleet_dir.join("inbox.jsonl")).unwrap();
+    assert!(inbox.contains("passed: fixed it"), "{inbox}");
+}
+
+/// F5b with the audit on (experimental): a change that deletes a test passes its check,
+/// but waits for its creator, who accepts it.
+#[test]
+fn fleet_check_gate_holds_a_flagged_change_for_review() {
+    let test =
+        "def test_one():\n    assert 1 + 1 == 2\n\n\ndef test_two():\n    assert 2 * 2 == 4\n";
+    let (dir, repo, home) = fleet_repo(
+        "review",
+        &[("tests/test_math.py", test)],
+        "preset = \"lead\"\ncheck = \"true\"\n",
+    );
+    fs::write(dir.join("config.toml"), "experimental_audit = true\n").unwrap();
+    let agent = fake_script(
+        &dir,
+        "fake-review.sh",
+        r#"    *"tend task done t-"*)
+      id=$(task_id "$line")
+      printf 'def test_one():\n    assert 1 + 1 == 2\n' > tests/test_math.py
+      tend task done "$id" "simplified the tests" >> "$D/done.txt" 2>&1; result ;;"#,
+    );
+    let tend = |args: &[&str]| {
+        let out = Command::new(bin())
+            .args(args)
+            .current_dir(&repo)
+            .env("TEND_HOME", &home)
+            .env("TEND_CLAUDE_BIN", &agent)
+            .env("TEND_CONFIG", dir.join("config.toml"))
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let _down = FleetDown(repo.clone(), home.clone(), agent.clone());
+    tend(&["fleet", "up", "fleet.toml"]);
+    tend(&["task", "add", "tidy the tests", "--role", "worker"]);
+    let board = board_until(&tend, &|b| b.contains(" review "));
+    assert!(board.contains("t-1"), "{board}");
+    let fleet_dir = fs::read_dir(home.join("fleets"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let inbox = fs::read_to_string(fleet_dir.join("inbox.jsonl")).unwrap();
+    assert!(
+        inbox.contains("audit (experimental) flags its diff: tests/test_math.py"),
+        "{inbox}"
+    );
+    // The user created it, so the user decides.
+    let ok = tend(&["task", "done", "t-1", "fine: test_two was a duplicate"]);
+    assert_eq!(ok.trim(), "t-1 is done.");
+    board_until(&tend, &|b| b.contains(" done "));
+}

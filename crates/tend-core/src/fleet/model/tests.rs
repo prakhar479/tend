@@ -834,6 +834,7 @@ fn add(by: Actor, title: &str, deps: &[&str], role: Option<&str>) -> FleetEvent 
         depends_on: deps.iter().map(|d| d.to_string()).collect(),
         scope: vec![],
         role: role.map(String::from),
+        check: None,
     }
 }
 
@@ -1191,4 +1192,282 @@ fn replay_with_tasks_is_deterministic() {
         }
     }
     assert_eq!(replayed, r.log);
+}
+
+// --- The check gate (F5b) -----------------------------------------------------------
+
+fn checked(task: &str, passed: bool, excerpt: &str, flags: &[&str]) -> FleetEvent {
+    FleetEvent::CheckResult {
+        task: task.into(),
+        passed,
+        exit: Some(if passed { 0 } else { 1 }),
+        excerpt: excerpt.into(),
+        flags: flags.iter().map(|f| f.to_string()).collect(),
+    }
+}
+
+fn runs_check(cmds: &[Command]) -> Option<(String, String)> {
+    cmds.iter().find_map(|c| match c {
+        Command::RunCheck { slot, command, .. } => Some((slot.clone(), command.clone())),
+        _ => None,
+    })
+}
+
+fn released(cmds: &[Command]) -> Vec<&str> {
+    cmds.iter()
+        .filter_map(|c| match c {
+            Command::Release { slot } => Some(slot.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn turn_end(slot: &str) -> FleetEvent {
+    FleetEvent::Activity {
+        slot: slot.into(),
+        turn_ended: true,
+    }
+}
+
+/// A lead with a fleet check, and one worker on t-1.
+fn gated() -> Sim {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead", "check": "make check",
+        "role": {"worker": {"budget": {"attempts": 3}}}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let c = r.ev(add(slot("lead-1"), "fix the parser", &[], None));
+    r.start_all(&c);
+    r
+}
+
+fn told_lead(cmds: &[Command], what: &str) -> bool {
+    cmds.iter().any(|c| matches!(c, Command::Deliver { to: Address::Slot { id }, text, .. } if id == "lead-1" && text.contains(what)))
+}
+
+#[test]
+fn done_counts_once_the_check_passes() {
+    let mut r = gated();
+    let c = r.ev(done("worker-1", "t-1"));
+    assert_eq!(
+        runs_check(&c),
+        Some(("worker-1".into(), "make check".into()))
+    );
+    assert!(
+        answer(&c).contains("tend runs its check (`make check`)"),
+        "{c:?}"
+    );
+    assert_eq!(task_state(&r, "t-1"), TaskState::Checking);
+    assert!(!told_lead(&c, "is done"), "not yet");
+    // The oneshot ends its turn: it stays open while its task is checked.
+    assert!(released(&r.ev(turn_end("worker-1"))).is_empty());
+    let c = r.ev(checked("t-1", true, "", &[]));
+    assert_eq!(task_state(&r, "t-1"), TaskState::Done);
+    assert!(
+        told_lead(&c, "t-1 is done (worker-1), and `make check` passed: ok"),
+        "{c:?}"
+    );
+    assert_eq!(released(&c), ["worker-1"]);
+}
+
+#[test]
+fn a_failed_check_goes_back_to_the_open_session() {
+    let mut r = gated();
+    r.ev(done("worker-1", "t-1"));
+    r.ev(turn_end("worker-1"));
+    let c = r.ev(checked(
+        "t-1",
+        false,
+        "FAILED tests/test_parse.py::test_dates - AssertionError",
+        &[],
+    ));
+    let back = tasks_to(&c);
+    assert_eq!(
+        back,
+        [("worker-1".into(), "t-1".into())],
+        "the session that made the change"
+    );
+    let text = c
+        .iter()
+        .find_map(|c| match c {
+            Command::Deliver {
+                kind: MsgKind::Task,
+                text,
+                ..
+            } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        text.contains("The check `make check` failed (exit 1)"),
+        "{text}"
+    );
+    assert!(text.contains("test_dates - AssertionError"), "{text}");
+    assert!(text.contains("tend task done t-1"), "{text}");
+    assert_eq!(task_state(&r, "t-1"), TaskState::Working);
+    assert!(released(&c).is_empty());
+    // It fixes it; the check runs again and passes.
+    let c = r.ev(done("worker-1", "t-1"));
+    assert!(runs_check(&c).is_some());
+    r.ev(checked("t-1", true, "", &[]));
+    assert_eq!(task_state(&r, "t-1"), TaskState::Done);
+    assert_eq!(r.m.tasks().next().unwrap().attempts, 1);
+}
+
+#[test]
+fn a_failed_check_after_the_session_ended_goes_to_a_fresh_one() {
+    let mut r = gated();
+    r.ev(done("worker-1", "t-1"));
+    // The session exits while its check runs (it crashed): no attempt is lost for that.
+    let c = r.ev(FleetEvent::Exited {
+        slot: "worker-1".into(),
+        code: None,
+    });
+    assert!(
+        c.iter().all(|c| !matches!(c, Command::TaskRetry { .. })),
+        "{c:?}"
+    );
+    assert_eq!(task_state(&r, "t-1"), TaskState::Checking);
+    let t = r.now;
+    let c = r.at(
+        t,
+        checked("t-1", false, "error[E0308]: mismatched types", &[]),
+    );
+    assert!(
+        matches!(&c[..], [Command::TaskRetry { at_ms, .. }] if *at_ms == t + BACKOFF_MS),
+        "{c:?}"
+    );
+    let c = r.at(t + BACKOFF_MS, FleetEvent::Tick);
+    assert_eq!(spawned(&c), ["worker-2"]);
+    let c = r.ev(FleetEvent::Started {
+        slot: "worker-2".into(),
+        session: "s".into(),
+    });
+    let text = c
+        .iter()
+        .find_map(|c| match c {
+            Command::Deliver {
+                kind: MsgKind::Task,
+                text,
+                ..
+            } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        text.contains("Attempt 2 of this task") && text.contains("mismatched types"),
+        "{text}"
+    );
+}
+
+#[test]
+fn failing_checks_use_up_the_attempts() {
+    let mut r = gated();
+    for n in 1..=3 {
+        r.ev(done("worker-1", "t-1"));
+        let c = r.ev(checked("t-1", false, "boom", &[]));
+        if n < 3 {
+            assert_eq!(tasks_to(&c).len(), 1, "attempt {n}");
+        } else {
+            assert_eq!(task_state(&r, "t-1"), TaskState::Failed);
+            assert!(told_lead(&c, "t-1 failed after 3 attempts"), "{c:?}");
+        }
+    }
+}
+
+#[test]
+fn a_flagged_change_waits_for_its_creator() {
+    let mut r = gated();
+    r.ev(done("worker-1", "t-1"));
+    r.ev(turn_end("worker-1"));
+    let c = r.ev(checked(
+        "t-1",
+        true,
+        "",
+        &["tests/test_api.py: tests removed"],
+    ));
+    assert_eq!(task_state(&r, "t-1"), TaskState::Review);
+    assert!(
+        told_lead(
+            &c,
+            "audit (experimental) flags its diff: tests/test_api.py: tests removed"
+        ),
+        "{c:?}"
+    );
+    assert_eq!(
+        released(&c),
+        ["worker-1"],
+        "the worker is done; the lead decides"
+    );
+    // Only the creator (or the user) reviews it.
+    let c = r.ev(FleetEvent::TaskDone {
+        by: slot("worker-1"),
+        task: "t-1".into(),
+        summary: "x".into(),
+    });
+    assert!(refused(&c).is_some(), "{c:?}");
+    let c = r.ev(FleetEvent::TaskReject {
+        by: slot("lead-1"),
+        task: "t-1".into(),
+        reason: "keep the test".into(),
+    });
+    assert_eq!(answer(&c), "t-1 goes back to work.");
+    assert_eq!(task_state(&r, "t-1"), TaskState::Queued);
+    // The second time, the lead accepts it.
+    let mut r = gated();
+    r.ev(done("worker-1", "t-1"));
+    r.ev(checked("t-1", true, "", &["flag"]));
+    let c = r.ev(FleetEvent::TaskDone {
+        by: slot("lead-1"),
+        task: "t-1".into(),
+        summary: "fine: the test was a duplicate".into(),
+    });
+    assert_eq!(answer(&c), "t-1 is done.");
+    assert_eq!(task_state(&r, "t-1"), TaskState::Done);
+}
+
+#[test]
+fn a_tasks_own_check_wins_and_the_user_may_mark_done() {
+    let mut r = gated();
+    let c = r.ev(FleetEvent::TaskAdd {
+        by: slot("lead-1"),
+        title: "docs".into(),
+        body: String::new(),
+        depends_on: vec![],
+        scope: vec![],
+        role: None,
+        check: Some("mdlint docs/".into()),
+    });
+    r.start_all(&c);
+    let c = r.ev(done("worker-2", "t-2"));
+    assert_eq!(runs_check(&c).map(|x| x.1).as_deref(), Some("mdlint docs/"));
+    // The user's own `done` skips the gate: the user decides.
+    let c = r.ev(FleetEvent::TaskDone {
+        by: Actor::User,
+        task: "t-1".into(),
+        summary: "I checked it".into(),
+    });
+    assert!(runs_check(&c).is_none());
+    assert_eq!(task_state(&r, "t-1"), TaskState::Done);
+}
+
+#[test]
+fn a_oneshot_ends_after_its_turn_when_its_task_is_over_or_left_open() {
+    let mut r = Sim::new(preset(Preset::Lead));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let c = r.ev(add(slot("lead-1"), "a", &[], None));
+    r.start_all(&c);
+    r.ev(done("worker-1", "t-1"));
+    assert_eq!(released(&r.ev(turn_end("worker-1"))), ["worker-1"]);
+    // One that ends its turn without `done` is ended too; its exit costs an attempt.
+    let c = r.ev(add(slot("lead-1"), "b", &[], None));
+    r.start_all(&c);
+    assert_eq!(released(&r.ev(turn_end("worker-2"))), ["worker-2"]);
+    let c = r.ev(FleetEvent::Exited {
+        slot: "worker-2".into(),
+        code: Some(0),
+    });
+    assert!(matches!(&c[..], [Command::TaskRetry { .. }]), "{c:?}");
 }

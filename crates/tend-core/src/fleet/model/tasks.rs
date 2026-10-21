@@ -6,6 +6,11 @@
 //! done) to an idle stream session of its role, or starts a fresh oneshot session for it.
 //! A session that ends without `done` or `blocked` costs the task an attempt; past the
 //! role's budget the task fails, and its creator is told.
+//!
+//! The check gate (F5b): a session's `done` on a task with a check (its own, or the
+//! fleet's) runs the check first. Passed: done. Failed: an attempt, and the failure goes
+//! back to the same session if it is open, else to a fresh one. Passed but flagged by
+//! the audit (experimental, opt-in): its creator reviews it (`done` or `reject`).
 
 use super::*;
 
@@ -16,6 +21,7 @@ pub struct NewTask {
     pub depends_on: Vec<String>,
     pub scope: Vec<String>,
     pub role: Option<String>,
+    pub check: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +34,10 @@ pub enum TaskState {
     /// A session was chosen and is starting.
     Bound,
     Working,
+    /// The session said done; tend runs the check.
+    Checking,
+    /// The check passed, but the audit flagged the diff: the creator decides.
+    Review,
     Done,
     Blocked,
     Failed,
@@ -52,6 +62,12 @@ pub struct Task {
     pub not_before: Option<u64>,
     /// What `done` or `blocked` said.
     pub outcome: Option<String>,
+    /// The task's own check, if any (else the fleet's).
+    #[serde(default)]
+    pub check: Option<String>,
+    /// Why the last attempt did not count: a failed check, or a reviewer's reason.
+    #[serde(default)]
+    pub last_check: Option<String>,
 }
 
 impl Model {
@@ -158,6 +174,8 @@ impl Model {
                 attempts: 0,
                 not_before: None,
                 outcome: None,
+                check: t.check,
+                last_check: None,
             },
         );
         self.cmd(
@@ -294,16 +312,22 @@ impl Model {
         let Some(t) = self.tasks.get(task).cloned() else {
             return self.refuse(cx, &by, &format!("There is no task {task}."));
         };
-        let mine = match &by {
-            Actor::Slot { id } => t.slot.as_deref() == Some(id.as_str()),
-            _ => true,
-        };
-        if !mine {
+        // Who may: its own session, the user, and its creator once it is under review.
+        // Under review, the task is its creator's, not the session's that did it.
+        let own = t.state != TaskState::Review
+            && matches!(&by, Actor::Slot { id } if t.slot.as_deref() == Some(id.as_str()));
+        let user = by == Actor::User;
+        let reviewer = t.state == TaskState::Review && by == t.created_by;
+        if !(own || user || reviewer) {
             return self.refuse(cx, &by, &format!("{task} is not this session's task."));
         }
         if !matches!(
             t.state,
-            TaskState::Working | TaskState::Bound | TaskState::Queued | TaskState::Open
+            TaskState::Working
+                | TaskState::Bound
+                | TaskState::Queued
+                | TaskState::Open
+                | TaskState::Review
         ) {
             return self.refuse(
                 cx,
@@ -320,7 +344,43 @@ impl Model {
                 return self.refuse(cx, &by, &format!("{o}, a part of {task}, is not done yet."));
             }
         }
-        let who = t.slot.clone().unwrap_or_else(|| "the user".into());
+        // The gate: the session's own `done` counts once its check passes.
+        if let (Ok(summary), true, Some(slot)) = (&outcome, own, &t.slot) {
+            if let Some(check) = self.check_for(&t) {
+                if let Some(x) = self.tasks.get_mut(task) {
+                    x.state = TaskState::Checking;
+                    x.outcome = Some(summary.clone());
+                }
+                self.cmd(
+                    cx,
+                    Command::RunCheck {
+                        task: task.into(),
+                        slot: slot.clone(),
+                        command: check.clone(),
+                    },
+                    &format!("{slot} says {task} is done; it counts once `{check}` passes."),
+                );
+                let said = format!(
+                    "{task}: tend runs its check (`{check}`) now. If it fails, you get the failure to fix."
+                );
+                return self.cmd(
+                    cx,
+                    Command::Answer {
+                        to: by,
+                        text: said.clone(),
+                    },
+                    &said,
+                );
+            }
+        }
+        let who = if reviewer {
+            match &by {
+                Actor::Slot { id } => format!("accepted by {id}"),
+                _ => "accepted by the user".into(),
+            }
+        } else {
+            t.slot.clone().unwrap_or_else(|| "the user".into())
+        };
         let (state, kind, text) = match &outcome {
             Ok(summary) => (
                 TaskState::Done,
@@ -333,18 +393,13 @@ impl Model {
                 format!("{task} is blocked ({who}): {reason}"),
             ),
         };
-        if let Some(x) = self.tasks.get_mut(task) {
-            x.state = state;
-            x.outcome = Some(match outcome {
-                Ok(s) | Err(s) => s,
-            });
+        let note = match outcome {
+            Ok(s) | Err(s) => s,
+        };
+        self.finish(cx, task, state, note);
+        if !reviewer {
+            self.tell_creator(cx, &t.created_by, kind, &text);
         }
-        if let Some(sid) = &t.slot {
-            if let Some(s) = self.slots.get_mut(sid) {
-                s.task = None;
-            }
-        }
-        self.tell_creator(cx, &t.created_by, kind, &text);
         let said = match state {
             TaskState::Done => format!("{task} is done."),
             _ => format!("{task} is blocked; its creator is told."),
@@ -356,6 +411,222 @@ impl Model {
                 text: said.clone(),
             },
             &said,
+        );
+    }
+
+    /// The check that decides a task: its own, its board's, or the fleet's.
+    fn check_for(&self, t: &Task) -> Option<String> {
+        t.check
+            .clone()
+            .or_else(|| self.scope(t.board.as_deref()).and_then(|s| s.check.clone()))
+            .or_else(|| self.spec.check.clone())
+    }
+
+    fn budget_for(&self, t: &Task, role: &str) -> u32 {
+        self.scope(t.board.as_deref())
+            .and_then(|sp| sp.roles.get(role))
+            .map_or(3, |r| r.budget.attempts.max(1))
+    }
+
+    /// End a task: free its session, which ends now if it is a oneshot whose turn is over.
+    fn finish(&mut self, cx: &mut Cx, task: &str, state: TaskState, note: String) {
+        let slot = self.tasks.get(task).and_then(|t| t.slot.clone());
+        if let Some(x) = self.tasks.get_mut(task) {
+            x.state = state;
+            x.outcome = Some(note);
+        }
+        if let Some(sid) = slot {
+            if let Some(s) = self.slots.get_mut(&sid) {
+                if s.task.as_deref() == Some(task) {
+                    s.task = None;
+                }
+            }
+            self.release_if_idle(cx, &sid);
+        }
+    }
+
+    /// A oneshot whose turn is over and whose task is over: end its session.
+    fn release_if_idle(&mut self, cx: &mut Cx, slot: &str) {
+        let Some(s) = self.slots.get(slot) else {
+            return;
+        };
+        let oneshot = self.role_def(s).is_some_and(|r| r.run == Run::Oneshot);
+        if oneshot && s.live() && !s.busy && s.task.is_none() && s.had_task {
+            self.cmd(
+                cx,
+                Command::Release { slot: slot.into() },
+                &format!("{slot} is a oneshot and its task is over."),
+            );
+        }
+    }
+
+    /// A slot ended a turn. A oneshot that had a task ends now, unless its task is being
+    /// checked (a failure comes back to it). One that ends with its task still open
+    /// costs that task an attempt when it exits.
+    pub(super) fn after_turn(&mut self, cx: &mut Cx, slot: &str) {
+        let Some(s) = self.slots.get(slot) else {
+            return;
+        };
+        if !s.had_task || !self.role_def(s).is_some_and(|r| r.run == Run::Oneshot) {
+            return;
+        }
+        let checking = s
+            .task
+            .as_ref()
+            .and_then(|t| self.tasks.get(t))
+            .is_some_and(|t| t.state == TaskState::Checking);
+        if !checking {
+            self.cmd(
+                cx,
+                Command::Release { slot: slot.into() },
+                &format!("{slot} is a oneshot and ended its turn."),
+            );
+        }
+    }
+
+    pub(super) fn on_check_result(
+        &mut self,
+        cx: &mut Cx,
+        task: &str,
+        passed: bool,
+        exit: Option<i32>,
+        excerpt: &str,
+        flags: Vec<String>,
+    ) {
+        let Some(t) = self.tasks.get(task).cloned() else {
+            return;
+        };
+        if t.state != TaskState::Checking {
+            return;
+        }
+        let check = self.check_for(&t).unwrap_or_default();
+        let who = t.slot.clone().unwrap_or_else(|| "its session".into());
+        let summary = t.outcome.clone().unwrap_or_default();
+        if passed && flags.is_empty() {
+            self.finish(cx, task, TaskState::Done, summary.clone());
+            let text = format!("{task} is done ({who}), and `{check}` passed: {summary}");
+            return self.tell_creator(cx, &t.created_by, MsgKind::Report, &text);
+        }
+        if passed {
+            self.finish(cx, task, TaskState::Review, summary);
+            let text = format!(
+                "{task} passed `{check}`, but tend's audit (experimental) flags its diff: {}. Accept it with `tend task done {task}`, or send it back with `tend task reject {task} \"<reason>\"`.",
+                flags.join("; ")
+            );
+            return self.tell_creator(cx, &t.created_by, MsgKind::Question, &text);
+        }
+        let exit = exit.map_or("killed".to_string(), |c| format!("exit {c}"));
+        let failure = format!(
+            "The check `{check}` failed ({exit}):\n{}",
+            crate::text::truncate_chars(excerpt.trim(), 2000)
+        );
+        self.retry(cx, task, &who, failure);
+    }
+
+    pub(super) fn on_task_reject(&mut self, cx: &mut Cx, by: Actor, task: &str, reason: &str) {
+        let Some(t) = self.tasks.get(task).cloned() else {
+            return self.refuse(cx, &by, &format!("There is no task {task}."));
+        };
+        if t.state != TaskState::Review {
+            return self.refuse(cx, &by, &format!("{task} is not waiting for review."));
+        }
+        if by != Actor::User && by != t.created_by {
+            return self.refuse(
+                cx,
+                &by,
+                &format!("Only {task}'s creator or the user reviews it."),
+            );
+        }
+        let who = match &by {
+            Actor::Slot { id } => id.clone(),
+            _ => "the user".into(),
+        };
+        self.retry(
+            cx,
+            task,
+            "its session",
+            format!("Sent back by {who}: {reason}"),
+        );
+        let said = format!("{task} goes back to work.");
+        self.cmd(
+            cx,
+            Command::Answer {
+                to: by,
+                text: said.clone(),
+            },
+            &said,
+        );
+    }
+
+    /// One attempt did not count. The task goes back to its open session, which made the
+    /// change, or to a fresh one after a backoff; past the budget it fails.
+    fn retry(&mut self, cx: &mut Cx, task: &str, who: &str, why: String) {
+        let Some(t) = self.tasks.get(task).cloned() else {
+            return;
+        };
+        let role = t
+            .slot
+            .as_ref()
+            .and_then(|s| self.slots.get(s))
+            .map(|s| s.role.clone())
+            .or_else(|| t.target.clone())
+            .unwrap_or_default();
+        let budget = self.budget_for(&t, &role);
+        let attempts = t.attempts + 1;
+        if let Some(x) = self.tasks.get_mut(task) {
+            x.attempts = attempts;
+            x.last_check = Some(why.clone());
+        }
+        let first = why.lines().next().unwrap_or("").to_string();
+        if attempts >= budget {
+            self.finish(cx, task, TaskState::Failed, why);
+            let text = format!("{task} failed after {attempts} attempts ({who}): {first}");
+            return self.tell_creator(cx, &t.created_by, MsgKind::Report, &text);
+        }
+        let open = t.slot.clone().filter(|s| {
+            self.slots
+                .get(s)
+                .is_some_and(|x| x.state == SlotState::Running && x.task.as_deref() == Some(task))
+        });
+        if let Some(slot) = open {
+            if let Some(x) = self.tasks.get_mut(task) {
+                x.state = TaskState::Bound;
+            }
+            if let Some(s) = self.slots.get_mut(&slot) {
+                s.busy = true;
+            }
+            return self.deliver_task(cx, task, &slot);
+        }
+        let at_ms = cx.now + (BACKOFF_MS << (attempts - 1));
+        if let Some(sid) = &t.slot {
+            if let Some(s) = self.slots.get_mut(sid) {
+                if s.task.as_deref() == Some(task) {
+                    s.task = None;
+                }
+            }
+        }
+        if let Some(x) = self.tasks.get_mut(task) {
+            x.state = TaskState::Queued;
+            x.slot = None;
+            x.not_before = Some(at_ms);
+            if x.target.is_none() || x.target.as_deref() == t.slot.as_deref() {
+                x.target = Some(role.clone());
+            }
+        }
+        if let Some(sid) = &t.slot {
+            self.release_if_idle(cx, sid);
+        }
+        self.cmd(
+            cx,
+            Command::TaskRetry {
+                task: task.into(),
+                at_ms,
+            },
+            &format!(
+                "{task}: {first} Attempt {} of {budget} goes to a fresh session in {} s.",
+                attempts + 1,
+                (at_ms - cx.now) / 1000
+            ),
         );
     }
 
@@ -391,6 +662,12 @@ impl Model {
         let Some(t) = self.tasks.get(&tid).cloned() else {
             return;
         };
+        if t.state == TaskState::Checking {
+            if let Some(x) = self.tasks.get_mut(&tid) {
+                x.slot = None;
+            }
+            return;
+        }
         if !matches!(t.state, TaskState::Working | TaskState::Bound) {
             return;
         }
@@ -579,7 +856,12 @@ impl Model {
         if !t.scope.is_empty() {
             out.push_str(&format!("\nScope: {}", t.scope.join(", ")));
         }
-        if t.attempts > 0 {
+        if let Some(why) = &t.last_check {
+            out.push_str(&format!(
+                "\n\nAttempt {} of this task. The last one did not count:\n{why}",
+                t.attempts + 1
+            ));
+        } else if t.attempts > 0 {
             out.push_str(&format!(
                 "\nThis is attempt {}: an earlier session ended without finishing it.",
                 t.attempts + 1

@@ -296,6 +296,9 @@ enum TaskCmd {
         /// The role that should do it.
         #[arg(long)]
         role: Option<String>,
+        /// The command that decides it is done (default: the fleet file's `check`).
+        #[arg(long)]
+        check: Option<String>,
     },
     /// Give a task to a role or a session.
     Assign { task: String, to: String },
@@ -305,6 +308,8 @@ enum TaskCmd {
     Done { task: String, summary: String },
     /// Say a task cannot be done, and why. Its creator is told.
     Blocked { task: String, reason: String },
+    /// Send a task under review back to work, and say why (its creator or the user).
+    Reject { task: String, reason: String },
     /// The board.
     List,
 }
@@ -677,17 +682,20 @@ fn run(cli: Cli) -> Result<i32> {
                     depends,
                     scope,
                     role,
+                    check,
                 } => hub::TaskVerb::Add {
                     title,
                     body,
                     depends_on: depends,
                     scope,
                     role,
+                    check,
                 },
                 TaskCmd::Assign { task, to } => hub::TaskVerb::Assign { task, to },
                 TaskCmd::Claim { task } => hub::TaskVerb::Claim { task },
                 TaskCmd::Done { task, summary } => hub::TaskVerb::Done { task, summary },
                 TaskCmd::Blocked { task, reason } => hub::TaskVerb::Blocked { task, reason },
+                TaskCmd::Reject { task, reason } => hub::TaskVerb::Reject { task, reason },
                 TaskCmd::List => hub::TaskVerb::List,
             };
             let text = hub::task(fleet.as_deref(), verb)?;

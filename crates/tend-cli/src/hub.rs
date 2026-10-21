@@ -96,6 +96,8 @@ pub enum TaskVerb {
         depends_on: Vec<String>,
         scope: Vec<String>,
         role: Option<String>,
+        #[serde(default)]
+        check: Option<String>,
     },
     Assign {
         task: String,
@@ -109,6 +111,10 @@ pub enum TaskVerb {
         summary: String,
     },
     Blocked {
+        task: String,
+        reason: String,
+    },
+    Reject {
         task: String,
         reason: String,
     },
@@ -243,7 +249,6 @@ enum Msg {
 struct Proc {
     pid: i32,
     stdin: Option<ChildStdin>,
-    run: Run,
     turns: u32,
     exited: Arc<AtomicBool>,
     worktree: PathBuf,
@@ -259,6 +264,14 @@ struct Hub {
     /// Events the hub itself caused while running commands (a spawn's start).
     queue: VecDeque<FleetEvent>,
     down_since: Option<u64>,
+    /// Each slot's working directory, kept after its session ends (checks run there).
+    worktrees: BTreeMap<String, PathBuf>,
+    /// The worktree's tree when each task was delivered, for the audit at check time
+    /// (only with `experimental_audit = true`): task → (root, tree).
+    bases: BTreeMap<String, (PathBuf, String)>,
+    /// Checks run one at a time: a team's sessions may share a worktree.
+    checking: Arc<std::sync::Mutex<()>>,
+    audit: bool,
 }
 
 pub fn run_hub(dir: &Path) -> Result<()> {
@@ -289,6 +302,10 @@ pub fn run_hub(dir: &Path) -> Result<()> {
         tx,
         queue: VecDeque::new(),
         down_since: None,
+        worktrees: BTreeMap::new(),
+        bases: BTreeMap::new(),
+        checking: Arc::new(std::sync::Mutex::new(())),
+        audit: crate::config::load().experimental_audit,
     };
     eprintln!("tend fleet hub {}: up", hub.meta.id);
     hub.apply(FleetEvent::Up);
@@ -349,12 +366,10 @@ impl Hub {
                     self.apply(e);
                 }
                 Ok(Msg::TurnEnded(slot)) => {
+                    // The model says when a oneshot ends (`release`): not while its
+                    // task's check runs, so a failure can come back to it (F5b).
                     if let Some(p) = self.procs.get_mut(&slot) {
                         p.turns += 1;
-                        // A oneshot does one task: its first turn is all of it.
-                        if p.run == Run::Oneshot {
-                            p.stdin = None;
-                        }
                     }
                     self.apply(FleetEvent::Activity {
                         slot,
@@ -437,6 +452,7 @@ impl Hub {
                     depends_on,
                     scope,
                     role,
+                    check,
                 } => FleetEvent::TaskAdd {
                     by,
                     title,
@@ -444,11 +460,13 @@ impl Hub {
                     depends_on,
                     scope,
                     role,
+                    check,
                 },
                 TaskVerb::Assign { task, to } => FleetEvent::TaskAssign { by, task, to },
                 TaskVerb::Claim { task } => FleetEvent::TaskClaim { by, task },
                 TaskVerb::Done { task, summary } => FleetEvent::TaskDone { by, task, summary },
                 TaskVerb::Blocked { task, reason } => FleetEvent::TaskBlocked { by, task, reason },
+                TaskVerb::Reject { task, reason } => FleetEvent::TaskReject { by, task, reason },
             },
         };
         let recs = self.apply(event);
@@ -518,13 +536,12 @@ impl Hub {
         match c {
             Cmd::Spawn {
                 slot,
-                run,
                 workspace,
                 model,
                 permission_mode,
                 brief,
                 ..
-            } => match self.spawn(slot, *run, workspace, model.as_deref(), permission_mode.as_deref(), brief) {
+            } => match self.spawn(slot, workspace, model.as_deref(), permission_mode.as_deref(), brief) {
                 Ok(session) => self.queue.push_back(FleetEvent::Started {
                     slot: slot.clone(),
                     session,
@@ -563,6 +580,9 @@ impl Hub {
                 self.write_line(slot, &line);
             }
             Cmd::Deliver { to, from, kind, text } => {
+                if let (tend_core::fleet::spec::MsgKind::Task, Address::Slot { id }) = (kind, to) {
+                    self.record_base(id, text);
+                }
                 let from = match from {
                     Actor::User => "the user".to_string(),
                     Actor::Tend => "tend".to_string(),
@@ -588,6 +608,12 @@ impl Hub {
                 &format!("Role {role} runs in your terminal. Start it with `tend claude` in this repo; joining a fleet from a terminal comes later (F4)."),
             ),
             // Answers go back with the request's reply; waits need nothing done.
+            Cmd::Release { slot } => {
+                if let Some(p) = self.procs.get_mut(slot) {
+                    p.stdin = None;
+                }
+            }
+            Cmd::RunCheck { task, slot, command } => self.run_check(task, slot, command),
             Cmd::Backoff { .. } | Cmd::TaskRetry { .. } | Cmd::Answer { .. } => {}
         }
     }
@@ -608,7 +634,6 @@ impl Hub {
     fn spawn(
         &mut self,
         slot: &str,
-        run: Run,
         workspace: &Workspace,
         model: Option<&str>,
         permission_mode: Option<&str>,
@@ -676,12 +701,12 @@ impl Hub {
                 let _ = tx.send(Msg::Event(FleetEvent::Exited { slot, code }));
             });
         }
+        self.worktrees.insert(slot.to_string(), cwd.clone());
         self.procs.insert(
             slot.to_string(),
             Proc {
                 pid,
                 stdin,
-                run,
                 turns: 0,
                 exited,
                 worktree: cwd,
@@ -732,11 +757,174 @@ impl Hub {
         Ok(path)
     }
 
+    /// With the audit on: the slot's worktree tree when it gets a task, to diff at check
+    /// time. The task id is the delivered text's first words (`Task t-2: …`).
+    fn record_base(&mut self, slot: &str, text: &str) {
+        if !self.audit {
+            return;
+        }
+        let Some(task) = text
+            .strip_prefix("Task ")
+            .and_then(|t| t.split(':').next())
+            .map(String::from)
+        else {
+            return;
+        };
+        let Some(wt) = self.worktrees.get(slot) else {
+            return;
+        };
+        let Ok(root) = crate::audit::repo_root(wt) else {
+            return;
+        };
+        let scratch = self.dir.join("scratch");
+        let _ = paths::ensure_private_dir(&scratch);
+        if let Ok(tree) = crate::audit::worktree_tree(&root, &scratch) {
+            self.bases.insert(task, (root, tree));
+        }
+    }
+
+    /// Run a task's check in its slot's worktree, off the hub's loop; the result comes
+    /// back as a CheckResult event.
+    fn run_check(&mut self, task: &str, slot: &str, command: &str) {
+        let tx = self.tx.clone();
+        let (task, command) = (task.to_string(), command.to_string());
+        let wt = self.worktrees.get(slot).cloned();
+        let base = self.bases.get(&task).cloned();
+        let scratch = self.dir.join("scratch");
+        let lock = Arc::clone(&self.checking);
+        thread::spawn(move || {
+            let _one = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let event = match wt {
+                Some(wt) => {
+                    let (exit, output) = run_with_timeout(&wt, &command, CHECK_TIMEOUT);
+                    let passed = exit == Some(0);
+                    let flags = match (&base, passed) {
+                        (Some((root, from)), true) => audit_flags(root, from, &scratch),
+                        _ => Vec::new(),
+                    };
+                    FleetEvent::CheckResult {
+                        task,
+                        passed,
+                        exit,
+                        excerpt: if passed {
+                            String::new()
+                        } else {
+                            excerpt(&output)
+                        },
+                        flags,
+                    }
+                }
+                None => FleetEvent::CheckResult {
+                    task,
+                    passed: false,
+                    exit: None,
+                    excerpt: "tend found no worktree for the session to check.".into(),
+                    flags: Vec::new(),
+                },
+            };
+            let _ = tx.send(Msg::Event(event));
+        });
+    }
+
     fn status(&self) -> String {
         let mut out = render_status(&self.meta, &self.model, &self.procs, true);
         out.push_str(&render_tasks(&self.model));
         out
     }
+}
+
+/// A check that runs longer is stopped and fails.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// Output kept from a check, at most.
+const CHECK_OUTPUT_BYTES: usize = 4 << 20;
+
+/// Run `command` with `sh` in `dir`, stdout and stderr together. Its exit code (None:
+/// killed or timed out) and output.
+fn run_with_timeout(dir: &Path, command: &str, timeout: Duration) -> (Option<i32>, String) {
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(format!("exec 2>&1\n{command}"))
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .process_group(0)
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return (None, format!("could not run the check: {e}")),
+    };
+    let out = child.stdout.take();
+    let reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(out) = out {
+            let _ = out.take(CHECK_OUTPUT_BYTES as u64).read_to_end(&mut buf);
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    });
+    let start = std::time::Instant::now();
+    let code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code(),
+            Ok(None) if start.elapsed() < timeout => thread::sleep(Duration::from_millis(100)),
+            _ => {
+                kill(-(child.id() as i32), libc::SIGKILL);
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let mut output = reader.join().unwrap_or_default();
+    if code.is_none() && start.elapsed() >= timeout {
+        output.push_str(&format!(
+            "\n[tend: the check ran over {} min and was stopped]",
+            timeout.as_secs() / 60
+        ));
+    }
+    (code, output)
+}
+
+/// What a session needs from a failed check: the failures tend's parsers find, or the
+/// end of the output.
+fn excerpt(output: &str) -> String {
+    let failures = tend_core::perception::extract_failures(output);
+    if !failures.is_empty() {
+        return failures
+            .iter()
+            .take(10)
+            .map(|f| match &f.test {
+                Some(t) => format!("{t}: {}", f.message),
+                None => f.message.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    let lines: Vec<&str> = output.lines().collect();
+    lines[lines.len().saturating_sub(30)..].join("\n")
+}
+
+/// The audit of a task's diff (experimental): what may weaken tests or checks.
+fn audit_flags(root: &Path, from: &str, scratch: &Path) -> Vec<String> {
+    let Ok(to) = crate::audit::worktree_tree(root, scratch) else {
+        return Vec::new();
+    };
+    let policy = crate::config::load_policy(root).0;
+    let Ok(report) = crate::audit::run(root, from, &to, &|p| policy.audit_ignores(p)) else {
+        return Vec::new();
+    };
+    let mut flags: Vec<String> = report
+        .tests
+        .iter()
+        .filter(|t| !t.weakened.is_empty())
+        .map(|t| format!("{}: {}", t.path, t.weakened.join(", ")))
+        .collect();
+    flags.extend(
+        report
+            .config
+            .iter()
+            .filter(|c| !c.weaker.is_empty())
+            .map(|c| format!("{}: {}", c.path, c.weaker.join(", "))),
+    );
+    flags
 }
 
 /// Copy a slot's output to its log, and tell the hub about activity and turn ends.

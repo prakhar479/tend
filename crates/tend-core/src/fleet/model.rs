@@ -99,6 +99,9 @@ pub enum FleetEvent {
         scope: Vec<String>,
         #[serde(default)]
         role: Option<String>,
+        /// The command that decides whether it is done (F5b); else the fleet's.
+        #[serde(default)]
+        check: Option<String>,
     },
     /// Give a task to a role or a slot.
     TaskAssign {
@@ -117,6 +120,23 @@ pub enum FleetEvent {
         summary: String,
     },
     TaskBlocked {
+        by: Actor,
+        task: String,
+        reason: String,
+    },
+    /// The hub ran a task's check (F5b). `excerpt`: the failures, or the output's end.
+    /// `flags`: what the audit of the task's diff found (experimental, opt-in).
+    CheckResult {
+        task: String,
+        passed: bool,
+        exit: Option<i32>,
+        #[serde(default)]
+        excerpt: String,
+        #[serde(default)]
+        flags: Vec<String>,
+    },
+    /// The creator (or the user) sends a task under review back to work.
+    TaskReject {
         by: Actor,
         task: String,
         reason: String,
@@ -167,6 +187,16 @@ pub enum Command {
     Answer {
         to: Actor,
         text: String,
+    },
+    /// Run a task's check in its slot's worktree, and send back a CheckResult.
+    RunCheck {
+        task: String,
+        slot: SlotId,
+        command: String,
+    },
+    /// End a oneshot session: close its stdin. Its task is over, or never came back.
+    Release {
+        slot: SlotId,
     },
     /// Give the task to a fresh session at `at_ms`. The hub only waits.
     TaskRetry {
@@ -321,6 +351,9 @@ impl Model {
                     s.stuck = 0;
                     s.busy = !turn_ended;
                 }
+                if turn_ended {
+                    self.after_turn(&mut cx, &slot);
+                }
             }
             FleetEvent::Scale { role, n } => self.on_scale(&mut cx, &role, n),
             FleetEvent::SpawnRequest { by, role } => self.on_spawn_request(&mut cx, by, &role),
@@ -338,6 +371,7 @@ impl Model {
                 depends_on,
                 scope,
                 role,
+                check,
             } => self.on_task_add(
                 &mut cx,
                 by,
@@ -347,6 +381,7 @@ impl Model {
                     depends_on,
                     scope,
                     role,
+                    check,
                 },
             ),
             FleetEvent::TaskAssign { by, task, to } => self.on_task_assign(&mut cx, by, &task, &to),
@@ -356,6 +391,16 @@ impl Model {
             }
             FleetEvent::TaskBlocked { by, task, reason } => {
                 self.on_task_end(&mut cx, by, &task, Err(reason))
+            }
+            FleetEvent::CheckResult {
+                task,
+                passed,
+                exit,
+                excerpt,
+                flags,
+            } => self.on_check_result(&mut cx, &task, passed, exit, &excerpt, flags),
+            FleetEvent::TaskReject { by, task, reason } => {
+                self.on_task_reject(&mut cx, by, &task, &reason)
             }
         }
         // Whatever changed, ready tasks may now have somewhere to go.
