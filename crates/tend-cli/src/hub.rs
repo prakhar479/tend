@@ -2008,9 +2008,21 @@ fn merge_plan(dir: &Path, meta: &Meta, model: &Model, yes: bool) -> Result<Strin
         if files.is_empty() {
             continue;
         }
+        // A worktree's tasks: its slot's, or for a team worktree (`team-<name>`), those of
+        // every slot whose role works in that team.
+        let team = name.strip_prefix("team-").map(|t| Workspace::Team {
+            name: t.to_string(),
+        });
         let mine: Vec<&tend_core::fleet::model::Task> = model
             .tasks()
-            .filter(|t| t.slot.as_deref() == Some(name.as_str()))
+            .filter(|t| {
+                t.slot.as_deref().is_some_and(|s| {
+                    s == name
+                        || team
+                            .as_ref()
+                            .is_some_and(|ws| model.role_of(s).is_some_and(|r| r.workspace == *ws))
+                })
+            })
             .collect();
         let first = mine
             .iter()

@@ -383,7 +383,19 @@ Owner decisions 2026-10-21: awareness and learning first; spawning is a core fea
   Done 2026-10-21. General rules, so any fleet file can use them: when a task is done and its role has exactly one handoff channel, tend adds the next role's task (`<title> — <role>`, the summary in its body, the same creator). When a handed-over task is blocked and a review channel leads back to the role that did the earlier task, that role gets a new task with the findings (`… — <role>, round N`), up to `max_rounds`; past it the task stays blocked and the user is told. A task's text now lists how the tasks it depended on ended.
 - [x] **G9 `best-of`.** A task for the candidate role fans out to one part per candidate; when all are done the judge decides: `judge = "rule"` picks the passing candidate with the smallest diff, `agent` gives the judge a task with every candidate's summary, `user` asks the user.
   Done 2026-10-21. A task for the candidate role in a best-of fleet fans out to one part per candidate (`t-N.1` …); the whole waits until every part ended. `judge = "rule"`: the done part with the smallest diff (the hub counts changed lines when a check passes) wins. `agent`: the judge gets a task listing each finished part's summary and size, and names the winner in its `done`. `user`: the user reviews and names one with `tend task done`. Parts not picked are marked, and `tend fleet merge` leaves their worktrees out.
-- [ ] **G10 Preset bench.** One seeded run per preset on Haiku (`scripts/fleet_bench.py`): did the flow finish, how many attempts, what it cost.
+- [x] **G10 Preset bench.** One seeded run per preset on Haiku (`scripts/fleet_bench.py`): did the flow finish, how many attempts, what it cost.
+  Done 2026-10-21 (`scripts/fleet_bench.py`; Claude Code 2.1.306, Haiku for every role, `check = "python3 test_calc.py"`, one task: fix the bug in `calc.py`):
+
+  | preset | outcome | tasks | attempts lost | fixed | min | $ |
+  |---|---|---|---|---|---|---|
+  | lead | done | 1 | 0 | yes | 0.1 | <0.01 |
+  | pool | done | 1 | 0 | yes | 0.1 | <0.01 |
+  | pipeline | done | 3 | 0 | yes | 0.3 | 0.01 |
+  | review | done | 2 | 0 | yes | 0.3 | 0.01 |
+  | best-of | done | 4 | 0 | yes | 0.1 | 0.01 |
+  | specialists | done | 1 | 0 | yes | 0.1 | <0.01 |
+
+  Reading: every flow ran to its end. The pipeline handed plan → implement → verify; the review ended with the reviewer approving; best-of judged by rule and picked `t-1.1` (all three diffs were the same size). The task was too small to test delegation: the `lead` and `specialists` leads fixed it themselves (allowed; one task), and the plan stage made the fix. **Found and fixed:** the merge plan read a team worktree (`team-review`, `team-pipeline`) as "not finished", because it looked for a slot of that name; it now counts the tasks of every slot whose role works in the team. A harder seeded task (several files, a real split) is the next bench to write.
 
 - [ ] **F6 Cross-provider.** After the Codex connector (S10, E12).
 
