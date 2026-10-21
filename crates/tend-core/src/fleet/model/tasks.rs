@@ -71,6 +71,20 @@ pub struct Task {
     /// A failed check was put down to another session in its shared worktree once (G5).
     #[serde(default)]
     pub interference_retried: bool,
+    /// The task whose handoff made this one (G8), and the review round it is in.
+    #[serde(default)]
+    pub handoff_of: Option<String>,
+    #[serde(default)]
+    pub round: u32,
+    /// A best-of task: its parts are the candidates, and it is the judging (G9).
+    #[serde(default)]
+    pub best_of: bool,
+    /// Lines its worktree changed, from its passing check (G9).
+    #[serde(default)]
+    pub diff_lines: Option<u64>,
+    /// A best-of candidate: picked by the judge, or not (G9).
+    #[serde(default)]
+    pub picked: Option<bool>,
 }
 
 impl Model {
@@ -143,13 +157,16 @@ impl Model {
             Actor::Slot { id } => self.slots.get(id).and_then(|s| s.task.clone()),
             _ => None,
         };
-        let key = parent.clone().unwrap_or_default();
-        let n = self.task_numbers.entry(key).or_insert(0);
-        *n += 1;
-        let id = match &parent {
-            Some(p) => format!("{p}.{n}"),
-            None => format!("t-{n}"),
+        // best-of (G9): a task for the candidates fans out to one part each.
+        let fan = match (&target, self.scope(board.as_deref())) {
+            (Some(r), Some(sp))
+                if sp.preset == crate::fleet::spec::Preset::BestOf && r == "candidate" =>
+            {
+                sp.roles.get(r).map(|d| d.max.max(1))
+            }
+            _ => None,
         };
+        let id = self.next_task_id(parent.as_deref());
         let state = if target.is_some() {
             TaskState::Queued
         } else {
@@ -180,8 +197,16 @@ impl Model {
                 check: t.check,
                 last_check: None,
                 interference_retried: false,
+                handoff_of: None,
+                round: 0,
+                best_of: false,
+                diff_lines: None,
+                picked: None,
             },
         );
+        if let Some(n) = fan {
+            self.fan_out(cx, &id, n);
+        }
         self.cmd(
             cx,
             Command::Answer {
@@ -250,11 +275,325 @@ impl Model {
     }
 
     fn ready(&self, t: &Task, now: u64) -> bool {
+        if t.best_of {
+            return false;
+        }
         t.depends_on.iter().all(|d| {
             self.tasks
                 .get(d)
                 .is_some_and(|x| x.state == TaskState::Done)
         }) && t.not_before.is_none_or(|nb| nb <= now)
+    }
+
+    /// The next id under `parent` (`t-N.k`), or at the top (`t-N`).
+    fn next_task_id(&mut self, parent: Option<&str>) -> String {
+        let n = self
+            .task_numbers
+            .entry(parent.unwrap_or_default().to_string())
+            .or_insert(0);
+        *n += 1;
+        match parent {
+            Some(p) => format!("{p}.{n}"),
+            None => format!("t-{n}"),
+        }
+    }
+
+    /// A task tend adds itself (a handoff, a review round, a best-of part), with the
+    /// same creator, so its outcome still reaches whoever asked.
+    fn add_follow_up(
+        &mut self,
+        from: &Task,
+        parent: Option<String>,
+        role: &str,
+        title: String,
+        body: String,
+    ) -> String {
+        let id = self.next_task_id(parent.as_deref());
+        self.task_order.push(id.clone());
+        self.tasks.insert(
+            id.clone(),
+            Task {
+                id: id.clone(),
+                title,
+                body,
+                depends_on: vec![],
+                scope: from.scope.clone(),
+                board: from.board.clone(),
+                parent,
+                created_by: from.created_by.clone(),
+                target: Some(role.to_string()),
+                slot: None,
+                state: TaskState::Queued,
+                attempts: 0,
+                not_before: None,
+                outcome: None,
+                check: from.check.clone(),
+                last_check: None,
+                interference_retried: false,
+                handoff_of: None,
+                round: from.round,
+                best_of: false,
+                diff_lines: None,
+                picked: None,
+            },
+        );
+        id
+    }
+
+    /// The role that did a task: its session's, else the role it was for.
+    fn role_of_task(&self, t: &Task) -> Option<String> {
+        t.slot
+            .as_ref()
+            .and_then(|s| self.slots.get(s))
+            .map(|s| s.role.clone())
+            .or_else(|| t.target.clone().filter(|r| !self.slots.contains_key(r)))
+    }
+
+    /// G9: `n` candidate parts under a best-of task; the task waits for them.
+    fn fan_out(&mut self, cx: &mut Cx, id: &str, n: u32) {
+        let Some(t) = self.tasks.get(id).cloned() else {
+            return;
+        };
+        let mut parts = Vec::new();
+        for k in 1..=n {
+            let body = format!(
+                "You are candidate {k} of {n} on this task; the others work on it in their own worktrees. Do it your own way.\n{}",
+                t.body
+            );
+            parts.push(self.add_follow_up(
+                &t,
+                Some(id.to_string()),
+                "candidate",
+                t.title.clone(),
+                body,
+            ));
+        }
+        if let Some(x) = self.tasks.get_mut(id) {
+            x.best_of = true;
+            x.state = TaskState::Queued;
+            x.target = None;
+            x.depends_on = parts.clone();
+        }
+        self.cmd(
+            cx,
+            Command::Notify {
+                text: format!(
+                    "tend fleet: {id} goes to {n} candidates ({}).",
+                    parts.join(", ")
+                ),
+            },
+            &format!("{id} is a best-of task: one part per candidate."),
+        );
+    }
+
+    /// G8: what a done task hands on. A role with one handoff channel passes its work
+    /// to the next role as a new task.
+    fn after_done(&mut self, cx: &mut Cx, task: &str) {
+        let Some(t) = self.tasks.get(task).cloned() else {
+            return;
+        };
+        if let Some(parent) = t
+            .parent
+            .clone()
+            .filter(|p| self.tasks.get(p).is_some_and(|x| x.best_of))
+        {
+            return self.judge_if_ready(cx, &parent);
+        }
+        let Some(role) = self.role_of_task(&t) else {
+            return;
+        };
+        let Some(spec) = self.scope(t.board.as_deref()) else {
+            return;
+        };
+        let next: Vec<String> = spec
+            .channels
+            .iter()
+            .filter(|c| {
+                c.from == role
+                    && c.kinds.contains(&MsgKind::Handoff)
+                    && spec.roles.contains_key(&c.to)
+            })
+            .map(|c| c.to.clone())
+            .collect();
+        let [next] = next.as_slice() else {
+            return;
+        };
+        let base = t.title.split(" — ").next().unwrap_or(&t.title).to_string();
+        let summary = t.outcome.clone().unwrap_or_default();
+        let body = format!(
+            "Handed over from {role} ({}): {summary}\nThe work is in the shared worktree (or on branch tend/…/{}).\n{}",
+            t.slot.clone().unwrap_or_default(),
+            t.slot.clone().unwrap_or_default(),
+            t.body
+        );
+        let id = self.add_follow_up(&t, t.parent.clone(), next, format!("{base} — {next}"), body);
+        if let Some(x) = self.tasks.get_mut(&id) {
+            x.handoff_of = Some(task.to_string());
+        }
+        self.cmd(
+            cx,
+            Command::Notify {
+                text: format!("tend fleet: {task} ({role}) is handed to {next} as {id}."),
+            },
+            &format!("{role} hands its work to {next} (a handoff channel)."),
+        );
+    }
+
+    /// G8: a review that was blocked with findings goes back to the author's role as a
+    /// new task, up to the fleet's `max_rounds`.
+    fn after_blocked(&mut self, cx: &mut Cx, task: &str) {
+        let Some(t) = self.tasks.get(task).cloned() else {
+            return;
+        };
+        let (Some(origin), Some(reviewer)) = (t.handoff_of.clone(), self.role_of_task(&t)) else {
+            return;
+        };
+        let Some(o) = self.tasks.get(&origin).cloned() else {
+            return;
+        };
+        let Some(author) = self.role_of_task(&o) else {
+            return;
+        };
+        let Some(spec) = self.scope(t.board.as_deref()) else {
+            return;
+        };
+        if !spec.allows(&reviewer, &author, MsgKind::Review) {
+            return;
+        }
+        let max = spec.max_rounds;
+        if t.round + 1 > max {
+            return self.cmd(
+                cx,
+                Command::Notify {
+                    text: format!("tend fleet: {task} was sent back {max} times; it stays blocked for you to decide."),
+                },
+                &format!("The review of {origin} reached max_rounds ({max})."),
+            );
+        }
+        let base = o.title.split(" — ").next().unwrap_or(&o.title).to_string();
+        let findings = t.outcome.clone().unwrap_or_default();
+        let body = format!("The {reviewer} sent it back (round {} of {max}):\n{findings}\n\nYour earlier summary: {}", t.round + 1, o.outcome.clone().unwrap_or_default());
+        let id = self.add_follow_up(
+            &o,
+            o.parent.clone(),
+            &author,
+            format!("{base} — {author}, round {}", t.round + 2),
+            body,
+        );
+        if let Some(x) = self.tasks.get_mut(&id) {
+            x.round = t.round + 1;
+        }
+        self.cmd(
+            cx,
+            Command::Notify {
+                text: format!("tend fleet: {reviewer} sent {origin} back; {author} gets {id}."),
+            },
+            &format!("A review channel leads from {reviewer} back to {author}."),
+        );
+    }
+
+    /// G9: when every candidate part has ended, the judge decides.
+    fn judge_if_ready(&mut self, cx: &mut Cx, id: &str) {
+        let Some(t) = self.tasks.get(id).cloned() else {
+            return;
+        };
+        if !t.best_of || !matches!(t.state, TaskState::Queued | TaskState::Open) {
+            return;
+        }
+        let parts: Vec<Task> = t
+            .depends_on
+            .iter()
+            .filter_map(|p| self.tasks.get(p).cloned())
+            .collect();
+        let over = |x: &Task| {
+            matches!(
+                x.state,
+                TaskState::Done | TaskState::Failed | TaskState::Blocked
+            )
+        };
+        if !parts.iter().all(over) {
+            return;
+        }
+        let done: Vec<&Task> = parts
+            .iter()
+            .filter(|x| x.state == TaskState::Done)
+            .collect();
+        if done.is_empty() {
+            self.finish(cx, id, TaskState::Failed, "no candidate finished".into());
+            let text = format!("{id} failed: no candidate finished.");
+            return self.tell_creator(cx, &t.created_by, MsgKind::Report, &text);
+        }
+        let judge = self
+            .scope(t.board.as_deref())
+            .map_or(crate::fleet::spec::Judge::Rule, |s| s.judge);
+        let lines: Vec<String> = done
+            .iter()
+            .map(|x| {
+                format!(
+                    "- {} ({}): {}{}",
+                    x.id,
+                    x.slot.clone().unwrap_or_default(),
+                    x.outcome.clone().unwrap_or_default(),
+                    x.diff_lines
+                        .map(|n| format!(" [{n} lines changed]"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect();
+        match judge {
+            crate::fleet::spec::Judge::Rule => {
+                // The smallest passing diff; without sizes, the first to finish.
+                let win = done
+                    .iter()
+                    .min_by_key(|x| x.diff_lines.unwrap_or(u64::MAX))
+                    .map(|x| x.id.clone())
+                    .unwrap_or_default();
+                self.pick(id, &win);
+                let note = format!(
+                    "picked {win}: the smallest passing change of {}",
+                    done.len()
+                );
+                self.finish(cx, id, TaskState::Done, note.clone());
+                let text = format!("{id} is done: {note}.\n{}", lines.join("\n"));
+                self.tell_creator(cx, &t.created_by, MsgKind::Report, &text);
+            }
+            crate::fleet::spec::Judge::Agent => {
+                let finished: Vec<String> = done.iter().map(|x| x.id.clone()).collect();
+                if let Some(x) = self.tasks.get_mut(id) {
+                    x.best_of = false;
+                    x.target = Some("judge".into());
+                    x.depends_on = finished;
+                    x.body = format!(
+                        "{}\n\nThe candidates' results:\n{}\nPick one: name its task id (for example `{}`) in your `tend task done {id}` summary, with your reason.",
+                        x.body,
+                        lines.join("\n"),
+                        done[0].id
+                    );
+                }
+            }
+            crate::fleet::spec::Judge::User => {
+                self.finish(cx, id, TaskState::Review, "the candidates are done".into());
+                let text = format!(
+                    "{id}'s candidates are done:\n{}\nPick one with `tend task done {id} \"<task id>: <reason>\"`.",
+                    lines.join("\n")
+                );
+                self.tell_creator(cx, &t.created_by, MsgKind::Question, &text);
+            }
+        }
+    }
+
+    /// Mark the best-of parts of `id`: `win` picked, the rest not.
+    fn pick(&mut self, id: &str, win: &str) {
+        let parts = self
+            .tasks
+            .get(id)
+            .map(|t| t.depends_on.clone())
+            .unwrap_or_default();
+        for p in parts {
+            if let Some(x) = self.tasks.get_mut(&p) {
+                x.picked = Some(p == win);
+            }
+        }
     }
 
     pub(super) fn on_task_claim(&mut self, cx: &mut Cx, by: Actor, task: Option<&str>) {
@@ -435,6 +774,24 @@ impl Model {
     /// End a task: free its session, which ends now if it is a oneshot whose turn is over.
     fn finish(&mut self, cx: &mut Cx, task: &str, state: TaskState, note: String) {
         let slot = self.tasks.get(task).and_then(|t| t.slot.clone());
+        // A judge's or the user's pick of a best-of task names the winning part (G9).
+        let parts: Vec<String> = self
+            .tasks
+            .get(task)
+            .map(|t| t.depends_on.clone())
+            .unwrap_or_default();
+        if state == TaskState::Done {
+            if let Some(win) = parts.iter().find(|p| {
+                note.contains(p.as_str())
+                    && self
+                        .tasks
+                        .get(*p)
+                        .is_some_and(|x| x.parent.as_deref() == Some(task) && x.picked.is_none())
+            }) {
+                let win = win.clone();
+                self.pick(task, &win);
+            }
+        }
         if let Some(x) = self.tasks.get_mut(task) {
             x.state = state;
             x.outcome = Some(note);
@@ -446,6 +803,17 @@ impl Model {
                 }
             }
             self.release_if_idle(cx, &sid);
+        }
+        match state {
+            TaskState::Done => self.after_done(cx, task),
+            TaskState::Blocked => self.after_blocked(cx, task),
+            TaskState::Failed => {
+                let parent = self.tasks.get(task).and_then(|t| t.parent.clone());
+                if let Some(p) = parent.filter(|p| self.tasks.get(p).is_some_and(|x| x.best_of)) {
+                    self.judge_if_ready(cx, &p);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -896,6 +1264,23 @@ impl Model {
         }
         if !t.scope.is_empty() {
             out.push_str(&format!("\nScope: {}", t.scope.join(", ")));
+        }
+        let before: Vec<String> = t
+            .depends_on
+            .iter()
+            .filter_map(|d| self.tasks.get(d))
+            .filter(|d| d.parent.as_deref() != Some(tid))
+            .map(|d| {
+                format!(
+                    "- {} ({}): {}",
+                    d.id,
+                    d.title,
+                    d.outcome.clone().unwrap_or_default()
+                )
+            })
+            .collect();
+        if !before.is_empty() {
+            out.push_str(&format!("\nDone before this:\n{}", before.join("\n")));
         }
         if let Some(why) = &t.last_check {
             out.push_str(&format!(

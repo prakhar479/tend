@@ -967,6 +967,11 @@ impl Hub {
                         (Some((root, from)), true) => audit_flags(root, from, &scratch),
                         _ => Vec::new(),
                     };
+                    let diff_lines = if passed {
+                        diff_size(&wt, base.as_ref().map(|b| b.1.as_str()))
+                    } else {
+                        None
+                    };
                     FleetEvent::CheckResult {
                         task,
                         passed,
@@ -977,6 +982,7 @@ impl Hub {
                             excerpt(&output)
                         },
                         flags,
+                        diff_lines,
                     }
                 }
                 None => FleetEvent::CheckResult {
@@ -985,6 +991,7 @@ impl Hub {
                     exit: None,
                     excerpt: "tend found no worktree for the session to check.".into(),
                     flags: Vec::new(),
+                    diff_lines: None,
                 },
             };
             let _ = tx.send(Msg::Event(event));
@@ -1205,6 +1212,25 @@ fn excerpt(output: &str) -> String {
     }
     let lines: Vec<&str> = output.lines().collect();
     lines[lines.len().saturating_sub(30)..].join("\n")
+}
+
+/// Lines a worktree changed (added plus removed): from the task's base tree when the
+/// audit recorded one, else from the worktree's HEAD; new files count whole (G9).
+fn diff_size(wt: &Path, base_tree: Option<&str>) -> Option<u64> {
+    let from = base_tree.unwrap_or("HEAD");
+    let numstat = git_out(wt, &["diff", "--numstat", from]).unwrap_or_default();
+    let mut n: u64 = numstat
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            Some(f.next()?.parse::<u64>().unwrap_or(0) + f.next()?.parse::<u64>().unwrap_or(0))
+        })
+        .sum();
+    let new = git_out(wt, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+    for f in new.lines() {
+        n += fs::read_to_string(wt.join(f)).map_or(0, |t| t.lines().count() as u64);
+    }
+    Some(n)
 }
 
 /// The audit of a task's diff (experimental): what may weaken tests or checks.
@@ -1675,6 +1701,13 @@ pub fn msg(fleet: Option<&str>, to: String, kind: Option<String>, text: String) 
 pub fn show_inbox(fleet: Option<&str>) -> Result<String> {
     let env_fleet = std::env::var("TEND_FLEET").ok();
     let dir = resolve(fleet.or(env_fleet.as_deref()))?;
+    // The user reads the fleet's inbox: mark it read (G6).
+    if std::env::var_os("TEND_FLEET_SLOT").is_none() {
+        let _ = fs::write(
+            dir.join("inbox.read"),
+            line_count(&dir.join("inbox.jsonl")).to_string(),
+        );
+    }
     let req = HubRequest::Inbox {
         claimed_slot: std::env::var("TEND_FLEET_SLOT").ok(),
     };
@@ -1744,16 +1777,52 @@ pub fn list() -> String {
             .values()
             .filter(|s| matches!(s.state, SlotState::Starting | SlotState::Running))
             .count();
+        let unread = unread_for_user(&d);
         let _ = writeln!(
             out,
-            "fleet {} · {} · {} sessions running · {}",
+            "fleet {} · {} · {} sessions running{} · {}",
             meta.id,
             if is_up(&d) { "up" } else { "down" },
             live,
+            if unread > 0 {
+                format!(" · {unread} unread (`tend inbox`)")
+            } else {
+                String::new()
+            },
             meta.repo.as_deref().unwrap_or(&meta.cwd)
         );
     }
     out
+}
+
+fn line_count(path: &Path) -> usize {
+    fs::read_to_string(path).map_or(0, |t| t.lines().count())
+}
+
+/// The user's fleet messages since `tend inbox` last showed them (G6).
+fn unread_for_user(dir: &Path) -> usize {
+    let read: usize = fs::read_to_string(dir.join("inbox.read"))
+        .ok()
+        .and_then(|t| t.trim().parse().ok())
+        .unwrap_or(0);
+    line_count(&dir.join("inbox.jsonl")).saturating_sub(read)
+}
+
+/// Messages a fleet session's inbox holds that its agent has not seen yet: the lines
+/// beyond the messages its ledger recorded (G6). For `tend status`.
+pub fn unread_for_session(inbox: &Path, entries: &[tend_core::Entry]) -> usize {
+    let seen = entries
+        .iter()
+        .filter(|e| {
+            matches!(
+                &e.body,
+                tend_core::Body::Event {
+                    event: tend_core::Event::Message { .. }
+                }
+            )
+        })
+        .count();
+    line_count(inbox).saturating_sub(seen)
 }
 
 /// `tend fleet prune`: worktrees of fleets that are down, with no uncommitted changes
@@ -1927,6 +1996,7 @@ fn merge_plan(dir: &Path, meta: &Meta, model: &Model, yes: bool) -> Result<Strin
     let order: Vec<String> = model.tasks().map(|t| t.id.clone()).collect();
     // Each worktree, with its slot's tasks, in the order the first of them was added.
     let mut rows: Vec<MergeRow> = Vec::new();
+    let mut not_picked = 0;
     for e in fs::read_dir(dir.join("worktrees"))
         .into_iter()
         .flatten()
@@ -1947,6 +2017,11 @@ fn merge_plan(dir: &Path, meta: &Meta, model: &Model, yes: bool) -> Result<Strin
             .filter_map(|t| order.iter().position(|o| *o == t.id))
             .min()
             .unwrap_or(usize::MAX);
+        // A best-of candidate the judge did not pick is not merged (G9).
+        if !mine.is_empty() && mine.iter().all(|t| t.picked == Some(false)) {
+            not_picked += 1;
+            continue;
+        }
         let finished = !mine.is_empty() && mine.iter().all(|t| t.state == TaskState::Done);
         let labels = mine
             .iter()
@@ -1962,6 +2037,13 @@ fn merge_plan(dir: &Path, meta: &Meta, model: &Model, yes: bool) -> Result<Strin
         });
     }
     rows.sort_by(|a, b| (a.first, &a.name).cmp(&(b.first, &b.name)));
+    if not_picked > 0 {
+        let _ = writeln!(
+            out,
+            "Left out: {not_picked} worktree{} of candidates the judge did not pick.",
+            if not_picked == 1 { "" } else { "s" }
+        );
+    }
     if rows.is_empty() {
         let _ = writeln!(out, "Merge plan: no worktree changed anything.");
         return Ok(out);
@@ -2119,6 +2201,102 @@ pub fn merge(spec: Option<&str>, yes: bool) -> Result<String> {
     merge_plan(&dir, &meta, &model, yes)
 }
 
+/// `tend fleet replay`: the recorded events through the model again, with the fleet's
+/// own file (the records must come out the same) or another one (what it would have
+/// decided, given the same events) (G7).
+pub fn replay_cmd(spec: Option<&str>, file: Option<&Path>) -> Result<String> {
+    let dir = resolve(spec)?;
+    let meta = read_meta(&dir)?;
+    let records = read_ledger(&dir);
+    let other = match file {
+        Some(f) => Some(load_spec(Some(f), None)?.0),
+        None => None,
+    };
+    let mut m = Model::new(other.clone().unwrap_or_else(|| meta.spec.clone()));
+    let mut again = Vec::new();
+    for r in &records {
+        if let FleetBody::Event { event } = &r.body {
+            again.extend(m.step(event.clone(), r.ts_ms));
+        }
+    }
+    let mut out = String::new();
+    let tally = |rs: &[FleetRecord]| {
+        let mut t: BTreeMap<String, usize> = BTreeMap::new();
+        for r in rs {
+            if let FleetBody::Command { command, .. } = &r.body {
+                let kind = match command {
+                    Cmd::Answer { text, .. } if text.starts_with("tend: refused") => {
+                        "refusal".to_string()
+                    }
+                    c => serde_json::to_value(c)
+                        .ok()
+                        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
+                        .unwrap_or_default(),
+                };
+                *t.entry(kind).or_default() += 1;
+            }
+        }
+        t
+    };
+    let first_diff = records
+        .iter()
+        .zip(&again)
+        .position(|(a, b)| a != b)
+        .or((records.len() != again.len()).then(|| records.len().min(again.len())));
+    match (&other, first_diff) {
+        (None, None) => {
+            let _ = writeln!(
+                out,
+                "The ledger's {} events replay to the same {} records.",
+                records
+                    .iter()
+                    .filter(|r| matches!(r.body, FleetBody::Event { .. }))
+                    .count(),
+                records.len()
+            );
+        }
+        (None, Some(i)) => {
+            let _ = writeln!(out, "The replay differs from the ledger at record {i}:");
+            let show = |r: Option<&FleetRecord>| {
+                r.and_then(|r| serde_json::to_string(r).ok())
+                    .unwrap_or_else(|| "(none)".into())
+            };
+            let _ = writeln!(
+                out,
+                "  ledger: {}",
+                tend_core::text::truncate_chars(&show(records.get(i)), 300)
+            );
+            let _ = writeln!(
+                out,
+                "  replay: {}",
+                tend_core::text::truncate_chars(&show(again.get(i)), 300)
+            );
+        }
+        (Some(_), _) => {
+            let (a, b) = (tally(&records), tally(&again));
+            let kinds: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+            let _ = writeln!(
+                out,
+                "Commands, as recorded and with {}:",
+                file.map(|f| f.display().to_string()).unwrap_or_default()
+            );
+            for k in kinds {
+                let (x, y) = (
+                    a.get(k).copied().unwrap_or(0),
+                    b.get(k).copied().unwrap_or(0),
+                );
+                let _ = writeln!(
+                    out,
+                    "  {k:<12} {x:>4} → {y:<4}{}",
+                    if x != y { "  *" } else { "" }
+                );
+            }
+            let _ = writeln!(out, "Given the same events; sessions the other file would have started differently could have acted differently.");
+        }
+    }
+    Ok(out)
+}
+
 /// `tend fleet restart`: start a fleet's hub again from its ledger (G1).
 pub fn restart(spec: Option<&str>) -> Result<String> {
     let dir = resolve(spec)?;
@@ -2204,6 +2382,29 @@ mod tests {
             "the API has a usage limit; ".repeat(20)
         );
         assert!(limit_of(&talk, "w-1").is_none());
+    }
+
+    #[test]
+    fn a_sessions_unread_messages_are_those_its_ledger_has_not_seen() {
+        let d = std::env::temp_dir().join(format!("tend-unread-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let inbox = d.join("in.jsonl");
+        fs::write(&inbox, "{}\n{}\n{}\n").unwrap();
+        let seen = tend_core::Entry {
+            seq: 1,
+            ts_ms: 0,
+            causes: vec![],
+            body: tend_core::Body::Event {
+                event: tend_core::Event::Message {
+                    from: "lead-1".into(),
+                    kind: "answer".into(),
+                    text: "x".into(),
+                },
+            },
+        };
+        assert_eq!(unread_for_session(&inbox, &[seen]), 2);
+        assert_eq!(unread_for_session(&d.join("missing"), &[]), 0);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -140,6 +140,9 @@ pub enum FleetEvent {
         excerpt: String,
         #[serde(default)]
         flags: Vec<String>,
+        /// Lines the task's worktree changed from the fleet's base (`best-of` rule, G9).
+        #[serde(default)]
+        diff_lines: Option<u64>,
     },
     /// The creator (or the user) sends a task under review back to work.
     TaskReject {
@@ -455,7 +458,13 @@ impl Model {
                 exit,
                 excerpt,
                 flags,
-            } => self.on_check_result(&mut cx, &task, passed, exit, &excerpt, flags),
+                diff_lines,
+            } => {
+                if let Some(t) = self.tasks.get_mut(&task) {
+                    t.diff_lines = diff_lines.or(t.diff_lines);
+                }
+                self.on_check_result(&mut cx, &task, passed, exit, &excerpt, flags)
+            }
             FleetEvent::TaskReject { by, task, reason } => {
                 self.on_task_reject(&mut cx, by, &task, &reason)
             }

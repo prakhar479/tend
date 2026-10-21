@@ -313,6 +313,13 @@ enum FleetCmd {
     /// Start a fleet's hub again after it stopped: stream sessions resume their
     /// conversations, and their tasks go back to the queue.
     Restart { fleet: Option<String> },
+    /// Replay a fleet's recorded events: with its own file (do the records match?),
+    /// or with another (what would it have decided?).
+    Replay {
+        fleet: Option<String>,
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -409,6 +416,7 @@ fn fleet_cmd(c: FleetCmd) -> Result<i32> {
             return Ok(0);
         }
         FleetCmd::Restart { fleet } => hub::restart(fleet.as_deref())?,
+        FleetCmd::Replay { fleet, file } => hub::replay_cmd(fleet.as_deref(), file.as_deref())?,
     };
     println!("{}", text.trim_end());
     Ok(0)
@@ -618,7 +626,24 @@ fn run(cli: Cli) -> Result<i32> {
                 });
             if let Some(dir) = dir {
                 if let Ok(entries) = store::read_entries(&dir) {
-                    println!("{}", report::status_line(&entries));
+                    let mut line = report::status_line(&entries);
+                    // In a fleet session: messages waiting for the next hook (G6).
+                    let inbox = std::env::var("TEND_FLEET_RULES")
+                        .ok()
+                        .and_then(|r| {
+                            serde_json::from_str::<tend_core::fleet::scope::RulesFile>(&r).ok()
+                        })
+                        .and_then(|r| r.inbox);
+                    if let Some(inbox) = inbox {
+                        let n = hub::unread_for_session(std::path::Path::new(&inbox), &entries);
+                        if n > 0 {
+                            line.push_str(&format!(
+                                " · {n} new fleet message{}",
+                                if n == 1 { "" } else { "s" }
+                            ));
+                        }
+                    }
+                    println!("{line}");
                 }
             }
             Ok(0)

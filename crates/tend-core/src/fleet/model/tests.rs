@@ -1203,6 +1203,7 @@ fn checked(task: &str, passed: bool, excerpt: &str, flags: &[&str]) -> FleetEven
         exit: Some(if passed { 0 } else { 1 }),
         excerpt: excerpt.into(),
         flags: flags.iter().map(|f| f.to_string()).collect(),
+        diff_lines: None,
     }
 }
 
@@ -1816,4 +1817,201 @@ fn a_failure_in_a_busy_shared_worktree_is_not_charged_the_first_time() {
     r.ev(done("worker-1", "t-1"));
     r.ev(checked("t-1", false, "boom", &[]));
     assert_eq!(r.m.tasks().next().unwrap().attempts, 1);
+}
+
+// --- Handoff flows and best-of (G8, G9) ----------------------------------------------
+
+fn task<'a>(r: &'a Sim, id: &str) -> &'a crate::fleet::model::Task {
+    r.m.tasks()
+        .find(|t| t.id == id)
+        .unwrap_or_else(|| panic!("no {id}"))
+}
+
+/// Start what the commands spawn and hand back the slots that got a task.
+fn run_tasks(r: &mut Sim, cmds: &[Command]) -> Vec<(String, String)> {
+    let mut got = tasks_to(cmds);
+    for c in cmds {
+        if let Command::Spawn { slot, .. } = c {
+            got.extend(tasks_to(&r.ev(FleetEvent::Started {
+                slot: slot.clone(),
+                session: "s".into(),
+            })));
+        }
+    }
+    got
+}
+
+#[test]
+fn a_pipeline_hands_each_stage_to_the_next() {
+    let mut r = Sim::new(preset(Preset::Pipeline));
+    r.ev(FleetEvent::Up);
+    let c = r.ev(add(Actor::User, "parse dates", &[], Some("plan")));
+    assert_eq!(run_tasks(&mut r, &c), [("plan-1".into(), "t-1".into())]);
+    let c = r.ev(done("plan-1", "t-1"));
+    assert!(
+        notified(&c, "t-1 (plan) is handed to implement as t-2"),
+        "{c:?}"
+    );
+    assert_eq!(task(&r, "t-2").title, "parse dates — implement");
+    assert!(task(&r, "t-2")
+        .body
+        .contains("Handed over from plan (plan-1): ok"));
+    assert_eq!(
+        run_tasks(&mut r, &c),
+        [("implement-1".into(), "t-2".into())]
+    );
+    let c = r.ev(done("implement-1", "t-2"));
+    assert_eq!(task(&r, "t-3").title, "parse dates — verify");
+    run_tasks(&mut r, &c);
+    let c = r.ev(done("verify-1", "t-3"));
+    assert!(
+        !c.iter()
+            .any(|c| matches!(c, Command::Notify { text } if text.contains("handed"))),
+        "the last stage hands nothing: {c:?}"
+    );
+    assert_eq!(
+        task(&r, "t-3").created_by,
+        Actor::User,
+        "outcomes reach whoever asked"
+    );
+}
+
+#[test]
+fn a_review_sends_work_back_until_max_rounds() {
+    let mut r = Sim::new(spec(
+        serde_json::json!({"preset": "review", "max_rounds": 1}),
+    ));
+    r.ev(FleetEvent::Up);
+    let c = r.ev(add(Actor::User, "add caching", &[], Some("author")));
+    run_tasks(&mut r, &c);
+    let c = r.ev(done("author-1", "t-1"));
+    assert_eq!(run_tasks(&mut r, &c), [("reviewer-1".into(), "t-2".into())]);
+    let c = r.ev(FleetEvent::TaskBlocked {
+        by: slot("reviewer-1"),
+        task: "t-2".into(),
+        reason: "the cache never expires".into(),
+    });
+    assert!(
+        notified(&c, "reviewer sent t-1 back; author gets t-3"),
+        "{c:?}"
+    );
+    assert!(task(&r, "t-3").body.contains("the cache never expires"));
+    assert_eq!(task(&r, "t-3").title, "add caching — author, round 2");
+    let got = run_tasks(&mut r, &c);
+    assert_eq!(got, [("author-2".into(), "t-3".into())]);
+    let c = r.ev(done("author-2", "t-3"));
+    run_tasks(&mut r, &c);
+    let c = r.ev(FleetEvent::TaskBlocked {
+        by: slot("reviewer-2"),
+        task: "t-4".into(),
+        reason: "still wrong".into(),
+    });
+    assert!(notified(&c, "sent back 1 times; it stays blocked"), "{c:?}");
+}
+
+fn best_of(judge: &str) -> Sim {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "best-of", "judge": judge, "check": "make check", "limits": {"sessions": 4}
+    })));
+    r.ev(FleetEvent::Up);
+    let c = r.ev(add(Actor::User, "speed up dedup", &[], Some("candidate")));
+    assert!(
+        notified(&c, "t-1 goes to 3 candidates (t-1.1, t-1.2, t-1.3)"),
+        "{c:?}"
+    );
+    assert_eq!(run_tasks(&mut r, &c).len(), 3);
+    r
+}
+
+fn finish_part(
+    r: &mut Sim,
+    slot_id: &str,
+    task_id: &str,
+    passed: bool,
+    lines: u64,
+) -> Vec<Command> {
+    r.ev(done(slot_id, task_id));
+    r.ev(FleetEvent::CheckResult {
+        task: task_id.into(),
+        passed,
+        exit: Some(if passed { 0 } else { 1 }),
+        excerpt: String::new(),
+        flags: vec![],
+        diff_lines: Some(lines),
+    })
+}
+
+#[test]
+fn best_of_by_rule_picks_the_smallest_passing_change() {
+    let mut r = best_of("rule");
+    finish_part(&mut r, "candidate-1", "t-1.1", true, 40);
+    finish_part(&mut r, "candidate-2", "t-1.2", true, 12);
+    // The third fails its check every time; the others still get judged.
+    for _ in 0..3 {
+        r.ev(done("candidate-3", "t-1.3"));
+        let c = r.ev(checked("t-1.3", false, "slow", &[]));
+        run_tasks(&mut r, &c);
+        if task(&r, "t-1.3").state == TaskState::Failed {
+            break;
+        }
+        let t = r.now + 60_000;
+        let c = r.at(t, FleetEvent::Tick);
+        run_tasks(&mut r, &c);
+    }
+    let t1 = task(&r, "t-1");
+    assert_eq!(t1.state, TaskState::Done, "{t1:?}");
+    assert!(
+        t1.outcome.as_deref().unwrap().contains("picked t-1.2"),
+        "{t1:?}"
+    );
+    assert_eq!(task(&r, "t-1.2").picked, Some(true));
+    assert_eq!(task(&r, "t-1.1").picked, Some(false));
+}
+
+#[test]
+fn best_of_by_agent_gives_the_judge_every_result() {
+    let mut r = best_of("agent");
+    for (s, t, n) in [
+        ("candidate-1", "t-1.1", 5),
+        ("candidate-2", "t-1.2", 9),
+        ("candidate-3", "t-1.3", 7),
+    ] {
+        let c = finish_part(&mut r, s, t, true, n);
+        if t == "t-1.3" {
+            // All three ended: the judge starts with the list.
+            let got = run_tasks(&mut r, &c);
+            assert_eq!(got, [("judge-1".into(), "t-1".into())], "{c:?}");
+        }
+    }
+    let text = r.m.task_text("t-1");
+    assert!(
+        text.contains("- t-1.2 (candidate-2): ok [9 lines changed]") && text.contains("Pick one"),
+        "{text}"
+    );
+    r.ev(FleetEvent::TaskDone {
+        by: slot("judge-1"),
+        task: "t-1".into(),
+        summary: "t-1.3: clearest".into(),
+    });
+    // The judge's own `done` passes the fleet's check too.
+    r.ev(checked("t-1", true, "", &[]));
+    assert_eq!(task(&r, "t-1").state, TaskState::Done);
+    assert_eq!(task(&r, "t-1.3").picked, Some(true));
+    assert_eq!(task(&r, "t-1.1").picked, Some(false));
+}
+
+#[test]
+fn best_of_by_user_asks_the_user() {
+    let mut r = best_of("user");
+    finish_part(&mut r, "candidate-1", "t-1.1", true, 5);
+    finish_part(&mut r, "candidate-2", "t-1.2", true, 9);
+    let c = finish_part(&mut r, "candidate-3", "t-1.3", true, 7);
+    assert!(notified(&c, "t-1's candidates are done"), "{c:?}");
+    assert_eq!(task(&r, "t-1").state, TaskState::Review);
+    r.ev(FleetEvent::TaskDone {
+        by: Actor::User,
+        task: "t-1".into(),
+        summary: "t-1.1, the smallest".into(),
+    });
+    assert_eq!(task(&r, "t-1.1").picked, Some(true));
 }

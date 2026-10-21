@@ -2226,6 +2226,19 @@ fn fleet_tree_splits_work_down_and_reports_up() {
         heard.contains("t-1.1 is done (sub-1)") && heard.contains("t-1.2 is done (sub-2)"),
         "{heard}"
     );
+    // G7: the ledger replays to the same records; another file decides differently.
+    let same = tend(&["fleet", "replay"]);
+    assert!(same.contains("replay to the same"), "{same}");
+    fs::write(
+        repo.join("tight.toml"),
+        "preset = \"tree\"\n\n[limits]\nsessions = 3\n",
+    )
+    .unwrap();
+    let other = tend(&["fleet", "replay", "--file", "tight.toml"]);
+    assert!(
+        other.contains("Commands, as recorded and with tight.toml") && other.contains('*'),
+        "{other}"
+    );
 }
 
 /// F4: a session in the user's terminal joins a fleet, asks the headless lead a
@@ -2326,6 +2339,18 @@ echo "$TEND_FLEET_SLOT" > "$D/rev-slot.txt"
             .any(|l| l.trim_start().starts_with("rev ") && l.contains("stopped")),
         "{status}"
     );
+    // The user's unread messages show in `tend fleet` until `tend inbox` (G6).
+    let lead_reply = Command::new(bin())
+        .args(["msg", "@lead", "thanks"])
+        .current_dir(&repo)
+        .env("TEND_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(lead_reply.status.success());
+    let fleets = tend(&["fleet"]);
+    assert!(fleets.contains("unread (`tend inbox`)"), "{fleets}");
+    tend(&["inbox"]);
+    assert!(!tend(&["fleet"]).contains("unread"), "read now");
     // A message to it now has nowhere to go.
     let out = Command::new(bin())
         .args(["msg", "rev", "still there?"])
