@@ -290,6 +290,28 @@ Review after the checkpoint: about 60 findings, most of them confirmed. Batches 
   - E11: opt-in desktop notifications (`notify = true`).
 - [ ] **E12–E16** Other agents, MCP server, `tend bench`, HTML report, deciders.
 
+## Fleet F (from `docs/fleet-2026-10-21.md` and `docs/fleet-topologies-2026-10-21.md`)
+
+Owner decisions 2026-10-21: awareness and learning first; spawning is a core feature; workers run oneshot per task in a worktree per worker (teams may share one); the user merges; hierarchy is first-class; support one checkout, worktrees, and separate repos; build F1 now (the feature gate from 2026-10-20 does not apply to fleet).
+
+- [x] **F1.0 Measure.** From `~/.claude/projects` transcripts: how often were sessions live at once (one checkout, worktrees of one repo, different repos)? How often did they touch the same repo-relative file within 10 min? How often did two sessions hit the same error signature? Acceptance: a table in `docs/fleet-2026-10-21.md` §7. Does not block F1.
+  Note: `scripts/fleet_measure.py`. 7 real transcripts: no same-checkout or worktree overlap, 3 concurrent pairs on different repos, one shared machine-level failure (gpg signing). A resumed session's copied history first read as a collision; each message uuid now counts once.
+- [ ] **F1 Awareness.** Lazy per-user hub (`<tmp>/tend-<uid>/hub.sock`); session daemons publish a digest off the hook path; pure `tend-core/src/fleet.rs` with stale-read, concurrent-write, and resource-clash rules; ledger kinds `fleet_peer`, `fleet_notice` with cross-ledger causes; `tend fleet` and a fleet section in `tend report`. Look mode only. Acceptance: e2e with two fake agents (A writes a file B read → B's ledger has a `fleet_notice` caused by A's entry; `tend why` shows both); killing the hub leaves both sessions working, hooks exit 0, latency budget holds. Gate for F2: a week of real use with correct notices.
+- [ ] **F2 Shared learning.** Signature memory (`<home>/fleet/signatures.jsonl`) delivered on a second hit or a loop start; `tend note` with a review queue and `tend notes --promote`. Gate: one real hit where the delivered fix was right.
+- [ ] **F-S1 Spike: stream mode.** Long-lived `claude -p --input-format stream-json --output-format stream-json` under tend's settings: do hooks fire, can a turn be sent when idle, how does interrupt work, does `--resume --fork-session` work headless?
+- [ ] **F-S2 Spike: concurrency.** 4 stream sessions at once: rate and usage limits, hub CPU.
+- [ ] **F3a Spawn and lifecycle.** Hub spawns `stream`/`oneshot` sessions (`--session-id`, role brief, worktree); restart with backoff; stuck detection; `fleet status | stop | down | prune`. Acceptance: e2e with 2 fake stream workers, one killed and restarted, `down` stops all, no worktree lost.
+- [ ] **F3b Core fleet model.** `tend-core/src/fleet/`: fleet file, roles, channels, presets, pure `step(state, event, now_ms) -> (state, commands)`. Acceptance: table tests per preset; replay is deterministic.
+- [ ] **F4 Messaging.** `tend msg`, `tend inbox`, `--tend-name`, `--tend-role`; delivery through `inject_context` at the next hook, digested and rate-limited; messages are untrusted and can never lift a block. Optimize mode only.
+- [ ] **F5a Task board and verbs.** `tend task add|assign|claim|done|blocked`; role checks in PreToolUse. Acceptance: lead adds 3 tasks, 2 workers finish them, dependencies respected.
+- [ ] **F5b Check gate.** `done` means tend ran the check and it passed; failures go back as a new attempt; guard and audit flags escalate.
+- [ ] **F5c Workspaces, claims, and scopes.** Worker slots own a worktree (default); team worktrees with enforced claims, a team channel, serialized checks; `may_write`/`may_not_write`; cross-worktree conflict prediction. Acceptance: in a team worktree a write into another worker's claim is denied; in `specialists` an implementer's test edit is denied.
+- [ ] **F5d Budgets and limits.** Tokens per session, role, and fleet; usage-limit pause; spawn depth.
+- [ ] **F5e Reports and merge plan.** `fleet report`, `fleet merge` (plan; merge on yes), `fleet replay`.
+- [ ] **F5f More presets.** `review`, `best-of`, `pipeline`, `supervisor`, `pool`; one seeded bench run each.
+- [ ] **F5g Hierarchy (first-class).** Sub-leads, task trees, budget slices that only narrow, escalation upward, roll-up reports, sub-lead restart. Acceptance: lead → 2 sub-leads → 2 workers each; a child cannot exceed its slice; a killed sub-lead resumes its subtree.
+- [ ] **F6 Cross-provider.** After the Codex connector (S10, E12).
+
 ## Phase 2 — Optimize + Codex (not started)
 
 - [ ] Tune `Config` defaults from Phase 1 data.
