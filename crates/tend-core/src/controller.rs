@@ -218,6 +218,8 @@ pub struct Controller {
     /// This session is a slot of a fleet (F5a): its agent may not touch the fleet
     /// identity or run fleet control.
     in_fleet: bool,
+    /// Its role's write scope and others' claims (F5c).
+    fleet_rules: Option<crate::fleet::scope::Rules>,
 }
 
 /// The costly, pure part of handling an output: hash, failures, and summary.
@@ -347,6 +349,19 @@ impl Controller {
             active_ms: 0,
             fleet: crate::fleet::Fleet::default(),
             in_fleet: false,
+            fleet_rules: None,
+        }
+    }
+
+    /// The fleet role's write scope (F5c), from the hub.
+    pub fn set_fleet_rules(&mut self, rules: crate::fleet::scope::Rules) {
+        self.fleet_rules = Some(rules);
+    }
+
+    /// Other sessions' claims, as the daemon last read them.
+    pub fn set_fleet_claims(&mut self, claims: &[crate::fleet::scope::ClaimFile]) {
+        if let Some(r) = &mut self.fleet_rules {
+            r.set_claims(claims);
         }
     }
 
@@ -1216,6 +1231,25 @@ impl Controller {
             }
         }
         let ev = self.push(d, now, vec![], Body::Event { event: stored });
+        // A fleet role edits only within its scope, and not what another session in its
+        // worktree claimed (F5c).
+        if let Some(why) = self.fleet_rules.as_ref().and_then(|r| r.refuse(&path)) {
+            let message = format!(
+                "tend: in this fleet, this session may not edit {path}: {why}. Ask your lead (`tend task blocked`) if it must change."
+            );
+            let decision = self.effective_guard(GuardDecision::Deny);
+            let action = ActionKind::Guard {
+                path: path.clone(),
+                decision,
+            };
+            if self.act(d, now, ev, action, message.clone()) {
+                match decision {
+                    GuardDecision::Warn => d.response.add_context.push(message),
+                    _ => d.response.permission = Some(Permission::Deny(message)),
+                }
+            }
+            return;
+        }
         let Some((j, reasons)) = self.judge_test_edit(d, now, ev, &path, &old_text, &new_text)
         else {
             return;

@@ -265,6 +265,20 @@ enum FleetCmd {
     },
     /// Stop every session and the hub.
     Down { fleet: Option<String> },
+    /// What a fleet did: tasks, sessions, spend, and the merge plan.
+    Report { fleet: Option<String> },
+    /// The order to merge finished worktrees in, and where they conflict. With `--yes`
+    /// (fleet down), commit each finished worktree's changes on its own branch.
+    Merge {
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        fleet: Option<String>,
+    },
+    /// Stop handing out tasks and starting sessions; running turns finish.
+    Pause { fleet: Option<String> },
+    /// Hand out work again (after `pause`, a budget, or the usage limit).
+    Resume { fleet: Option<String> },
     /// Remove worktrees of fleets that are down and have nothing unsaved in them.
     /// Without `--yes`, only lists them.
     Prune {
@@ -363,6 +377,10 @@ fn fleet_cmd(c: FleetCmd) -> Result<i32> {
             hub::ask(fleet.as_deref(), hub::HubRequest::Scale { role, n })?
         }
         FleetCmd::Down { fleet } => hub::down(fleet.as_deref())?,
+        FleetCmd::Report { fleet } => hub::report(fleet.as_deref())?,
+        FleetCmd::Merge { yes, fleet } => hub::merge(fleet.as_deref(), yes)?,
+        FleetCmd::Pause { fleet } => hub::ask(fleet.as_deref(), hub::HubRequest::Pause)?,
+        FleetCmd::Resume { fleet } => hub::ask(fleet.as_deref(), hub::HubRequest::Resume)?,
         FleetCmd::Prune { yes } => hub::prune(yes)?,
         FleetCmd::Hub { dir } => {
             hub::run_hub(&dir)?;

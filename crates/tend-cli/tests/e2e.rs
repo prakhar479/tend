@@ -1984,6 +1984,64 @@ fn fleet_check_gate_sends_a_failure_back_to_the_worker() {
         .path();
     let inbox = fs::read_to_string(fleet_dir.join("inbox.jsonl")).unwrap();
     assert!(inbox.contains("passed: fixed it"), "{inbox}");
+    // The report, and the merge plan (F5e).
+    let report = tend(&["fleet", "report"]);
+    assert!(
+        report.contains("Tasks: 1 · done 1") && report.contains("attempts that did not count: 1"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Merge plan (1 worktree with changes)")
+            && report.contains("worker-1 (t-1 done)  ok.txt"),
+        "{report}"
+    );
+    let refused = Command::new(bin())
+        .args(["fleet", "merge", "--yes"])
+        .current_dir(&repo)
+        .env("TEND_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("take it down"),
+        "only when the fleet is down"
+    );
+    tend(&["fleet", "down"]);
+    // git as a fresh machine has it: an identity, no signing.
+    let merged = Command::new(bin())
+        .args(["fleet", "merge", "--yes"])
+        .current_dir(&repo)
+        .env("TEND_HOME", &home)
+        .env("GIT_CONFIG_COUNT", "3")
+        .env("GIT_CONFIG_KEY_0", "commit.gpgsign")
+        .env("GIT_CONFIG_VALUE_0", "false")
+        .env("GIT_CONFIG_KEY_1", "user.name")
+        .env("GIT_CONFIG_VALUE_1", "t")
+        .env("GIT_CONFIG_KEY_2", "user.email")
+        .env("GIT_CONFIG_VALUE_2", "t@t")
+        .output()
+        .unwrap();
+    let merged = String::from_utf8(merged.stdout).unwrap();
+    assert!(
+        merged.contains("committed worker-1's changes on tend/")
+            && merged.contains("git merge tend/"),
+        "{merged}"
+    );
+    let wt = fleet_dir.join("worktrees/worker-1");
+    let log = Command::new("git")
+        .arg("-C")
+        .arg(&wt)
+        .args(["log", "-1", "--format=%s"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "t-1 done");
+    // The user's branch did not move.
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["log", "--oneline"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&head.stdout).lines().count(), 1);
 }
 
 /// F5b with the audit on (experimental): a change that deletes a test passes its check,
@@ -2037,4 +2095,135 @@ fn fleet_check_gate_holds_a_flagged_change_for_review() {
     let ok = tend(&["task", "done", "t-1", "fine: test_two was a duplicate"]);
     assert_eq!(ok.trim(), "t-1 is done.");
     board_until(&tend, &|b| b.contains(" done "));
+}
+
+/// F5c: a fleet session's daemon denies an edit outside its role's scope, and one into
+/// what another session in the same worktree claimed; claims are read again on change.
+#[test]
+fn fleet_scopes_and_claims_deny_edits() {
+    let dir = tmp("scopes");
+    let session = dir.join("session");
+    fs::create_dir_all(&session).unwrap();
+    let claims = dir.join("claims.json");
+    fs::write(&claims, "[]").unwrap();
+    let rules = serde_json::json!({
+        "root": "/home/dev/shop", "slot": "implementer-1",
+        "may_not_write": ["tests/**"], "claims": claims.display().to_string(),
+    });
+    let child = Command::new(bin())
+        .args(["daemon", "--session-dir"])
+        .arg(&session)
+        .args(["--mode", "optimize"])
+        .env("TEND_HOME", dir.join("home"))
+        .env("TEND_FLEET_SLOT", "implementer-1")
+        .env("TEND_FLEET_RULES", rules.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let _daemon = Daemon(child);
+    let sock = socket_of(&session);
+    wait_for_daemon(&sock);
+    let edit = |path: &str| {
+        let mut p: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(fixture("pre_tool_use_edit_test.json")).unwrap(),
+        )
+        .unwrap();
+        p["tool_input"]["file_path"] = path.into();
+        p["tool_input"]["old_string"] = "x = 1".into();
+        p["tool_input"]["new_string"] = "x = 2".into();
+        hook(&sock, "PreToolUse", &p)
+    };
+    let out = edit("/home/dev/shop/tests/test_new.py");
+    assert!(
+        out.contains("\"deny\"") && out.contains("may not write `tests/**`"),
+        "{out}"
+    );
+    assert_eq!(edit("/home/dev/shop/src/api.py"), "", "in scope, unclaimed");
+    // Another session in this worktree claims src/** for its task.
+    thread::sleep(Duration::from_millis(20));
+    fs::write(
+        &claims,
+        r#"[{"slot":"implementer-2","task":"t-3","worktree":"/home/dev/shop","scope":["src/**"]}]"#,
+    )
+    .unwrap();
+    let out = edit("/home/dev/shop/src/api.py");
+    assert!(
+        out.contains("implementer-2 claimed `src/**` for t-3"),
+        "{out}"
+    );
+}
+
+/// F5g: a tree. The lead splits its task between two sub-leads; each splits its part
+/// between workers of its own team; reports go to whoever gave the task, up the tree.
+#[test]
+fn fleet_tree_splits_work_down_and_reports_up() {
+    let (dir, repo, home) = fleet_repo(
+        "tree",
+        &[("a.txt", "a\n")],
+        "preset = \"tree\"\n\n[limits]\nsessions = 7\n",
+    );
+    let agent = fake_script(
+        &dir,
+        "fake-tree.sh",
+        r#"    *TREE-PLAN*)
+      task_id "$line" > "$D/task-$TEND_FLEET_SLOT"
+      tend task add "SUB-WORK one" --role sub >> "$D/plan.txt" 2>&1
+      tend task add "SUB-WORK two" --role sub >> "$D/plan.txt" 2>&1
+      result ;;
+    *SUB-WORK*)
+      task_id "$line" > "$D/task-$TEND_FLEET_SLOT"
+      tend task add "LEAF a" >> "$D/plan.txt" 2>&1
+      tend task add "LEAF b" >> "$D/plan.txt" 2>&1
+      result ;;
+    *"is done ("*)
+      echo "$line" | grep -o 't-[0-9.]* is done ([^)]*)' >> "$D/heard-$TEND_FLEET_SLOT"
+      if [ "$(wc -l < "$D/heard-$TEND_FLEET_SLOT")" -ge 2 ]; then
+        tend task done "$(cat "$D/task-$TEND_FLEET_SLOT")" "both parts done" >> "$D/plan.txt" 2>&1
+      fi
+      result ;;
+    *"tend task done t-"*)
+      id=$(task_id "$line"); echo "$TEND_FLEET_SLOT $id" >> "$D/work.log"
+      tend task done "$id" "leaf done" >> "$D/plan.txt" 2>&1; result ;;"#,
+    );
+    let tend = |args: &[&str]| tend_in(&repo, &home, &agent, args);
+    let _down = FleetDown(repo.clone(), home.clone(), agent.clone());
+    tend(&["fleet", "up", "fleet.toml"]);
+    tend(&["task", "add", "TREE-PLAN", "--role", "lead"]);
+    let board = board_until(&tend, &|b| {
+        b.lines().filter(|l| l.contains(" done ")).count() == 7
+    });
+    for id in [
+        "t-1 ", "t-1.1 ", "t-1.2 ", "t-1.1.1 ", "t-1.1.2 ", "t-1.2.1 ", "t-1.2.2 ",
+    ] {
+        assert!(
+            board
+                .lines()
+                .any(|l| l.trim_start().starts_with(id) && l.contains(" done ")),
+            "{id}\n{board}"
+        );
+    }
+    // Leaves ran in their sub-lead's team; each sub-lead heard from its own workers.
+    let work = fs::read_to_string(dir.join("work.log")).unwrap();
+    for line in work.lines() {
+        let (slot, task) = line.split_once(' ').unwrap();
+        let team = if task.starts_with("t-1.1.") {
+            "sub-1/"
+        } else {
+            "sub-2/"
+        };
+        assert!(slot.starts_with(team), "{line}");
+    }
+    let heard = fs::read_to_string(dir.join("heard-sub-1")).unwrap();
+    assert!(
+        heard
+            .lines()
+            .all(|l| l.starts_with("t-1.1.") && l.contains("(sub-1/worker-")),
+        "{heard}"
+    );
+    let heard = fs::read_to_string(dir.join("heard-lead-1")).unwrap();
+    assert!(
+        heard.contains("t-1.1 is done (sub-1)") && heard.contains("t-1.2 is done (sub-2)"),
+        "{heard}"
+    );
 }

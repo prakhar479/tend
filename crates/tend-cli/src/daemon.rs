@@ -34,6 +34,8 @@ struct State {
     notify: bool,
     /// The session's working directory, once it started (for the fleet watcher).
     cwd: Option<String>,
+    /// The fleet's claims file, and when it was last read (F5c).
+    claims: Option<(PathBuf, Option<std::time::SystemTime>)>,
 }
 
 /// When the daemon last got a request (ms), for the idle exit.
@@ -64,6 +66,13 @@ pub fn run(
     let mut controller = Controller::new(crate::config::load(), connector.capabilities(), mode);
     // A fleet's hub starts its sessions with TEND_FLEET_SLOT set (F5a).
     controller.set_in_fleet(std::env::var_os("TEND_FLEET_SLOT").is_some());
+    // Its role's write scope, and where the fleet's claims are (F5c).
+    let rules: Option<tend_core::fleet::scope::RulesFile> = std::env::var("TEND_FLEET_RULES")
+        .ok()
+        .and_then(|r| serde_json::from_str(&r).ok());
+    if let Some(r) = &rules {
+        controller.set_fleet_rules(tend_core::fleet::scope::Rules::new(r));
+    }
     let store = Store::open(&dir)?;
     // Without a token file (a daemon started by hand), control requests are open.
     let token: Arc<Option<String>> = Arc::new(crate::paths::read_token(&dir));
@@ -74,6 +83,10 @@ pub fn run(
         memory: None,
         notify: crate::config::load().notify,
         cwd: None,
+        claims: rules
+            .as_ref()
+            .and_then(|r| r.claims.clone())
+            .map(|p| (PathBuf::from(p), None)),
     }));
     eprintln!("tendd: listening on {} (mode {mode:?})", sock.display());
 
@@ -207,6 +220,26 @@ fn notify(messages: &[String]) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+/// Read the fleet's claims again if the file changed (F5c). A missing or bad file
+/// leaves the last ones: fail open.
+fn refresh_claims(st: &mut State) {
+    let Some((path, seen)) = &mut st.claims else {
+        return;
+    };
+    let Ok(modified) = fs::metadata(&*path).and_then(|m| m.modified()) else {
+        return;
+    };
+    if *seen == Some(modified) {
+        return;
+    }
+    *seen = Some(modified);
+    if let Ok(claims) = fs::read_to_string(&*path).map_err(|_| ()).and_then(|t| {
+        serde_json::from_str::<Vec<tend_core::fleet::scope::ClaimFile>>(&t).map_err(|_| ())
+    }) {
+        st.controller.set_fleet_claims(&claims);
+    }
 }
 
 /// How often the fleet watcher looks at the other sessions (F1).
@@ -425,6 +458,9 @@ fn serve(
                 deadline_ms,
             } => {
                 st.store.capture(now_ms(), &event, &payload)?;
+                if event == "PreToolUse" {
+                    refresh_claims(st);
+                }
                 let (decisions, response) = decide_hook(
                     &mut st.controller,
                     st.connector.as_mut(),

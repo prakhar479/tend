@@ -141,6 +141,22 @@ pub enum FleetEvent {
         task: String,
         reason: String,
     },
+    /// A slot's turn used `tokens` (all prompt and output tokens); its session has cost
+    /// `cost_usd` so far (F5d).
+    Usage {
+        slot: SlotId,
+        tokens: u64,
+        #[serde(default)]
+        cost_usd: f64,
+    },
+    /// A session hit the plan's usage limit: every session would, so the fleet pauses.
+    UsageLimit {
+        slot: SlotId,
+        text: String,
+    },
+    /// Stop handing out work and starting sessions; running turns finish.
+    Pause,
+    Resume,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -265,6 +281,14 @@ pub struct Slot {
     /// It was given a task once. A oneshot gets no second one: it ends after its turn.
     #[serde(default)]
     pub had_task: bool,
+    /// Tokens its sessions used, and the current session's cost so far (F5d).
+    #[serde(default)]
+    pub tokens: u64,
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// When the current session started.
+    #[serde(default)]
+    pub started_ms: u64,
 }
 
 impl Slot {
@@ -291,6 +315,10 @@ pub struct Model {
     edges: BTreeMap<(String, String), Vec<u64>>,
     /// The user was told the session limit was reached, and nothing freed up since.
     told_limit: bool,
+    /// No new sessions or tasks (F5d): the user paused, a limit was hit.
+    paused: bool,
+    /// Cost of sessions that ended, so the fleet's total survives them.
+    spent_usd: f64,
     /// The task board (F5a), by id, and the ids in the order tasks were added.
     tasks: BTreeMap<String, tasks::Task>,
     task_order: Vec<String>,
@@ -309,6 +337,8 @@ impl Model {
             next_action: 1,
             edges: BTreeMap::new(),
             told_limit: false,
+            paused: false,
+            spent_usd: 0.0,
             tasks: BTreeMap::new(),
             task_order: Vec::new(),
             task_numbers: BTreeMap::new(),
@@ -321,6 +351,11 @@ impl Model {
 
     pub fn spec(&self) -> &Spec {
         &self.spec
+    }
+
+    /// The role a slot runs (its write scope, for the hub).
+    pub fn role_of(&self, slot: &str) -> Option<&Role> {
+        self.role_def(self.slots.get(slot)?)
     }
 
     /// Handle one event. The first record is the event; the rest are commands it caused.
@@ -401,6 +436,33 @@ impl Model {
             } => self.on_check_result(&mut cx, &task, passed, exit, &excerpt, flags),
             FleetEvent::TaskReject { by, task, reason } => {
                 self.on_task_reject(&mut cx, by, &task, &reason)
+            }
+            FleetEvent::Usage {
+                slot,
+                tokens,
+                cost_usd,
+            } => self.on_usage(&mut cx, &slot, tokens, cost_usd),
+            FleetEvent::UsageLimit { slot, text } => self.pause(
+                &mut cx,
+                &format!(
+                    "{slot} hit the plan's usage limit ({}). The fleet pauses; run `tend fleet resume` when the limit resets.",
+                    crate::text::truncate_chars(text.trim(), 120)
+                ),
+            ),
+            FleetEvent::Pause => self.pause(&mut cx, "The user paused the fleet."),
+            FleetEvent::Resume => {
+                if self.paused {
+                    self.paused = false;
+                    self.told_limit = false;
+                    self.cmd(
+                        &mut cx,
+                        Command::Notify {
+                            text: "tend fleet: resumed.".into(),
+                        },
+                        "The user resumed the fleet.",
+                    );
+                    self.retry_waiting(&mut cx);
+                }
             }
         }
         // Whatever changed, ready tasks may now have somewhere to go.
@@ -505,6 +567,9 @@ impl Model {
                 stopping: false,
                 task: None,
                 had_task: false,
+                tokens: 0,
+                cost_usd: 0.0,
+                started_ms: 0,
             },
         );
         id
@@ -516,6 +581,9 @@ impl Model {
         let slot = self.slots.get(id)?;
         if !self.up {
             return Some("The fleet is down.".into());
+        }
+        if self.paused {
+            return Some("The fleet is paused.".into());
         }
         if let Some(l) = &slot.leader {
             if self.slots.get(l).map(|s| s.state) != Some(SlotState::Running) {
@@ -620,6 +688,7 @@ impl Model {
         };
         s.state = SlotState::Running;
         s.session = Some(session);
+        s.started_ms = cx.now;
         s.last_seen_ms = cx.now;
         s.busy = false;
         let leads = self
@@ -656,7 +725,9 @@ impl Model {
             (SlotState::Waiting, Some(cx.now + wait))
         };
         let restarted = run != Some(Run::Oneshot) && !slot.stopping && self.up;
+        self.spent_usd += slot.cost_usd;
         if let Some(s) = self.slots.get_mut(id) {
+            s.cost_usd = 0.0;
             s.busy = false;
             s.session = None;
             s.state = state;
@@ -701,6 +772,23 @@ impl Model {
 
     fn on_tick(&mut self, cx: &mut Cx) {
         self.retry_waiting(cx);
+        // A session past its role's wall-time budget is stopped (F5d).
+        let over: Vec<(SlotId, u64)> = self
+            .slots
+            .values()
+            .filter(|s| s.state == SlotState::Running && !s.stopping)
+            .filter_map(|s| {
+                let wall = self.role_def(s)?.budget.wall_ms?;
+                (cx.now.saturating_sub(s.started_ms) > wall).then(|| (s.id.clone(), wall))
+            })
+            .collect();
+        for (id, wall) in over {
+            self.over_budget(
+                cx,
+                &id,
+                &format!("ran past its wall-time budget of {} min", wall / 60_000),
+            );
+        }
         let stuck_ms = |m: &Model, s: &Slot| {
             m.scope(s.leader.as_deref())
                 .map_or(m.spec.stuck_ms, |sp| sp.stuck_ms)
@@ -1084,6 +1172,88 @@ impl Model {
             text: format!("tend: refused. {reason}"),
         };
         self.cmd(cx, command, reason);
+    }
+
+    // --- Budgets (F5d) ------------------------------------------------------------
+
+    /// Tokens and cost the whole fleet used so far.
+    pub fn spend(&self) -> (u64, f64) {
+        let tokens = self.slots.values().map(|s| s.tokens).sum();
+        let live: f64 = self.slots.values().map(|s| s.cost_usd).sum();
+        (tokens, self.spent_usd + live)
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    fn on_usage(&mut self, cx: &mut Cx, id: &str, tokens: u64, cost_usd: f64) {
+        let Some(s) = self.slots.get_mut(id) else {
+            return;
+        };
+        s.tokens += tokens;
+        s.cost_usd = cost_usd;
+        let used = s.tokens;
+        let budget = self
+            .slots
+            .get(id)
+            .and_then(|s| self.role_def(s))
+            .and_then(|r| r.budget.tokens);
+        if let Some(b) = budget.filter(|b| used > *b) {
+            self.over_budget(
+                cx,
+                id,
+                &format!("used {used} tokens, over its budget of {b}"),
+            );
+        }
+        if let Some(limit) = self.spec.limits.tokens {
+            let (total, _) = self.spend();
+            if total > limit && !self.paused {
+                self.pause(
+                    cx,
+                    &format!("The fleet used {total} tokens, over its limit of {limit}. It pauses; raise limits.tokens or run `tend fleet resume`."),
+                );
+            }
+        }
+    }
+
+    /// Stop a session that went over a budget; its task's attempt ends with it.
+    fn over_budget(&mut self, cx: &mut Cx, id: &str, why: &str) {
+        let Some(s) = self.slots.get(id) else {
+            return;
+        };
+        if s.stopping || !s.live() {
+            return;
+        }
+        if let Some(s) = self.slots.get_mut(id) {
+            s.stopping = true;
+        }
+        self.cmd(
+            cx,
+            Command::Stop { slot: id.into() },
+            &format!("{id} {why}."),
+        );
+        self.cmd(
+            cx,
+            Command::Notify {
+                text: format!("tend fleet: stopped {id}: it {why}."),
+            },
+            &format!("{id} {why}."),
+        );
+    }
+
+    fn pause(&mut self, cx: &mut Cx, why: &str) {
+        if self.paused {
+            return;
+        }
+        self.paused = true;
+        self.cmd(
+            cx,
+            Command::Notify {
+                text: format!("tend fleet: paused. {why}"),
+            },
+            why,
+        );
     }
 
     // --- Records -----------------------------------------------------------------

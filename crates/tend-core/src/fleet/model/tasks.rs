@@ -743,7 +743,7 @@ impl Model {
     /// run; then queued ones, to an idle stream session of their role or to a new
     /// oneshot session. In board order, so the result does not depend on timing.
     pub(super) fn dispatch(&mut self, cx: &mut Cx) {
-        if !self.up {
+        if !self.up || self.paused {
             return;
         }
         let bound: Vec<(SlotId, String)> = self

@@ -1232,3 +1232,41 @@ fn a_fleet_session_may_not_forge_its_identity_or_run_fleet_control() {
     let d = c.handle(request("tend fleet down"), 0);
     assert!(d.response.permission.is_none());
 }
+
+#[test]
+fn a_fleet_role_edits_only_within_its_scope() {
+    let mut c = ctl(Mode::Optimize);
+    c.set_fleet_rules(crate::fleet::scope::Rules::new(
+        &crate::fleet::scope::RulesFile {
+            root: "/wt".into(),
+            slot: "implementer-1".into(),
+            may_not_write: vec!["tests/**".into()],
+            ..Default::default()
+        },
+    ));
+    let edit = |path: &str| Event::EditProposed {
+        tool_use_id: "e".into(),
+        path: path.into(),
+        old_text: "a".into(),
+        new_text: "b".into(),
+    };
+    let d = c.handle(edit("/wt/tests/test_api.py"), 0);
+    assert!(
+        matches!(&d.response.permission, Some(Permission::Deny(m)) if m.contains("may not write `tests/**`")),
+        "{:?}",
+        d.response
+    );
+    let d = c.handle(edit("/wt/src/api.py"), 1);
+    assert!(d.response.permission.is_none());
+    // Look mode records the would-be deny and changes nothing.
+    let mut c = ctl(Mode::Look);
+    c.set_fleet_rules(crate::fleet::scope::Rules::new(
+        &crate::fleet::scope::RulesFile {
+            root: "/wt".into(),
+            may_not_write: vec!["tests/**".into()],
+            ..Default::default()
+        },
+    ));
+    let d = c.handle(edit("/wt/tests/x.py"), 0);
+    assert!(d.response.is_empty());
+}

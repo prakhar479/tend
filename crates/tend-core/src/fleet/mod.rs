@@ -4,6 +4,7 @@
 
 mod awareness;
 pub mod model;
+pub mod scope;
 pub mod spec;
 
 pub use awareness::*;

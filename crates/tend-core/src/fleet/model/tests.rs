@@ -1471,3 +1471,108 @@ fn a_oneshot_ends_after_its_turn_when_its_task_is_over_or_left_open() {
     });
     assert!(matches!(&c[..], [Command::TaskRetry { .. }]), "{c:?}");
 }
+
+// --- Budgets (F5d) ------------------------------------------------------------------
+
+fn usage(slot_id: &str, tokens: u64, cost: f64) -> FleetEvent {
+    FleetEvent::Usage {
+        slot: slot_id.into(),
+        tokens,
+        cost_usd: cost,
+    }
+}
+
+fn notified(cmds: &[Command], what: &str) -> bool {
+    cmds.iter()
+        .any(|c| matches!(c, Command::Notify { text } if text.contains(what)))
+}
+
+#[test]
+fn a_session_over_its_token_budget_is_stopped_and_its_task_retried() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead", "role": {"worker": {"budget": {"tokens": "1k"}}}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let c = r.ev(add(slot("lead-1"), "big", &[], None));
+    r.start_all(&c);
+    assert!(r.ev(usage("worker-1", 600, 0.01)).is_empty());
+    let c = r.ev(usage("worker-1", 600, 0.02));
+    assert!(
+        matches!(&c[0], Command::Stop { slot } if slot == "worker-1"),
+        "{c:?}"
+    );
+    assert!(
+        notified(&c, "used 1200 tokens, over its budget of 1000"),
+        "{c:?}"
+    );
+    let c = r.ev(FleetEvent::Exited {
+        slot: "worker-1".into(),
+        code: None,
+    });
+    assert!(
+        c.iter().any(|c| matches!(c, Command::TaskRetry { .. })),
+        "{c:?}"
+    );
+    assert_eq!(r.m.spend(), (1200, 0.02));
+}
+
+#[test]
+fn the_fleet_pauses_at_its_token_limit_and_resumes() {
+    let mut r = Sim::new(spec(
+        serde_json::json!({"preset": "lead", "limits": {"tokens": 5000}}),
+    ));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let c = r.ev(usage("lead-1", 6000, 0.1));
+    assert!(notified(&c, "over its limit of 5000"), "{c:?}");
+    assert!(r.m.paused());
+    // Paused: a new task waits, and nothing starts.
+    let c = r.ev(add(slot("lead-1"), "later", &[], None));
+    assert!(spawned(&c).is_empty(), "{c:?}");
+    let c = r.ev(FleetEvent::Resume);
+    assert!(notified(&c, "resumed"));
+    assert_eq!(spawned(&c), ["worker-1"]);
+}
+
+#[test]
+fn the_plans_usage_limit_pauses_the_fleet() {
+    let mut r = Sim::new(preset(Preset::Peers));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let c = r.ev(FleetEvent::UsageLimit {
+        slot: "peer-1".into(),
+        text: "5-hour limit reached ∙ resets 3pm".into(),
+    });
+    assert!(notified(&c, "hit the plan's usage limit"), "{c:?}");
+    let c = r.ev(add(Actor::User, "x", &[], None));
+    assert!(tasks_to(&c).is_empty(), "no work while paused: {c:?}");
+    // Pausing twice says nothing more.
+    assert!(r.ev(FleetEvent::Pause).is_empty());
+}
+
+#[test]
+fn a_session_past_its_wall_time_is_stopped() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead", "role": {"lead": {"budget": {"wall": "10m"}}}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let t = r.now;
+    assert!(r.at(t + 9 * 60_000, FleetEvent::Tick).is_empty());
+    let c = r.at(t + 11 * 60_000, FleetEvent::Tick);
+    assert!(
+        matches!(&c[0], Command::Stop { slot } if slot == "lead-1"),
+        "{c:?}"
+    );
+    assert!(notified(&c, "wall-time budget of 10 min"));
+    // Stopped for its budget, it is not restarted.
+    let c = r.ev(FleetEvent::Exited {
+        slot: "lead-1".into(),
+        code: None,
+    });
+    assert!(
+        spawned(&c).is_empty() && !c.iter().any(|c| matches!(c, Command::Backoff { .. })),
+        "{c:?}"
+    );
+}

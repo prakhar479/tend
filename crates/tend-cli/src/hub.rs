@@ -78,6 +78,8 @@ pub enum HubRequest {
         role: String,
         n: u32,
     },
+    Pause,
+    Resume,
     /// A `tend task` verb (F5a). `claimed_slot` is `TEND_FLEET_SLOT`; it counts only
     /// where the hub cannot see the caller's process tree.
     Task {
@@ -272,6 +274,8 @@ struct Hub {
     /// Checks run one at a time: a team's sessions may share a worktree.
     checking: Arc<std::sync::Mutex<()>>,
     audit: bool,
+    /// What claims.json holds now.
+    claims_text: Option<String>,
 }
 
 pub fn run_hub(dir: &Path) -> Result<()> {
@@ -306,6 +310,7 @@ pub fn run_hub(dir: &Path) -> Result<()> {
         bases: BTreeMap::new(),
         checking: Arc::new(std::sync::Mutex::new(())),
         audit: crate::config::load().experimental_audit,
+        claims_text: None,
     };
     eprintln!("tend fleet hub {}: up", hub.meta.id);
     hub.apply(FleetEvent::Up);
@@ -437,13 +442,20 @@ impl Hub {
             HubRequest::Ping => return "pong".into(),
             HubRequest::Status => return self.status(),
             // Fleet control is the user's; a session asks through its role's verbs.
-            HubRequest::Down | HubRequest::Scale { .. } if !user => {
+            HubRequest::Down
+            | HubRequest::Scale { .. }
+            | HubRequest::Pause
+            | HubRequest::Resume
+                if !user =>
+            {
                 return "tend: refused. Fleet control is the user's.".into();
             }
             HubRequest::Stop { slot } => FleetEvent::StopRequest { by, slot },
             HubRequest::Down => FleetEvent::Down,
             HubRequest::Spawn { role } => FleetEvent::SpawnRequest { by, role },
             HubRequest::Scale { role, n } => FleetEvent::Scale { role, n },
+            HubRequest::Pause => FleetEvent::Pause,
+            HubRequest::Resume => FleetEvent::Resume,
             HubRequest::Task { verb, .. } => match verb {
                 TaskVerb::List => return render_tasks(&self.model),
                 TaskVerb::Add {
@@ -529,6 +541,7 @@ impl Hub {
                 first = Some(recs);
             }
         }
+        self.write_claims();
         first.unwrap_or_default()
     }
 
@@ -675,6 +688,7 @@ impl Hub {
             .current_dir(&cwd)
             .env("TEND_FLEET", &self.meta.id)
             .env("TEND_FLEET_SLOT", slot)
+            .env("TEND_FLEET_RULES", self.rules_for(slot, &cwd))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(err)
@@ -826,6 +840,55 @@ impl Hub {
         });
     }
 
+    /// A session's write rules (F5c), as JSON for `TEND_FLEET_RULES`.
+    fn rules_for(&self, slot: &str, cwd: &Path) -> String {
+        let role = self.model.role_of(slot);
+        let rules = tend_core::fleet::scope::RulesFile {
+            root: cwd.display().to_string(),
+            slot: slot.to_string(),
+            may_write: role.map(|r| r.may_write.clone()).unwrap_or_default(),
+            may_not_write: role.map(|r| r.may_not_write.clone()).unwrap_or_default(),
+            claims: Some(self.dir.join("claims.json").display().to_string()),
+        };
+        serde_json::to_string(&rules).unwrap_or_default()
+    }
+
+    /// The scopes of tasks being worked on, for sessions in the same worktree (F5c).
+    /// Written only when they change, by rename, so a reader never sees half a file.
+    fn write_claims(&mut self) {
+        use tend_core::fleet::model::TaskState;
+        let claims: Vec<tend_core::fleet::scope::ClaimFile> = self
+            .model
+            .tasks()
+            .filter(|t| {
+                matches!(
+                    t.state,
+                    TaskState::Working | TaskState::Checking | TaskState::Bound
+                )
+            })
+            .filter(|t| !t.scope.is_empty())
+            .filter_map(|t| {
+                let slot = t.slot.clone()?;
+                let worktree = self.worktrees.get(&slot)?.display().to_string();
+                Some(tend_core::fleet::scope::ClaimFile {
+                    slot,
+                    task: t.id.clone(),
+                    worktree,
+                    scope: t.scope.clone(),
+                })
+            })
+            .collect();
+        let text = serde_json::to_string(&claims).unwrap_or_default();
+        if self.claims_text.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        let tmp = self.dir.join("claims.json.t");
+        if fs::write(&tmp, &text).is_ok() && fs::rename(&tmp, self.dir.join("claims.json")).is_ok()
+        {
+            self.claims_text = Some(text);
+        }
+    }
+
     fn status(&self) -> String {
         let mut out = render_status(&self.meta, &self.model, &self.procs, true);
         out.push_str(&render_tasks(&self.model));
@@ -937,6 +1000,12 @@ fn read_output(out: impl Read, mut log: File, slot: &str, tx: &Sender<Msg>) {
             .ok()
             .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from));
         let sent = if kind.as_deref() == Some("result") {
+            if let Some(e) = usage_of(&line, slot) {
+                let _ = tx.send(Msg::Event(e));
+            }
+            if let Some(e) = limit_of(&line, slot) {
+                let _ = tx.send(Msg::Event(e));
+            }
             tx.send(Msg::TurnEnded(slot.to_string()))
         } else if now_ms().saturating_sub(last) >= ACTIVITY_EVERY_MS {
             last = now_ms();
@@ -1036,6 +1105,40 @@ fn parent_of(pid: i32) -> Option<i32> {
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
+/// A result line's usage: the turn's tokens (prompt, cache, and output) and the
+/// session's cost so far (F5d).
+fn usage_of(line: &str, slot: &str) -> Option<FleetEvent> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let u = v.get("usage")?;
+    let n = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    let tokens = n("input_tokens")
+        + n("cache_creation_input_tokens")
+        + n("cache_read_input_tokens")
+        + n("output_tokens");
+    Some(FleetEvent::Usage {
+        slot: slot.to_string(),
+        tokens,
+        cost_usd: v
+            .get("total_cost_usd")
+            .and_then(|c| c.as_f64())
+            .unwrap_or(0.0),
+    })
+}
+
+/// A result that says the plan's usage limit was hit (the bench runner's signal).
+fn limit_of(line: &str, slot: &str) -> Option<FleetEvent> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let text = v.get("result").and_then(|r| r.as_str()).unwrap_or("");
+    let lower = text.to_lowercase();
+    let hit = v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false) || lower.len() < 300;
+    (hit && (lower.contains("usage limit") || lower.contains("session limit"))).then(|| {
+        FleetEvent::UsageLimit {
+            slot: slot.to_string(),
+            text: text.to_string(),
+        }
+    })
+}
+
 fn kill(pid: i32, sig: libc::c_int) {
     // SAFETY: kill has no memory effects; a stale pid is the only risk, and the
     // caller checks `exited` first.
@@ -1049,8 +1152,10 @@ fn file_name(slot: &str) -> String {
     slot.replace('/', "__")
 }
 
+/// A slot's branch. Nested slots are spelled flat (`sub-1__worker-1`): git cannot have
+/// `tend/F/sub-1` and `tend/F/sub-1/worker-1` at once.
 fn branch_name(fleet: &str, name: &str) -> String {
-    format!("tend/{fleet}/{name}")
+    format!("tend/{fleet}/{}", file_name(name))
 }
 
 fn git_out(dir: &Path, args: &[&str]) -> Option<String> {
@@ -1220,6 +1325,9 @@ fn render_status(meta: &Meta, model: &Model, procs: &BTreeMap<String, Proc>, up:
             ));
             facts.push(p.worktree.display().to_string());
         }
+        if s.tokens > 0 {
+            facts.push(format!("{} tokens", crate::report::k(s.tokens)));
+        }
         if s.restarts > 0 {
             facts.push(format!("restarts {}", s.restarts));
         }
@@ -1236,6 +1344,17 @@ fn render_status(meta: &Meta, model: &Model, procs: &BTreeMap<String, Proc>, up:
     if model.slots().is_empty() {
         let _ = writeln!(out, "  no sessions");
     }
+    let (tokens, cost) = model.spend();
+    let _ = writeln!(
+        out,
+        "Spent: {} tokens · ${cost:.2}{}",
+        crate::report::k(tokens),
+        if model.paused() {
+            " · paused (`tend fleet resume`)"
+        } else {
+            ""
+        }
+    );
     out
 }
 
@@ -1394,6 +1513,285 @@ pub fn prune(yes: bool) -> Result<String> {
     Ok(out)
 }
 
+/// `tend fleet report`: what a fleet did, from its ledger: tasks, sessions, spend, and
+/// the merge plan.
+pub fn report(spec: Option<&str>) -> Result<String> {
+    use tend_core::fleet::model::TaskState;
+    let dir = resolve(spec)?;
+    let meta = read_meta(&dir)?;
+    let records = read_ledger(&dir);
+    let model = replay(&meta, &records);
+    let mut out = String::new();
+    let span = match (records.first(), records.last()) {
+        (Some(a), Some(b)) => crate::report::minutes(b.ts_ms.saturating_sub(a.ts_ms)),
+        _ => "0 s".into(),
+    };
+    let _ = writeln!(
+        out,
+        "fleet {} · {} · {} · ran {span}",
+        meta.id,
+        serde_json::to_value(meta.spec.preset)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default(),
+        if is_up(&dir) { "up" } else { "down" },
+    );
+    let tasks: Vec<_> = model.tasks().collect();
+    let count = |st: TaskState| tasks.iter().filter(|t| t.state == st).count();
+    let lost: u32 = tasks.iter().map(|t| t.attempts).sum();
+    let _ = writeln!(
+        out,
+        "Tasks: {} · done {} · failed {} · blocked {} · in review {} · other {} · attempts that did not count: {lost}",
+        tasks.len(),
+        count(TaskState::Done),
+        count(TaskState::Failed),
+        count(TaskState::Blocked),
+        count(TaskState::Review),
+        tasks.len()
+            - count(TaskState::Done)
+            - count(TaskState::Failed)
+            - count(TaskState::Blocked)
+            - count(TaskState::Review),
+    );
+    out.push_str(&render_tasks(&model).replacen("Tasks:\n", "", 1));
+    let restarts: u32 = model.slots().values().map(|s| s.restarts).sum();
+    let (tokens, cost) = model.spend();
+    let _ = writeln!(
+        out,
+        "Sessions: {} · restarts {restarts} · {} tokens · ${cost:.2}",
+        model.slots().len(),
+        crate::report::k(tokens)
+    );
+    for (id, s) in model.slots() {
+        let _ = writeln!(
+            out,
+            "  {id:<14} {:<8} {} tokens",
+            format!("{:?}", s.state).to_lowercase(),
+            crate::report::k(s.tokens)
+        );
+    }
+    out.push_str(&merge_plan(&dir, &meta, &model, false)?);
+    Ok(out)
+}
+
+/// Files a worktree changed from the fleet's base: committed on its branch, staged,
+/// unstaged, or new.
+fn changed_files(wt: &Path, base: &str) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    if let Some(t) = git_out(wt, &["diff", "--name-only", base]) {
+        files.extend(t.lines().map(String::from));
+    }
+    if let Some(t) = git_out(wt, &["ls-files", "--others", "--exclude-standard"]) {
+        files.extend(t.lines().map(String::from));
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// The merge plan, and with `yes`, a commit of each finished worktree's changes on its
+/// own branch. tend never merges into the user's branch: it prints the commands.
+fn merge_plan(dir: &Path, meta: &Meta, model: &Model, yes: bool) -> Result<String> {
+    use tend_core::fleet::model::TaskState;
+    let mut out = String::new();
+    let (Some(repo), Some(base)) = (&meta.repo, &meta.base) else {
+        return Ok(out);
+    };
+    let order: Vec<String> = model.tasks().map(|t| t.id.clone()).collect();
+    // Each worktree, with its slot's tasks, in the order the first of them was added.
+    let mut rows: Vec<MergeRow> = Vec::new();
+    for e in fs::read_dir(dir.join("worktrees"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let wt = e.path();
+        let name = e.file_name().to_string_lossy().replace("__", "/");
+        let files = changed_files(&wt, base);
+        if files.is_empty() {
+            continue;
+        }
+        let mine: Vec<&tend_core::fleet::model::Task> = model
+            .tasks()
+            .filter(|t| t.slot.as_deref() == Some(name.as_str()))
+            .collect();
+        let first = mine
+            .iter()
+            .filter_map(|t| order.iter().position(|o| *o == t.id))
+            .min()
+            .unwrap_or(usize::MAX);
+        let finished = !mine.is_empty() && mine.iter().all(|t| t.state == TaskState::Done);
+        let labels = mine
+            .iter()
+            .map(|t| format!("{} {}", t.id, format!("{:?}", t.state).to_lowercase()))
+            .collect();
+        rows.push(MergeRow {
+            first,
+            name,
+            wt,
+            files,
+            labels,
+            finished,
+        });
+    }
+    rows.sort_by(|a, b| (a.first, &a.name).cmp(&(b.first, &b.name)));
+    if rows.is_empty() {
+        let _ = writeln!(out, "Merge plan: no worktree changed anything.");
+        return Ok(out);
+    }
+    let _ = writeln!(
+        out,
+        "Merge plan ({} worktree{} with changes):",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" }
+    );
+    let mut by_file: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (
+        i,
+        MergeRow {
+            name,
+            files,
+            labels,
+            finished,
+            ..
+        },
+    ) in rows.iter().enumerate()
+    {
+        let shown: Vec<&str> = files.iter().take(4).map(String::as_str).collect();
+        let more = if files.len() > 4 {
+            format!(" and {} more", files.len() - 4)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            out,
+            "  {}. {name}{}  {}{more}{}",
+            i + 1,
+            if labels.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", labels.join(", "))
+            },
+            shown.join(", "),
+            if *finished {
+                ""
+            } else {
+                "  [not finished: left out]"
+            }
+        );
+        for f in files {
+            by_file.entry(f.as_str()).or_default().push(name.as_str());
+        }
+    }
+    for (f, names) in &by_file {
+        if names.len() > 1 {
+            let _ = writeln!(
+                out,
+                "  ! {} all change {f}: merge one, then rebase the next on it.",
+                names.join(", ")
+            );
+        }
+    }
+    if !yes {
+        let _ = writeln!(out, "`tend fleet merge --yes` commits each finished worktree's changes to its own branch, and prints the merge commands.");
+        return Ok(out);
+    }
+    let mut merges = Vec::new();
+    for MergeRow {
+        name,
+        wt,
+        labels,
+        finished,
+        ..
+    } in &rows
+    {
+        if !finished {
+            continue;
+        }
+        let branch = branch_name(&meta.id, name);
+        let dirty = git_out(wt, &["status", "--porcelain"]).is_some();
+        if dirty {
+            let summary: Vec<String> = model
+                .tasks()
+                .filter(|t| t.slot.as_deref() == Some(name.as_str()))
+                .map(|t| {
+                    format!(
+                        "{}: {}",
+                        t.id,
+                        t.outcome.clone().unwrap_or_else(|| t.title.clone())
+                    )
+                })
+                .collect();
+            let msg = format!(
+                "{}\n\n{}\n\ntend fleet {}, {name}.",
+                labels.join(", "),
+                summary.join("\n"),
+                meta.id
+            );
+            let run = |args: &[&str]| {
+                Command::new("git")
+                    .arg("-C")
+                    .arg(wt)
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .output()
+            };
+            let failed = [&["add", "-A"][..], &["commit", "-q", "-m", &msg]]
+                .into_iter()
+                .find_map(|args| match run(args) {
+                    Ok(o) if o.status.success() => None,
+                    Ok(o) => Some(
+                        String::from_utf8_lossy(&o.stderr)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                    Err(e) => Some(e.to_string()),
+                });
+            if let Some(why) = failed {
+                let _ = writeln!(out, "  could not commit {name}'s changes: {why}");
+                continue;
+            }
+            let _ = writeln!(out, "  committed {name}'s changes on {branch}.");
+        }
+        merges.push(format!("git merge {branch}"));
+    }
+    if !merges.is_empty() {
+        let _ = writeln!(
+            out,
+            "Merge them into your branch, in this order, in {repo}:"
+        );
+        for m in merges {
+            let _ = writeln!(out, "  {m}");
+        }
+    }
+    Ok(out)
+}
+
+/// One worktree in the merge plan.
+struct MergeRow {
+    /// Where its slot's first task is on the board: the merge order.
+    first: usize,
+    name: String,
+    wt: PathBuf,
+    files: Vec<String>,
+    labels: Vec<String>,
+    /// Every task of its slot is done.
+    finished: bool,
+}
+
+/// `tend fleet merge [--yes]`.
+pub fn merge(spec: Option<&str>, yes: bool) -> Result<String> {
+    let dir = resolve(spec)?;
+    let meta = read_meta(&dir)?;
+    if yes && is_up(&dir) {
+        bail!("the fleet is up; take it down (`tend fleet down`) before committing its worktrees");
+    }
+    let model = replay(&meta, &read_ledger(&dir));
+    merge_plan(&dir, &meta, &model, yes)
+}
+
 /// `tend fleet down`: stop every session, and wait for the hub to finish.
 pub fn down(spec: Option<&str>) -> Result<String> {
     let dir = resolve(spec)?;
@@ -1423,6 +1821,31 @@ pub fn ask(spec: Option<&str>, req: HubRequest) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_and_the_usage_limit_come_from_result_lines() {
+        let line = r#"{"type":"result","subtype":"success","total_cost_usd":0.0035,"usage":{"input_tokens":2,"cache_creation_input_tokens":242,"cache_read_input_tokens":22345,"output_tokens":5},"result":"ok"}"#;
+        assert_eq!(
+            usage_of(line, "w-1"),
+            Some(FleetEvent::Usage {
+                slot: "w-1".into(),
+                tokens: 22594,
+                cost_usd: 0.0035
+            })
+        );
+        assert!(limit_of(line, "w-1").is_none());
+        let hit = r#"{"type":"result","is_error":true,"result":"Claude AI usage limit reached|1792630000"}"#;
+        assert!(matches!(
+            limit_of(hit, "w-1"),
+            Some(FleetEvent::UsageLimit { .. })
+        ));
+        // An agent's long answer that mentions usage limits is not one.
+        let talk = format!(
+            r#"{{"type":"result","result":"{}"}}"#,
+            "the API has a usage limit; ".repeat(20)
+        );
+        assert!(limit_of(&talk, "w-1").is_none());
+    }
 
     #[test]
     fn uuids_are_version_4() {
