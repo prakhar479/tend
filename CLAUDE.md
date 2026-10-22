@@ -83,6 +83,7 @@ TEND_CAPTURE=1 ./target/debug/tend claude          # also keep raw hook payloads
 jq . ~/.local/share/tend/sessions/<id>/hooks.jsonl   # raw payloads (with TEND_CAPTURE=1)
 scripts/conformance.py --record     # live check of the Claude Code behaviors tend needs (one short session)
 scripts/conformance.py --replay <dir> # re-check a run kept with --keep (no model call)
+scripts/learn_live.py ./target/debug/tend <dir>   # live fleet + learning check on Haiku (~$0.04)
 cargo test --release -p tend-cli --test e2e -- --ignored shim_latency   # rule 7 budget
 (cd fuzz && cargo +nightly fuzz run shell -- -max_total_time=60)       # also: output, guard
 scripts/capture_fixtures.py hooks <hooks.jsonl> --event PostToolUse --match pytest --out fixtures/claude_code/x.json

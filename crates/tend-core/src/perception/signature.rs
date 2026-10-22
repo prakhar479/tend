@@ -157,7 +157,8 @@ pub fn extract_failures(output: &str) -> Vec<Failure> {
             .rev()
             .map(|l| l.trim().trim_matches('=').trim())
             .find(|l| {
-                re!(r"^\d+ failed\b|^Tests:\s+\d+ failed\b|^test result: FAILED\b").is_match(l)
+                re!(r"^[1-9]\d* failed\b|^Tests:\s+[1-9]\d* failed\b|^test result: FAILED\b")
+                    .is_match(l)
             });
         if let Some(l) = summary {
             found.push((None, l.to_string()));
@@ -182,6 +183,11 @@ pub fn extract_failures(output: &str) -> Vec<Failure> {
         }
     }
     out
+}
+
+/// The runner's summary says the run passed, and no line says something failed.
+pub fn shows_pass(output: &str) -> bool {
+    run_passed(&clean_lines(output))
 }
 
 /// The runner said the run passed, and nothing said it failed.
@@ -582,6 +588,32 @@ mod tests {
         assert_eq!(
             extract_failures(generic)[0].message,
             "TypeError: unsupported operand"
+        );
+    }
+
+    #[test]
+    fn zero_failed_is_a_pass() {
+        let out = include_str!("../../../../fixtures/outputs/run_tests_script_pass.txt");
+        assert!(extract_failures(out).is_empty());
+        assert!(shows_pass(out));
+        assert_eq!(
+            extract_failures("3 failed\n").len(),
+            1,
+            "a count above 0 still fails"
+        );
+    }
+
+    #[test]
+    fn a_test_scripts_failed_lines_are_failures() {
+        let out = include_str!("../../../../fixtures/outputs/run_tests_script_fail.txt");
+        let f = extract_failures(out);
+        let tests: Vec<_> = f.iter().filter_map(|x| x.test.as_deref()).collect();
+        assert_eq!(
+            tests,
+            [
+                "tests/test_stats.py::test_unsorted_even",
+                "tests/test_stats.py::test_unsorted_odd"
+            ]
         );
     }
 }

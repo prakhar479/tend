@@ -384,10 +384,11 @@ impl Controller {
     pub fn set_learning(
         &mut self,
         project: &str,
+        root: &str,
         known: Vec<crate::learn::KnownFix>,
         notes: Vec<String>,
     ) {
-        self.learning.set_context(project, known);
+        self.learning.set_context(project, root, known);
         self.notes = notes;
     }
 
@@ -874,6 +875,8 @@ impl Controller {
         }
         // Learning (F2) needs the run as written: a pipe or `-x` hides what it shows.
         let complete = crate::learn::complete_run(command);
+        let summary_pass =
+            crate::learn::summary_run(command) && crate::perception::signature::shows_pass(&output);
         // Loops and re-runs compare normalized keys: agents vary pipes and flags (R1.3).
         let key = command_key(command);
         let command = key.as_str();
@@ -931,8 +934,8 @@ impl Controller {
         if matches!(kind, OutputKind::Test | OutputKind::Build)
             && self.cfg.learn != FleetSetting::Off
         {
-            let passed = self.run_failed == Some(false) && complete;
-            for f in self.learning.on_run(command, &failures, passed) {
+            let passed = self.run_failed == Some(false) && complete || summary_pass;
+            for f in self.learning.on_run(&key, &failures, passed) {
                 self.push(
                     d,
                     now,
@@ -952,7 +955,7 @@ impl Controller {
                 let reason = format!(
                     "Session {} fixed `{}` before.",
                     fix.session,
-                    crate::text::truncate_chars(&failure.message, 80)
+                    crate::text::truncate_chars(&failure.summary(), 80)
                 );
                 let action = ActionKind::Recall {
                     signature: failure.signature,
@@ -1154,7 +1157,7 @@ impl Controller {
             return (Decision::default(), None);
         };
         let p = prepare(&output, level, &self.cfg);
-        self.filter_prepared(tool_use_id, output, p, now_ms)
+        self.filter_prepared(tool_use_id, output, p, None, now_ms)
     }
 
     /// The shape level for a pending `tend run` report, or None if there is nothing to
@@ -1174,6 +1177,7 @@ impl Controller {
         tool_use_id: &str,
         output: String,
         p: Prepared,
+        exit_code: Option<i32>,
         now_ms: u64,
     ) -> (Decision, Option<String>) {
         self.tick(now_ms);
@@ -1187,6 +1191,8 @@ impl Controller {
         w.filtered = true;
         let (command, cause) = (w.command.clone(), w.action_seq);
         let kind = classify(&command).kind;
+        // `tend run` knows the exit code: a wrapped run can show a pass (F2).
+        self.run_failed = exit_code.map(|c| c != 0);
         let text = self.observe(
             &mut d,
             now_ms,
@@ -1197,6 +1203,7 @@ impl Controller {
             p,
             Replace::Deferred,
         );
+        self.run_failed = None;
         if let Some(w) = self.wrapped.get_mut(tool_use_id) {
             w.pending = self.deferred.take();
         }

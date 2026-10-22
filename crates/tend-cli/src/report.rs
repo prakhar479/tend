@@ -554,12 +554,13 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
             Body::Adaptation { reason, .. } => adaptations.push(reason.clone()),
             Body::Learned {
                 message,
+                test,
                 command,
                 files,
                 ..
             } => learned.push(format!(
                 "`{}` fixed by changes to {} (`{command}` then passed)",
-                truncate_chars(message, 80),
+                truncate_chars(failure_name(message, test.as_deref()), 80),
                 files.join(", ")
             )),
             Body::ModeChanged { to, .. } => {
@@ -839,9 +840,14 @@ fn describe(e: &Entry) -> String {
         Body::Config { overrides } => format!("config {overrides:?}"),
         Body::Format { version } => format!("ledger format {version}"),
         Body::Override { action } => format!("user allowed {action} once"),
-        Body::Learned { message, files, .. } => format!(
+        Body::Learned {
+            message,
+            test,
+            files,
+            ..
+        } => format!(
             "learned: `{}` fixed by changes to {}",
-            truncate_chars(message, 80),
+            truncate_chars(failure_name(message, test.as_deref()), 80),
             files.join(", ")
         ),
         Body::Event {
@@ -943,6 +949,14 @@ pub fn why(entries: &[Entry], id: &str) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+/// A learned failure by its message, or its test when the runner gave no message.
+fn failure_name<'a>(message: &'a str, test: Option<&'a str>) -> &'a str {
+    match test {
+        Some(t) if message.is_empty() => t,
+        _ => message,
+    }
 }
 
 #[cfg(test)]

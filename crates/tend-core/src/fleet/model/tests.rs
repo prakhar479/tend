@@ -1317,6 +1317,36 @@ fn a_failed_check_goes_back_to_the_open_session() {
 }
 
 #[test]
+fn a_task_that_fails_after_failed_checks_says_so() {
+    // Live: the worker said done twice, the check failed twice, then its third turn
+    // ended without done. The user should hear about the check, not only the end.
+    let mut r = gated();
+    for _ in 0..2 {
+        r.ev(done("worker-1", "t-1"));
+        r.ev(checked("t-1", false, "FAILED tests/test_parse.py::x", &[]));
+    }
+    let c = r.ev(FleetEvent::Exited {
+        slot: "worker-1".into(),
+        code: Some(0),
+    });
+    let said: Vec<String> = c
+        .iter()
+        .filter_map(|c| match c {
+            Command::Notify { text } => Some(text.clone()),
+            Command::Deliver { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        said.iter().any(
+            |t| t.contains("t-1 failed: its session ended without `tend task done`")
+                && t.contains("Before that, its check `make check` failed (exit 1).")
+        ),
+        "{said:?}"
+    );
+}
+
+#[test]
 fn a_failed_check_after_the_session_ended_goes_to_a_fresh_one() {
     let mut r = gated();
     r.ev(done("worker-1", "t-1"));

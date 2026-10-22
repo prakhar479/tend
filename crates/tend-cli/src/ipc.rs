@@ -32,6 +32,9 @@ pub enum Request {
     Filter {
         tool_use_id: String,
         output: String,
+        /// The wrapped command's exit code (older `tend run` builds leave it out).
+        #[serde(default)]
+        exit_code: Option<i32>,
     },
     /// Allow one blocked edit (the latest if `action` is None).
     Allow {

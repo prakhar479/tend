@@ -107,7 +107,7 @@ learn = look                    # recall fixes other sessions learned, and proje
 
 ### Learning
 
-tend remembers fixes across sessions on this machine. When a test or build failure goes away after edits and a complete run passes (no pipe, no `-x`, `-k`, or `--lf`), the session keeps a learned fix (the failure, the command, the files changed) in `~/.local/share/tend/learn/fixes.jsonl`. The second time another session hits the same failure, tend tells it where and how it was fixed, this project's fix first. Notes (`tend note`) are what you want every session of a project to know. A note you type in your terminal is kept; one written from an agent's shell (or without a terminal) waits until you `tend notes approve` it. With `learn = on` (optimize mode) the agent gets both; with `look`, the default, they are only recorded.
+tend remembers fixes across sessions on this machine. When a test or build failure goes away after edits and a complete run passes (its exit code, or the runner's summary when the run is piped through `tail` or `tee`; no `-x`, `-k`, or `--lf`), the session keeps a learned fix (the failure, the command, the files changed) in `~/.local/share/tend/learn/fixes.jsonl`. All worktrees of a repo are one project. The second time another session hits the same failure, tend tells it where and how it was fixed, this project's fix first. Notes (`tend note`) are what you want every session of a project to know. A note you type in your terminal is kept; one written from an agent's shell (or without a terminal) waits until you `tend notes approve` it. With `learn = on` (optimize mode) the agent gets both; with `look`, the default, they are only recorded.
 
 ### Fleet
 

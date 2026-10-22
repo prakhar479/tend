@@ -743,6 +743,76 @@ fn stopped_wrapped_call_is_settled_at_turn_end() {
 }
 
 #[test]
+fn a_wrapped_pass_teaches_a_fix_by_its_exit_code_or_its_summary() {
+    const PASSED: &str = "tests/test_app.py ..                [100%]\n\n2 passed in 0.02s\n";
+    // (the second run's exit code, its output, fixes learned)
+    for (exit, out, want) in [
+        (Some(0), PASSED, true),
+        (None, PASSED, true),
+        (Some(0), "collected\n", true),
+        (None, "collected\n", false),
+    ] {
+        let mut c = ctl(Mode::Optimize);
+        c.set_learning("/repo", "/repo", vec![], vec![]);
+        c.handle(requested("t1", "pytest -v", true), 1);
+        let p = crate::prepare(PYTEST, 0, c.config());
+        c.filter_prepared("t1", PYTEST.into(), p, Some(1), 2);
+        c.handle(edited("src/app.py", "h1"), 3);
+        c.handle(requested("t2", "pytest -v", true), 4);
+        let p = crate::prepare(out, 0, c.config());
+        let (d, _) = c.filter_prepared("t2", out.into(), p, exit, 5);
+        let learned = d
+            .entries
+            .iter()
+            .any(|e| matches!(e.body, Body::Learned { .. }));
+        assert_eq!(learned, want, "{exit:?} {out:?}");
+    }
+}
+
+#[test]
+fn a_fix_is_learned_across_spellings_of_one_run() {
+    // Live (Haiku fleet worker): the failing run came with a `cat` before it and a
+    // longer tail; the passing run alone. Both are `python3 run_tests.py parse`.
+    const FAILED: &str =
+        "ok parse test_empty\nFAILED tests/test_parse.py::test_semicolons\n1 failed\n";
+    const PASSED: &str = "ok parse test_empty\nok parse test_semicolons\n0 failed\n";
+    let mut c = ctl(Mode::Optimize);
+    c.set_learning("/repo", "/repo", vec![], vec![]);
+    c.handle(
+        requested(
+            "t1",
+            "cat kv/parse.py; echo ---; python3 run_tests.py parse 2>&1 | tail -30",
+            true,
+        ),
+        1,
+    );
+    let p = crate::prepare(FAILED, 0, c.config());
+    c.filter_prepared("t1", FAILED.into(), p, Some(0), 2);
+    c.handle(edited("kv/parse.py", "h1"), 3);
+    c.handle(
+        requested("t2", "python3 run_tests.py parse 2>&1 | tail -5", true),
+        4,
+    );
+    let p = crate::prepare(PASSED, 0, c.config());
+    let (d, _) = c.filter_prepared("t2", PASSED.into(), p, Some(0), 5);
+    let learned: Vec<_> = d
+        .entries
+        .iter()
+        .filter_map(|e| match &e.body {
+            Body::Learned { test, files, .. } => Some((test.clone(), files.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        learned,
+        [(
+            Some("tests/test_parse.py::test_semicolons".to_string()),
+            vec!["kv/parse.py".to_string()]
+        )]
+    );
+}
+
+#[test]
 fn loops_are_found_through_tend_run() {
     let mut c = ctl(Mode::Optimize);
     let mut steered = false;

@@ -2602,6 +2602,68 @@ fn a_fix_learned_in_one_session_is_recalled_in_another() {
     );
 }
 
+/// F2 through `tend run` (live finding): most test runs are wrapped, so the pass is
+/// seen by the filter request, with the exit code `tend run` passes on. The fix it
+/// teaches must reach the machine store like one seen in a hook.
+#[test]
+fn a_fix_learned_through_tend_run_reaches_the_machine_store() {
+    let dir = tmp("learn-wrap");
+    let home = dir.join("home");
+    let config = dir.join("config.toml");
+    fs::write(&config, "learn = on\n").unwrap();
+    let fixed = dir.join("fixed");
+    let fake = dir.join("bin/pytest");
+    fs::create_dir_all(fake.parent().unwrap()).unwrap();
+    fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nif [ -e '{}' ]; then echo '2 passed in 0.01s'; exit 0; fi\ncat '{}'\nexit 1\n",
+            fixed.display(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/outputs/pytest_fail.txt")
+                .display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let load = |name: &str| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(fixture(name)).unwrap()).unwrap()
+    };
+    let (_d, sock, _) = start_fleet_daemon(&home, "1000000001-1", &config);
+    hook(&sock, "SessionStart", &load("session_start.json"));
+    let run = |id: &str| {
+        let mut pre = load("post_tool_use_bash.json");
+        pre["hook_event_name"] = "PreToolUse".into();
+        pre["permission_mode"] = "auto".into();
+        pre["tool_use_id"] = id.into();
+        pre["tool_input"]["command"] = format!("{} -v 2>&1 | tail -40", fake.display()).into();
+        pre.as_object_mut().unwrap().remove("tool_response");
+        let out: serde_json::Value =
+            serde_json::from_str(&hook(&sock, "PreToolUse", &pre)).unwrap();
+        let wrapped = out["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .expect("wrapped")
+            .to_string();
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&wrapped)
+            .env("TEND_SOCKET", &sock)
+            .output()
+            .unwrap();
+    };
+    run("toolu_a");
+    let mut edit = load("post_tool_use_edit.json");
+    edit["tool_input"]["file_path"] = "/home/dev/shop/shop/orders.py".into();
+    hook(&sock, "PostToolUse", &edit);
+    fs::write(&fixed, "").unwrap();
+    run("toolu_b");
+    let fixes = fs::read_to_string(home.join("learn/fixes.jsonl")).unwrap_or_default();
+    assert!(
+        fixes.contains("shop/orders.py") && fixes.contains("\"session\":\"1000000001-1\""),
+        "{fixes}"
+    );
+}
+
 /// F2 notes: the user's note is kept, an agent's waits for review; approved notes reach
 /// a new session of the project at its start.
 #[test]

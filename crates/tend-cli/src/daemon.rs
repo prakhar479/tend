@@ -401,6 +401,7 @@ fn decide_hook(
                 let project = crate::learnstore::project_of(Path::new(cwd));
                 controller.set_learning(
                     &project,
+                    &crate::learnstore::root_of(Path::new(cwd)),
                     crate::learnstore::load_fixes(session_id),
                     crate::learnstore::approved_notes(&project),
                 );
@@ -491,6 +492,7 @@ fn serve(
         Request::Filter {
             tool_use_id,
             output,
+            exit_code,
         } => {
             let plan = {
                 let st = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -504,10 +506,22 @@ fn serve(
                     let prepared = tend_core::prepare(&output, level, &cfg);
                     let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
                     let st = &mut *st;
-                    let (d, text) =
-                        st.controller
-                            .filter_prepared(&tool_use_id, output, prepared, now_ms());
+                    let (d, text) = st.controller.filter_prepared(
+                        &tool_use_id,
+                        output,
+                        prepared,
+                        exit_code,
+                        now_ms(),
+                    );
                     st.store.persist(&d)?;
+                    // A wrapped run is where most passes are seen: keep what it taught.
+                    if let Some(project) = &st.project {
+                        crate::learnstore::save_fixes(
+                            std::slice::from_ref(&d),
+                            &st.session_id,
+                            project,
+                        );
+                    }
                     text
                 }
             };

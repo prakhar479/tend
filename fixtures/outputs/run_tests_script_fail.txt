@@ -1,0 +1,19 @@
+Traceback (most recent call last):
+  File "/home/dev/kv/run_tests.py", line 12, in <module>
+    f(); print('ok', n, f.__name__)
+    ^^^
+  File "/home/dev/kv/tests/test_stats.py", line 7, in test_unsorted_even
+    assert median([4, 1, 3, 2]) == 2.5
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+Traceback (most recent call last):
+  File "/home/dev/kv/run_tests.py", line 12, in <module>
+    f(); print('ok', n, f.__name__)
+    ^^^
+  File "/home/dev/kv/tests/test_stats.py", line 4, in test_unsorted_odd
+    assert median([3, 1, 2]) == 2
+           ^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+FAILED tests/test_stats.py::test_unsorted_even
+FAILED tests/test_stats.py::test_unsorted_odd
+2 failed

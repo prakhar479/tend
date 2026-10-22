@@ -7,6 +7,7 @@ use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,30 @@ fn dir() -> PathBuf {
 
 /// The repo root of `cwd`, or `cwd` outside git: what "project" means here.
 pub fn project_of(cwd: &Path) -> String {
+    // Every worktree of a repo is one project: a fleet worker's fixes and the user's
+    // notes are shared with the main checkout. The main checkout is where the shared
+    // `.git` is; without one (a submodule, a bare repo), the checkout's own root.
+    let common = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
+    if let Some(main) = common
+        .filter(|c| c.file_name().is_some_and(|n| n == ".git"))
+        .and_then(|c| c.parent().map(Path::to_path_buf))
+    {
+        return main.display().to_string();
+    }
+    root_of(cwd)
+}
+
+/// The checkout `cwd` is in (its worktree): learned paths are relative to it.
+pub fn root_of(cwd: &Path) -> String {
     crate::audit::repo_root(cwd)
         .unwrap_or_else(|_| cwd.to_path_buf())
         .display()
@@ -319,5 +344,50 @@ mod tests {
         assert_eq!(lines.len(), MAX_KNOWN);
         assert!(lines.last().unwrap().contains("sess-1"), "the newest stays");
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_worktree_is_its_main_checkouts_project() {
+        let d = std::env::temp_dir().join(format!("tend-learn-wt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        let repo = d.join("repo");
+        fs::create_dir_all(repo.join("src")).unwrap();
+        let git = |at: &Path, args: &[&str]| {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(at)
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&repo, &["worktree", "add", "-q", "../wt"]);
+        let main = fs::canonicalize(&repo).unwrap().display().to_string();
+        assert_eq!(project_of(&repo.join("src")), main);
+        assert_eq!(project_of(&d.join("wt")), main);
+        assert_eq!(
+            root_of(&d.join("wt")),
+            fs::canonicalize(d.join("wt"))
+                .unwrap()
+                .display()
+                .to_string()
+        );
+        let plain = d.join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        assert_eq!(project_of(&plain), root_of(&plain));
+        let _ = fs::remove_dir_all(&d);
     }
 }

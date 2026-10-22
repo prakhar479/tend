@@ -252,6 +252,7 @@ pub fn run(tool_use_id: &str, script: &str) -> i32 {
             let req = Request::Filter {
                 tool_use_id: tool_use_id.to_string(),
                 output: String::from_utf8_lossy(&ran.output).into_owned(),
+                exit_code: Some(ran.code),
             };
             ipc::send(&s, &req, Duration::from_millis(timeout))
                 .ok()

@@ -1138,8 +1138,17 @@ impl Model {
             if let Some(x) = self.tasks.get_mut(&tid) {
                 x.attempts = attempts;
             }
+            // The last check that failed is most often the reason the session gave up.
+            let check = t
+                .last_check
+                .as_deref()
+                .and_then(|w| w.lines().next())
+                .and_then(|w| w.strip_prefix("The check "))
+                .map(|w| format!(" Before that, its check {}.", w.trim_end_matches(':')))
+                .unwrap_or_default();
             self.finish(cx, &tid, TaskState::Failed, format!("its session {how}"));
-            let text = format!("{tid} failed: its session {how}, attempt {attempts} of {budget}.");
+            let text =
+                format!("{tid} failed: its session {how}, attempt {attempts} of {budget}.{check}");
             self.tell_creator(cx, &t.created_by, MsgKind::Report, &text);
             return;
         }

@@ -244,8 +244,38 @@ fn runner_of(words: &[String]) -> Option<TestRunner> {
         }
         ("deno" | "dotnet" | "swift" | "mix", Some("test")) => Some(TestRunner::Other),
         ("rake", Some("test" | "spec")) => Some(TestRunner::Other),
+        // A project's own test script: `python3 run_tests.py`, `./run_tests.sh`.
+        (py, Some(script))
+            if (py.starts_with("python") || matches!(py, "bash" | "sh" | "zsh"))
+                && test_script(script) =>
+        {
+            Some(TestRunner::Other)
+        }
+        (_, _) if w[0].contains('/') && test_script(&w[0]) => Some(TestRunner::Other),
         _ => None,
     }
+}
+
+/// A script named as a test runner or a test file: `run_tests.py`, `runtests.py`,
+/// `test.sh`, `scripts/test`, `test_calc.py`, `api_test.py`, `tests.py`.
+fn test_script(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let stem = name
+        .strip_suffix(".py")
+        .or_else(|| name.strip_suffix(".sh"))
+        .unwrap_or(name)
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    // A script with another extension (`gen.rb`) or an option is not one.
+    if stem.contains('.') || stem.starts_with('_') || path.starts_with('-') {
+        return false;
+    }
+    matches!(
+        stem.as_str(),
+        "test" | "tests" | "run_tests" | "runtests" | "run_test"
+    ) || stem.starts_with("test_")
+        || stem.ends_with("_test")
+        || stem.ends_with("_tests") && !stem.starts_with("make")
 }
 
 /// Words after leading options that take a value (or not) for package managers and make.
@@ -554,6 +584,19 @@ pub fn runner_segment(cmd: &str) -> Option<(TestRunner, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_projects_own_test_scripts_are_test_runs() {
+        let text = include_str!("../../../../fixtures/commands/test_scripts.txt");
+        for line in text
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let (want, cmd) = line.split_once('\t').unwrap();
+            let got = classify(cmd).kind == OutputKind::Test;
+            assert_eq!(got, want == "test", "{cmd}");
+        }
+    }
 
     #[test]
     fn test_write_targets_fixture() {

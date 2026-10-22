@@ -31,12 +31,36 @@ pub struct KnownFix {
     pub at_ms: u64,
 }
 
-/// A run that can show a fix: no pipe (it hides the exit code and can cut the summary),
-/// and no flag that stops early or runs only some tests.
+/// A run whose exit code can show a fix: the exit code is the test's (no pipe, no
+/// `||`, nothing after it but `&&`), and no flag stops early or runs only some tests.
 pub fn complete_run(command: &str) -> bool {
-    let piped = command.replace("||", "").contains('|');
+    !command.contains('|') && last_is_test(command) && !partial(command)
+}
+
+/// A run whose output can show a fix, by the runner's own summary: all of it ran, and
+/// any pipe only keeps the end (`| tail -20`, `| tee log`), where the summary is.
+pub fn summary_run(command: &str) -> bool {
+    let keeps_end = command.split('|').skip(1).all(|stage| {
+        let w = stage.split_whitespace().next().unwrap_or("");
+        !stage.is_empty() && matches!(w, "tail" | "tee")
+    });
+    keeps_end && !command.contains("||") && last_is_test(command) && !partial(command)
+}
+
+/// `cat x; pytest` is fine; `pytest; echo done` exits with echo's code.
+fn last_is_test(command: &str) -> bool {
+    let last = command
+        .split([';', '\n'])
+        .map(str::trim)
+        .rfind(|s| !s.is_empty())
+        .unwrap_or("");
+    crate::perception::classify::classify(last).kind == crate::perception::OutputKind::Test
+}
+
+/// A flag that stops early or runs only some tests.
+fn partial(command: &str) -> bool {
     let words: Vec<&str> = command.split_whitespace().collect();
-    let partial = words.iter().enumerate().any(|(i, &w)| {
+    words.iter().enumerate().any(|(i, &w)| {
         // `python -m pytest` names a module; pytest's own `-m` picks tests.
         let interpreter_flag = w == "-m" && i > 0 && words[i - 1].starts_with("python");
         !interpreter_flag
@@ -54,8 +78,7 @@ pub fn complete_run(command: &str) -> bool {
             ) || w.starts_with("--maxfail")
                 || w.starts_with("--bail=")
                 || w.starts_with("-run="))
-    });
-    !piped && !partial
+    })
 }
 
 /// A fix this session just learned.
@@ -74,8 +97,10 @@ struct Open {
 
 #[derive(Debug, Default)]
 pub struct Learning {
-    /// This session's project root: paths are kept relative to it.
+    /// The project, as fixes and notes are kept: one name for all its worktrees.
     project: String,
+    /// This session's checkout (its worktree): paths are kept relative to it.
+    root: String,
     known: Vec<KnownFix>,
     /// Failing runs by command key, and the files changed since.
     open: BTreeMap<String, Open>,
@@ -84,8 +109,9 @@ pub struct Learning {
 }
 
 impl Learning {
-    pub fn set_context(&mut self, project: &str, known: Vec<KnownFix>) {
+    pub fn set_context(&mut self, project: &str, root: &str, known: Vec<KnownFix>) {
         self.project = project.trim_end_matches('/').to_string();
+        self.root = root.trim_end_matches('/').to_string();
         self.known = known;
     }
 
@@ -94,8 +120,8 @@ impl Learning {
     }
 
     fn rel(&self, path: &str) -> String {
-        match path.strip_prefix(&self.project) {
-            Some(r) if !self.project.is_empty() => r.trim_start_matches('/').to_string(),
+        match path.strip_prefix(&self.root) {
+            Some(r) if !self.root.is_empty() => r.trim_start_matches('/').to_string(),
             _ => path.to_string(),
         }
     }
@@ -210,7 +236,7 @@ mod tests {
     #[test]
     fn failures_that_a_later_pass_shows_gone_are_learned() {
         let mut l = Learning::default();
-        l.set_context("/repo", vec![]);
+        l.set_context("/repo", "/repo", vec![]);
         assert!(l
             .on_run("pytest", &[fail("a"), fail("b")], false)
             .is_empty());
@@ -259,6 +285,7 @@ mod tests {
         let mut l = Learning::default();
         l.set_context(
             "/repo",
+            "/repo",
             vec![fix("/other", 900, &["o.py"]), fix("/repo", 100, &["r.py"])],
         );
         assert!(
@@ -286,6 +313,9 @@ mod tests {
             "go test -run TestX ./...",
             "pytest --maxfail=1",
             "python -m pytest -m slow",
+            "npm test || true",
+            "pytest; echo done",
+            "python3 run_tests.py; echo \"exit=$?\"",
         ] {
             assert!(!complete_run(cmd), "{cmd}");
         }
@@ -293,10 +323,39 @@ mod tests {
             "pytest",
             "cargo test",
             "pytest tests/ -q",
-            "npm test || true",
             "make check",
+            "python3 -m pytest -v",
+            "cat x.py; python3 run_tests.py parse",
+            "cd a && pytest && echo ok",
         ] {
             assert!(complete_run(cmd), "{cmd}");
         }
+        // Piped through tail or tee: the summary in the output decides.
+        for cmd in [
+            "python3 run_tests.py parse 2>&1 | tail -5",
+            "pytest -q | tee /tmp/log",
+        ] {
+            assert!(summary_run(cmd) && !complete_run(cmd), "{cmd}");
+        }
+        for cmd in [
+            "pytest | head -20",
+            "pytest | grep FAIL",
+            "pytest -x | tail",
+            "npm test || true",
+        ] {
+            assert!(!summary_run(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn a_worktree_learns_paths_from_its_own_checkout() {
+        // A fleet worker: the project is the main checkout; its files are in a worktree.
+        let mut l = Learning::default();
+        l.set_context("/repo", "/fleets/f/worktrees/worker-1", vec![]);
+        l.on_run("pytest", &[fail("a")], false);
+        l.on_edit("/fleets/f/worktrees/worker-1/src/x.py");
+        let f = l.on_run("pytest", &[], true);
+        assert_eq!(f[0].files, ["src/x.py"]);
+        assert_eq!(l.project(), "/repo");
     }
 }

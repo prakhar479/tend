@@ -1,0 +1,23 @@
+# A project's own test script, run by name (live fleet run, 2026-10-22: Haiku workers ran
+# `python3 run_tests.py <name>`, which tend did not see as a test run).
+# Each line: `test` or `not`, a tab, then the command.
+test	python3 run_tests.py
+test	python3 run_tests.py parse
+test	python run_tests.py report; echo "exit=$?"
+test	python3 runtests.py -v
+test	python3 test_calc.py
+test	python tests/test_api.py
+test	./run_tests.sh
+test	bash scripts/run-tests.sh unit
+test	sh test.sh
+test	./scripts/test
+test	python3 tests.py
+test	python3 api_test.py
+not	python3 setup.py test_data
+not	python3 make_tests.py
+not	python3 -c "import tests"
+not	cat run_tests.py
+not	python3 contest.py
+not	./testdata/gen.sh
+not	vim test.sh
+not	python3 latest.py

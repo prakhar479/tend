@@ -458,6 +458,26 @@ Tests added: `a_leader_that_restarts_keeps_its_team`, `a_blocked_candidate_does_
 
 **Open (owner decision):** a task's `--check` comes from the agent that adds it, and the hub runs it outside that agent's permissions. Per-part checks were what made the hard bench work, so it stays; options are to allow only the fleet file's check plus `run_tests.py`-style arguments, or to run agent checks in the worker's own sandbox.
 
+### Live L (2026-10-22): fleet, learning, and merging on real work
+
+`scripts/learn_live.py <tend> <workdir>`: the hard bench's repo, one `TEND_HOME`, `learn = on`, optimize mode, Haiku. A user note (approved), then three fleets in the same repo: `lead` with the split task, `pool` with the whole task, and `pool` with a task that makes the worker run the failing test twice. About $0.04 a round.
+
+The first rounds learned nothing. Each cause, found and fixed in turn:
+
+- [x] **`python3 run_tests.py` was not a test run.** Learning, loops, and wrapping saw only known runners. A project's own test script now counts by its name (`run_tests.py`, `runtests.py`, `test.sh`, `scripts/test`, `test_x.py`, `x_test.py`, `tests.py`, run by python, sh, or path). Fixtures: `fixtures/commands/test_scripts.txt` (with near misses), `fixtures/outputs/run_tests_script_{fail,pass}.txt`.
+- [x] **"0 failed" was a failure.** The summary-only rule matched `^\d+ failed`, so every pass of a runner that prints a zero count looked like a failed run (for learning and for loops). It needs a count above 0 now.
+- [x] **A wrapped run never showed a pass**: its exit code did not reach the daemon. `tend run` now sends it with the filter request (`exit_code`, optional: older builds leave it out). Also, agents pipe nearly every run (`… 2>&1 | tail -5`), where the exit code is tail's. A run piped only through `tail` or `tee` now passes when the runner's own summary says so and no line says something failed (`learn::summary_run`, `shows_pass`). `| head` and `| grep` still never count. `pytest; echo done` and `npm test || true` no longer count by exit code (it is not the test's).
+- [x] **Fixes learned in a wrapped run were never stored**: only the hook path wrote `fixes.jsonl`. The filter path does too now (e2e `a_fix_learned_through_tend_run_reaches_the_machine_store`).
+- [x] **Each worktree was its own project**, so fleet workers never got the user's notes, and their fixes ranked as another project's. The project is now the main checkout (the shared `.git`'s parent) for every worktree; paths stay relative to the session's own worktree (`set_learning(project, root, …)`).
+- [x] Polish: a failure without a message (`FAILED x::y`) is named by its test in reasons and the report (it read "fixed `` before"). A task that fails after failed checks says so: "…ended without `tend task done`, attempt 3 of 3. Before that, its check `…` failed (exit 1)."
+
+Result (round 8): run 1 learned 2 fixes (parse, fmt) from 4 workers. Fixes are stored under the main checkout. Every session (7 of 7) got the approved note at start. Run 2's worker fixed everything at the first try: no second hit, so no recall, as designed. Run 3's worker hit the fmt failure twice and got: "this failure was fixed before, in this project, minutes ago: after changes to kv/fmt.py, `python3 run_tests.py fmt` passed." It fixed it; asked whether tend helped, it credited the note (run from the repo root), not the recall. Merging: the lead's worktree passed the whole check every round, with no conflicts.
+
+Findings, not built:
+- **A recall names files, not the change.** "After changes to kv/fmt.py" is little help to an agent that is stuck. Storing a short diff of the fix (from the session's Edit inputs, redacted like outputs) would make it useful; it grows the store and copies code across projects on the machine, so it is an owner decision.
+- **Recalls are rare with capable agents.** Haiku fixed every part at the first try; only a forced second hit gave a recall. The second-hit rule keeps noise low, and the cases it serves (a stuck agent) did not come up in this bench.
+- An agent's run of two tests in one command (`t; echo; t`) is one hit: one output.
+
 - [ ] **F6 Cross-provider.** After the Codex connector (S10, E12).
 
 ## Phase 2 — Optimize + Codex (not started)
