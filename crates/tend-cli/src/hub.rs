@@ -307,6 +307,10 @@ struct Hub {
     attached: std::collections::BTreeSet<String>,
     /// Each slot's last session id: a stream slot that starts again resumes it (G1).
     last_session: BTreeMap<String, String>,
+    /// Slots whose worktree already got its dependencies' work.
+    integrated: std::collections::BTreeSet<String>,
+    /// Done parts whose work went up to their parent's worktree.
+    lifted: std::collections::BTreeSet<String>,
 }
 
 pub fn run_hub(dir: &Path, resume: bool) -> Result<()> {
@@ -344,6 +348,8 @@ pub fn run_hub(dir: &Path, resume: bool) -> Result<()> {
         claims_text: None,
         attached: std::collections::BTreeSet::new(),
         last_session: BTreeMap::new(),
+        integrated: std::collections::BTreeSet::new(),
+        lifted: std::collections::BTreeSet::new(),
     };
     let _ = fs::write(dir.join("hub.pid"), std::process::id().to_string());
     if resume {
@@ -659,6 +665,7 @@ impl Hub {
             }
         }
         self.write_claims();
+        self.bring_up_done_parts();
         first.unwrap_or_default()
     }
 
@@ -722,9 +729,15 @@ impl Hub {
                 self.write_line(slot, &line);
             }
             Cmd::Deliver { to, from, kind, text } => {
+                let mut text = text.clone();
                 if let (tend_core::fleet::spec::MsgKind::Task, Address::Slot { id }) = (kind, to) {
-                    self.record_base(id, text);
+                    // Its dependencies' work first, then the base the audit diffs from.
+                    if let Some(note) = self.bring_in_dependencies(id, &text) {
+                        text = format!("{text}\n\n{note}");
+                    }
+                    self.record_base(id, &text);
                 }
+                let text = &text;
                 let from = match from {
                     Actor::User => "the user".to_string(),
                     Actor::Tend => "tend".to_string(),
@@ -763,7 +776,7 @@ impl Hub {
             Cmd::Notify { text } => inbox(&self.dir, text),
             Cmd::Attach { role } => inbox(
                 &self.dir,
-                &format!("Role {role} runs in your terminal. Start it with `tend claude` in this repo; joining a fleet from a terminal comes later (F4)."),
+                &format!("Role {role} runs in your terminal: start it in this repo with `tend claude --tend-fleet {} --tend-role {role}`.", self.meta.id),
             ),
             // Answers go back with the request's reply; waits need nothing done.
             Cmd::Release { slot } => {
@@ -940,12 +953,197 @@ impl Hub {
         Ok(path)
     }
 
+    /// A fresh worker's worktree starts at the fleet's base, without the work of the tasks
+    /// its task depends on: bring their changes in (tracked changes as a patch, new
+    /// files copied), once, before its first task. The note says what came in, or what
+    /// could not. A judge's parts are not merged: it compares them.
+    fn bring_in_dependencies(&mut self, slot: &str, text: &str) -> Option<String> {
+        let tid = text.strip_prefix("Task ")?.split(':').next()?.to_string();
+        let task = self.model.tasks().find(|t| t.id == tid)?.clone();
+        let fresh = self.model.slots().get(slot).is_some_and(|s| {
+            !self.integrated.contains(slot) && s.task.as_deref() == Some(tid.as_str())
+        });
+        self.integrated.insert(slot.to_string());
+        if !fresh || task.depends_on.is_empty() {
+            return None;
+        }
+        if self.model.role_of(slot).map(|r| &r.workspace) != Some(&Workspace::WorktreePerWorker) {
+            return None;
+        }
+        let target = self.worktrees.get(slot)?.clone();
+        // Its dependencies and theirs, each once, the earliest first.
+        let mut want: Vec<String> = Vec::new();
+        let mut stack: Vec<String> = task.depends_on.clone();
+        while let Some(d) = stack.pop() {
+            if want.contains(&d) {
+                continue;
+            }
+            if let Some(dt) = self.model.tasks().find(|t| t.id == d) {
+                if dt.parent.as_deref() == Some(tid.as_str()) {
+                    continue;
+                }
+                stack.extend(dt.depends_on.clone());
+                want.push(d);
+            }
+        }
+        let order: Vec<String> = self
+            .model
+            .tasks()
+            .filter(|t| want.contains(&t.id))
+            .map(|t| t.id.clone())
+            .collect();
+        let (mut brought, mut failed) = (Vec::new(), Vec::new());
+        for dep in order {
+            match self.move_work(&dep, &target) {
+                Ok(true) => brought.push(dep),
+                Ok(false) => {}
+                Err(e) => failed.push(format!("{dep}: {e}")),
+            }
+        }
+        let mut note = Vec::new();
+        if !brought.is_empty() {
+            let who: Vec<String> = brought
+                .iter()
+                .map(|d| {
+                    let slot = self
+                        .model
+                        .tasks()
+                        .find(|t| t.id == *d)
+                        .and_then(|t| t.slot.clone());
+                    format!("{d} ({})", slot.unwrap_or_default())
+                })
+                .collect();
+            note.push(format!(
+                "tend brought the work of {} into this worktree before your task.",
+                who.join(", ")
+            ));
+        }
+        if !failed.is_empty() {
+            note.push(format!("tend could not bring in: {}.", failed.join("; ")));
+        }
+        eprintln!("tend fleet hub: {slot} for {tid}: {}", note.join(" "));
+        (!note.is_empty()).then(|| note.join("\n"))
+    }
+
+    /// Apply task `tid`'s own work to the worktree `target`: the diff of its worktree from
+    /// the tree it started at (so work it was given is not applied twice), and the new
+    /// files that diff does not carry. Ok(false): nothing to move.
+    fn move_work(&self, tid: &str, target: &Path) -> std::result::Result<bool, String> {
+        let task = self
+            .model
+            .tasks()
+            .find(|t| t.id == tid)
+            .ok_or("no such task")?;
+        let src = task
+            .slot
+            .as_ref()
+            .and_then(|s| self.worktrees.get(s).cloned().or_else(|| self.slot_dir(s)))
+            .ok_or("its worktree is gone")?;
+        if src == target {
+            return Ok(false);
+        }
+        let from = match self.bases.get(tid) {
+            Some((_, tree)) => tree.clone(),
+            None => self
+                .meta
+                .base
+                .clone()
+                .ok_or("the fleet has no base commit")?,
+        };
+        let diff = Command::new("git")
+            .arg("-C")
+            .arg(&src)
+            .args(["diff", "--binary", &from])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !diff.status.success() {
+            return Err(String::from_utf8_lossy(&diff.stderr)
+                .lines()
+                .next()
+                .unwrap_or("git diff failed")
+                .to_string());
+        }
+        let mut moved = false;
+        if !diff.stdout.is_empty() {
+            let mut apply = Command::new("git")
+                .arg("-C")
+                .arg(target)
+                .args(["apply", "--whitespace=nowarn", "-"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            if let Some(mut i) = apply.stdin.take() {
+                let _ = i.write_all(&diff.stdout);
+            }
+            let out = apply.wait_with_output().map_err(|e| e.to_string())?;
+            if !out.status.success() {
+                return Err(format!(
+                    "{} (its work is in {})",
+                    String::from_utf8_lossy(&out.stderr)
+                        .lines()
+                        .next()
+                        .unwrap_or("git apply failed"),
+                    src.display()
+                ));
+            }
+            moved = true;
+        }
+        let new =
+            git_out(&src, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+        for f in new.lines() {
+            let to = target.join(f);
+            if to.exists() {
+                continue;
+            }
+            if let Some(p) = to.parent() {
+                fs::create_dir_all(p).map_err(|e| e.to_string())?;
+            }
+            fs::copy(src.join(f), &to).map_err(|e| format!("copy {f}: {e}"))?;
+            moved = true;
+        }
+        Ok(moved)
+    }
+
+    /// A part that is done brings its work up, into the worktree of the session that
+    /// holds its parent task (a lead that split its task). A best-of's candidates are
+    /// left apart: the judge picks one.
+    fn bring_up_done_parts(&mut self) {
+        use tend_core::fleet::model::TaskState;
+        let done: Vec<(String, String)> = self
+            .model
+            .tasks()
+            .filter(|t| t.state == TaskState::Done && !self.lifted.contains(&t.id))
+            .filter_map(|t| Some((t.id.clone(), t.parent.clone()?)))
+            .collect();
+        for (tid, parent) in done {
+            self.lifted.insert(tid.clone());
+            let Some(p) = self.model.tasks().find(|t| t.id == parent).cloned() else {
+                continue;
+            };
+            if p.best_of || p.target.as_deref() == Some("judge") {
+                continue;
+            }
+            let Some(target) = p.slot.as_ref().and_then(|s| self.worktrees.get(s)).cloned() else {
+                continue;
+            };
+            let holder = p.slot.clone().unwrap_or_default();
+            match self.move_work(&tid, &target) {
+                Ok(true) => eprintln!("tend fleet hub: {tid}'s work is in {holder}'s worktree now"),
+                Ok(false) => {}
+                Err(e) => inbox(
+                    &self.dir,
+                    &format!("tend could not bring {tid}'s work into {holder}'s worktree: {e}"),
+                ),
+            }
+        }
+    }
+
     /// With the audit on: the slot's worktree tree when it gets a task, to diff at check
     /// time. The task id is the delivered text's first words (`Task t-2: …`).
     fn record_base(&mut self, slot: &str, text: &str) {
-        if !self.audit {
-            return;
-        }
         let Some(task) = text
             .strip_prefix("Task ")
             .and_then(|t| t.split(':').next())
@@ -979,13 +1177,14 @@ impl Hub {
         let base = self.bases.get(&task).cloned();
         let scratch = self.dir.join("scratch");
         let lock = Arc::clone(&self.checking);
+        let audit = self.audit;
         thread::spawn(move || {
             let _one = lock.lock().unwrap_or_else(|e| e.into_inner());
             let event = match wt {
                 Some(wt) => {
                     let (exit, output) = run_with_timeout(&wt, &command, CHECK_TIMEOUT);
                     let passed = exit == Some(0);
-                    let flags = match (&base, passed) {
+                    let flags = match (&base, passed && audit) {
                         (Some((root, from)), true) => audit_flags(root, from, &scratch),
                         _ => Vec::new(),
                     };
@@ -2030,6 +2229,7 @@ fn merge_plan(dir: &Path, meta: &Meta, model: &Model, yes: bool) -> Result<Strin
     // Each worktree, with its slot's tasks, in the order the first of them was added.
     let mut rows: Vec<MergeRow> = Vec::new();
     let mut not_picked = 0;
+    let mut in_parent = 0;
     for e in fs::read_dir(dir.join("worktrees"))
         .into_iter()
         .flatten()
@@ -2062,6 +2262,25 @@ fn merge_plan(dir: &Path, meta: &Meta, model: &Model, yes: bool) -> Result<Strin
             .filter_map(|t| order.iter().position(|o| *o == t.id))
             .min()
             .unwrap_or(usize::MAX);
+        // A part whose work went up into its parent's worktree is merged with it.
+        let lifted_into = |t: &tend_core::fleet::model::Task| {
+            let p = model.tasks().find(|p| Some(&p.id) == t.parent.as_ref())?;
+            if p.best_of
+                || p.target.as_deref() == Some("judge")
+                || p.slot.as_deref() == Some(name.as_str())
+            {
+                return None;
+            }
+            p.slot.clone()
+        };
+        if !mine.is_empty()
+            && mine
+                .iter()
+                .all(|t| t.state == TaskState::Done && lifted_into(t).is_some())
+        {
+            in_parent += 1;
+            continue;
+        }
         // A best-of candidate the judge did not pick is not merged (G9).
         if !mine.is_empty() && mine.iter().all(|t| t.picked == Some(false)) {
             not_picked += 1;
@@ -2084,6 +2303,13 @@ fn merge_plan(dir: &Path, meta: &Meta, model: &Model, yes: bool) -> Result<Strin
         });
     }
     rows.sort_by(|a, b| (a.first, &a.name).cmp(&(b.first, &b.name)));
+    if in_parent > 0 {
+        let _ = writeln!(
+            out,
+            "Left out: {in_parent} worktree{} of parts whose work is in their lead's worktree.",
+            if in_parent == 1 { "" } else { "s" }
+        );
+    }
     if not_picked > 0 {
         let _ = writeln!(
             out,

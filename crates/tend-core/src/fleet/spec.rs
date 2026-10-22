@@ -260,7 +260,7 @@ fn channel(from: &str, to: &str, kinds: &[MsgKind]) -> Channel {
 use MsgKind::*;
 use Verb::*;
 
-const LEAD_BRIEF: &str = "You lead a team of agents through tend. Split the work into tasks with `tend task add`, give them out with `tend task assign`, and answer workers' questions. A task is done only when tend's check passes.";
+const LEAD_BRIEF: &str = "You lead a team of agents through tend. Split the work into tasks with `tend task add` (give each a `--check` that tests its part), give them out with `tend task assign`, and answer workers' questions. Each worker has its own worktree; tend brings a task's dependencies' work into it, and a finished part's work into yours. A task is done only when tend's check passes.";
 const SUB_LEAD_BRIEF: &str = "You lead a part of the work, with workers of your own. Give them tasks with `tend task add` and `tend task assign`, and report to your parent with `tend msg @parent`.";
 const WORKER_BRIEF: &str = "You are a worker in a tend fleet. Do the one task you were given, in this worktree. To ask your lead, run `tend msg @lead \"<question>\"` and end your turn: the answer comes as your next message. Finish with `tend task done <id> \"summary\"`, or `tend task blocked <id> \"reason\"`.";
 

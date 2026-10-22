@@ -2489,3 +2489,64 @@ fn fleet_down_leaves_a_terminal_session_running() {
         "{inbox}"
     );
 }
+
+/// Bench finding: a task that depends on others starts in a fresh worktree, so the hub
+/// brings in its dependencies' work (a changed file and a new one) before delivering it.
+#[test]
+fn fleet_brings_dependencies_work_into_a_fresh_worktree() {
+    let (dir, repo, home) = fleet_repo("deps", &[("a.txt", "a\n")], "preset = \"pool\"\n");
+    let agent = fake_script(
+        &dir,
+        "fake-deps.sh",
+        r#"    *"Task t-1:"*)
+      echo changed > a.txt; echo new > part_a.txt
+      tend task done t-1 "made A" >> "$D/done.txt" 2>&1; result ;;
+    *"Task t-2:"*)
+      { test -f part_a.txt && grep -q changed a.txt && echo saw-a || echo missing-a; } > "$D/b-saw.txt"
+      case "$line" in *"brought the work of t-1 (worker-1)"*) echo told > "$D/b-told.txt" ;; esac
+      tend task done t-2 "made B" >> "$D/done.txt" 2>&1; result ;;"#,
+    );
+    let tend = |args: &[&str]| tend_in(&repo, &home, &agent, args);
+    let _down = FleetDown(repo.clone(), home.clone(), agent.clone());
+    tend(&["fleet", "up", "fleet.toml"]);
+    tend(&["task", "add", "A"]);
+    tend(&["task", "add", "B", "--depends", "t-1"]);
+    board_until(&tend, &|b| b.matches(" done ").count() == 2);
+    assert_eq!(
+        fs::read_to_string(dir.join("b-saw.txt")).unwrap().trim(),
+        "saw-a"
+    );
+    assert!(
+        dir.join("b-told.txt").exists(),
+        "the agent is told what came in"
+    );
+}
+
+/// Bench finding: a part that is done brings its work up into the worktree of the
+/// session that holds the parent task, so the lead can check the whole.
+#[test]
+fn fleet_brings_a_done_parts_work_up_to_its_lead() {
+    let (dir, repo, home) = fleet_repo("lift", &[("a.txt", "a\n")], "preset = \"lead\"\n");
+    let agent = fake_script(
+        &dir,
+        "fake-lift.sh",
+        r#"    *PLAN*)
+      tend task add "PART one" >> "$D/lead.txt" 2>&1; result ;;
+    *"is done ("*)
+      sleep 0.2
+      { test -f part.txt && echo lifted || echo missing; } > "$D/lead-saw.txt"
+      tend task done t-1 "whole done" >> "$D/lead.txt" 2>&1; result ;;
+    *"Task t-1.1:"*)
+      echo part > part.txt
+      tend task done t-1.1 "part done" >> "$D/done.txt" 2>&1; result ;;"#,
+    );
+    let tend = |args: &[&str]| tend_in(&repo, &home, &agent, args);
+    let _down = FleetDown(repo.clone(), home.clone(), agent.clone());
+    tend(&["fleet", "up", "fleet.toml"]);
+    tend(&["task", "add", "PLAN", "--role", "lead"]);
+    board_until(&tend, &|b| b.matches(" done ").count() == 2);
+    assert_eq!(
+        fs::read_to_string(dir.join("lead-saw.txt")).unwrap().trim(),
+        "lifted"
+    );
+}

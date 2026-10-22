@@ -409,6 +409,18 @@ A review pass over the fleet code (the three review agents hit the account's ses
 
 Checked and fine: shim p95 1.5 ms; fuzz targets build; look mode returns no response for the new denies and notices (they go through `act`); refusals exit 1.
 
+### Hard bench H (2026-10-22)
+
+`scripts/fleet_bench.py --task hard [--split]`: a small package (`kv/`) with three independent bugs in three modules and a missing `summarize()` that needs all three; `check = "python3 run_tests.py"` (four test files; `run_tests.py <name>` runs one).
+
+- **Without `--split`, the task is still one agent's work.** On Haiku every preset finished with all four parts fixed and no lost attempts, but the leads (`lead`, `specialists`) did it themselves: 1 task, 1 session, about 20 s. Natural delegation needs a bigger task than this.
+- **With `--split`** (the task tells the lead to hand out one task per test file), the lead split it well (four tasks, a `--check` per part, `summarize` depending on the other three), and that exposed the gap the small bench could not: **work did not flow between worktrees.**
+  - The dependent task's worker started at the fleet's base, without the three fixes, and blocked. **Fixed:** before a fresh worker's first task, the hub brings in the work of the task's dependencies (and theirs): each one's own diff from the tree it started at, plus new files; the agent is told what came in, or what could not.
+  - Then the lead's own task could not pass: its worktree had none of the parts, and it rightly would not say done. **Fixed:** when a part is done, the hub brings its work up into the worktree of the session holding the parent task (not for best-of candidates or a judge).
+  - The hub now records each task's starting tree always (not only with `experimental_audit`), so a task's own changes are known; the audit still runs only when it is on.
+  - The merge plan leaves out parts whose work is in their lead's worktree; the lead's brief tells it to give each part a `--check`, and that tend moves the work.
+- Result after the fixes (Haiku, `lead`, `--split`): done in 0.5 min, 5 tasks, no lost attempts, the whole check passes in the lead's worktree, $0.02; the merge plan is the lead's worktree alone.
+
 - [ ] **F6 Cross-provider.** After the Codex connector (S10, E12).
 
 ## Phase 2 — Optimize + Codex (not started)
