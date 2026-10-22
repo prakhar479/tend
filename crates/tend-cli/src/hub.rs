@@ -2017,7 +2017,7 @@ const REPLY_WAIT: Duration = Duration::from_secs(30);
 
 /// Send a request to a fleet's hub; its reply message.
 pub fn send(dir: &Path, req: &HubRequest) -> Result<String> {
-    let mut stream = UnixStream::connect(socket_path(dir))?;
+    let mut stream = crate::ipc::connect_now(&socket_path(dir))?;
     stream.set_read_timeout(Some(REPLY_WAIT))?;
     let mut line = serde_json::to_string(req)?;
     line.push('\n');

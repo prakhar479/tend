@@ -1,7 +1,6 @@
 //! Session housekeeping: prune old sessions, remove stale sockets.
 
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -12,7 +11,7 @@ use crate::paths::{self, socket_path};
 /// A daemon listens on this socket. Only "refused" or "not found" mean stale: a busy
 /// daemon may answer slowly, and its socket must survive (R0.3).
 pub fn is_live(dir: &Path) -> bool {
-    match UnixStream::connect(socket_path(dir)) {
+    match crate::ipc::connect_now(&socket_path(dir)) {
         Ok(_) => true,
         // "Refused" and "not found" mean no daemon; so does a path the OS cannot use.
         Err(e) => !matches!(

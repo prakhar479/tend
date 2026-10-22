@@ -74,7 +74,7 @@ pub fn run(
     // listens on is stale: replace it.
     let linked = fs::hard_link(&tmp, &sock).or_else(|e| {
         if e.kind() == std::io::ErrorKind::AlreadyExists
-            && UnixStream::connect(&sock).is_err_and(|c| {
+            && crate::ipc::connect_now(&sock).is_err_and(|c| {
                 matches!(
                     c.kind(),
                     std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
@@ -326,21 +326,30 @@ fn inbox_seen(path: &Path) -> u64 {
 /// Whole lines of the inbox past `offset`, which moves past them and is kept in
 /// `<inbox>.seen`.
 fn new_inbox_lines(path: &Path, offset: &mut u64) -> Vec<serde_json::Value> {
-    let Ok(text) = fs::read_to_string(path) else {
+    use std::io::{Read, Seek, SeekFrom};
+    // On the hook path: a `stat` when nothing came, and only the new bytes when
+    // something did (the whole file was read on every hook).
+    let Ok(mut f) = fs::File::open(path) else {
         return Vec::new();
     };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     // An inbox shorter than what was read was rewritten (a hub restart): read it
     // again, or nothing more would ever arrive.
-    if *offset as usize > text.len() {
+    if *offset > len {
         *offset = 0;
     }
-    let Some(new) = text.get(*offset as usize..) else {
+    if *offset == len {
         return Vec::new();
-    };
-    let end = new.rfind('\n').map_or(0, |i| i + 1);
-    let lines = new[..end]
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
+    }
+    let mut buf = Vec::new();
+    if f.seek(SeekFrom::Start(*offset)).is_err() || f.read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let end = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    // Bytes, then text: one line that is not UTF-8 is skipped, not the rest.
+    let lines = buf[..end]
+        .split(|&b| b == b'\n')
+        .filter_map(|l| serde_json::from_slice(l).ok())
         .collect();
     *offset += end as u64;
     if end > 0 {
@@ -807,6 +816,24 @@ mod tests {
         assert_eq!(new_inbox_lines(&inbox, &mut offset).len(), 1);
         fs::write(&inbox, "{\"text\":\"b\"}\n").unwrap();
         assert_eq!(new_inbox_lines(&inbox, &mut offset).len(), 1, "not stalled");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_does_not_stall_the_inbox() {
+        let d = std::env::temp_dir().join(format!("tend-inbox-utf8-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let inbox = d.join("inbox.jsonl");
+        let mut b = b"{\"text\":\"a\"}\n\xff\xfe\n".to_vec();
+        b.extend_from_slice(b"{\"text\":\"b\"}\n");
+        fs::write(&inbox, b).unwrap();
+        let mut offset = 0;
+        assert_eq!(new_inbox_lines(&inbox, &mut offset).len(), 2);
+        assert!(
+            new_inbox_lines(&inbox, &mut offset).is_empty(),
+            "nothing new"
+        );
         let _ = fs::remove_dir_all(&d);
     }
 }
