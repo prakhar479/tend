@@ -57,6 +57,16 @@ pub fn analyze(transcript: &Path) -> Result<Vec<Entry>> {
             continue;
         };
         if let Some(c) = v["cwd"].as_str() {
+            // The first cwd names the project, as a live session's start does.
+            if cwd.is_empty() && !c.is_empty() {
+                let at = Path::new(c);
+                ctl.set_learning(
+                    &crate::learnstore::project_of(at),
+                    &crate::learnstore::root_of(at),
+                    Vec::new(),
+                    Vec::new(),
+                );
+            }
             cwd = c.to_string();
         }
         // Keep time monotonic even if a line has no timestamp or goes backwards.

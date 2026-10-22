@@ -271,6 +271,11 @@ impl Learning {
     }
 
     fn add_edit(&mut self, path: &str, hunk: Option<Hunk>) {
+        // Outside the checkout (the agent's memory files, a scratch dir) is not part of
+        // the project's fix (polaris retro: every learned fix named MEMORY.md).
+        if !self.root.is_empty() && path.starts_with('/') && self.rel(path) == path {
+            return;
+        }
         let rel = self.rel(path);
         for o in self.open.values_mut() {
             if o.files.len() < MAX_FILES {
@@ -676,5 +681,20 @@ mod tests {
         let line = r#"{"signature":"a","message":"m","command":"pytest","files":["x.py"],"session":"s","project":"/repo","at_ms":1}"#;
         let k: KnownFix = serde_json::from_str(line).unwrap();
         assert_eq!(k.change, None);
+    }
+
+    #[test]
+    fn edits_outside_the_checkout_are_not_part_of_a_fix() {
+        let mut l = Learning::default();
+        l.set_context("/repo", "/repo", vec![]);
+        l.on_run("pytest", &[fail("a")], false);
+        l.on_edit("/home/me/.claude/projects/x/memory/MEMORY.md");
+        l.on_edit("/repo/src/a.py");
+        let f = l.on_run("pytest", &[], true);
+        assert_eq!(f[0].files, ["src/a.py"]);
+        // Only edits outside: nothing learned.
+        l.on_run("pytest", &[fail("b")], false);
+        l.on_edit("/tmp/scratch.py");
+        assert!(l.on_run("pytest", &[], true).is_empty());
     }
 }
