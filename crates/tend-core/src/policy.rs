@@ -71,8 +71,11 @@ impl Policy {
     fn rel<'a>(&self, path: &'a str) -> &'a str {
         let root = self.root.trim_end_matches('/');
         if !root.is_empty() {
+            // Only a whole path component: `/a/b` is not the root of `/a/bc/x`.
             if let Some(rest) = path.strip_prefix(root) {
-                return rest.trim_start_matches('/');
+                if rest.is_empty() || rest.starts_with('/') {
+                    return rest.trim_start_matches('/');
+                }
             }
         }
         path.trim_start_matches("./")
@@ -184,6 +187,13 @@ fn string_array(v: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sibling_prefix_is_not_under_the_root() {
+        let (p, _) = parse("protected = [\"c/**\"]", "/a/b");
+        assert!(p.protected_by("/a/b/c/x").is_some());
+        assert!(p.protected_by("/a/bc/x").is_none());
+    }
 
     #[test]
     fn globs() {

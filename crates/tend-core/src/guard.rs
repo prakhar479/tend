@@ -67,6 +67,10 @@ pub fn code_only(text: &str) -> String {
             continue;
         }
         match c {
+            '\'' if is_lifetime(&chars, i) => {
+                out.push(c);
+                i += 1;
+            }
             '"' | '`' | '\'' => {
                 // A quote with no closing quote on its line (a Rust lifetime, an apostrophe
                 // in prose) is not a string.
@@ -123,6 +127,31 @@ pub fn code_only(text: &str) -> String {
         }
     }
     out
+}
+
+/// A Rust lifetime (`&'a`, `<'a`, `, 'b>`) at `i`, which a closing quote later on the
+/// line must not turn into a string. A char literal (`'a'`) is not one.
+fn is_lifetime(chars: &[char], i: usize) -> bool {
+    let mut j = i + 1;
+    while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+        j += 1;
+    }
+    if j == i + 1 || !(chars[i + 1].is_alphabetic() || chars[i + 1] == '_') {
+        return false;
+    }
+    let next = chars.get(j).copied();
+    if next == Some('\'') {
+        return false;
+    }
+    let prev = chars[..i]
+        .iter()
+        .rev()
+        .find(|c| !c.is_whitespace())
+        .copied();
+    match i.checked_sub(1).map(|k| chars[k]) {
+        Some('&') | Some('<') => true,
+        _ => (prev == Some(',') && next == Some(':')) || next == Some('>'),
+    }
 }
 
 fn placeholder(body: &str) -> String {
@@ -474,6 +503,17 @@ mod tests {
             "fn total() -> u32 { 6 }",
             "fn total() -> u32 { 7 }"
         ));
+    }
+
+    #[test]
+    fn lifetime_before_a_later_quote_is_not_a_string() {
+        let c = code_only("fn f<'a>(x: &'a str) { assert!(x == \"y\"); let c = 'z'; }");
+        assert!(c.contains("&'a str"), "{c}");
+        assert!(c.contains("assert!"), "{c}");
+        let c = code_only("fn g<'a, 'b: 'a>(x: &'b str) { assert!(x.is_empty()) }");
+        assert!(c.contains("assert!") && c.contains("&'b str"), "{c}");
+        // Python strings stay strings.
+        assert!(!code_only("f('a b', 'c')").contains("a b"));
     }
 
     #[test]

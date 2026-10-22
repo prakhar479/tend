@@ -58,7 +58,9 @@ impl Rules {
     pub fn set_claims(&mut self, all: &[ClaimFile]) {
         self.claims = all
             .iter()
-            .filter(|c| c.slot != self.slot && c.worktree.trim_end_matches('/') == self.root)
+            .filter(|c| {
+                c.slot != self.slot && lexical(&c.worktree).trim_end_matches('/') == self.root
+            })
             .map(|c| {
                 let globs = c.scope.iter().filter_map(|g| Glob::new(g)).collect();
                 (c.slot.clone(), c.task.clone(), globs)
@@ -106,7 +108,7 @@ impl Rules {
 
 /// `path` without `.`, empty, and `x/..` parts, so `src/../tests/a` is `tests/a`. Parts
 /// of a relative path that climb out stay.
-fn lexical(path: &str) -> String {
+pub(super) fn lexical(path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for p in path.split('/') {
         match p {
@@ -196,6 +198,20 @@ mod tests {
             .is_some_and(|w| w.contains("worker-2 claimed `src/api/**` for t-2")));
         assert!(r.refuse("/wt/team/src/db.rs").is_none());
         assert_eq!(r.claims.len(), 1, "not its own, not another worktree's");
+    }
+
+    #[test]
+    fn a_claims_worktree_is_compared_lexically() {
+        let mut r = rules(&[], &[]);
+        for wt in ["/wt//team", "/wt/team/.", "/wt/x/../team/"] {
+            r.set_claims(&[ClaimFile {
+                slot: "worker-2".into(),
+                task: "t-2".into(),
+                worktree: wt.into(),
+                scope: vec!["src/**".into()],
+            }]);
+            assert!(r.refuse("/wt/team/src/a.rs").is_some(), "{wt}");
+        }
     }
 
     #[test]

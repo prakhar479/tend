@@ -161,7 +161,7 @@ pub fn parse(cmd: &str) -> CommandLine {
                     if n.is_whitespace() || matches!(n, ';' | '&' | '|' | '<' | '>' | ')') {
                         break;
                     }
-                    if n != '\'' && n != '"' {
+                    if n != '\'' && n != '"' && n != '\\' {
                         delim.push(n);
                     }
                     chars.next();
@@ -201,7 +201,31 @@ pub fn program_words(segment: &[String]) -> &[String] {
     loop {
         match w {
             [first, rest @ ..] if is_assignment(first) => w = rest,
-            [first, rest @ ..] if matches!(first.as_str(), "npx" | "bunx" | "pnpx") => w = rest,
+            [first, rest @ ..]
+                if matches!(
+                    first.as_str(),
+                    "npx"
+                        | "bunx"
+                        | "pnpx"
+                        | "uvx"
+                        | "exec"
+                        | "command"
+                        | "builtin"
+                        | "!"
+                        | "if"
+                        | "while"
+                        | "until"
+                        | "then"
+                        | "do"
+                        | "else"
+                        | "elif"
+                ) =>
+            {
+                w = rest
+            }
+            [first, rest @ ..] if first == "sudo" => {
+                w = skip_flags(rest, &["-u", "-g", "-C", "-h"])
+            }
             [first, rest @ ..] if matches!(first.as_str(), "env" | "time" | "nice") => {
                 w = skip_flags(rest, &["-u", "-C", "-f", "-o", "-n", "--unset", "--chdir"])
             }
@@ -234,17 +258,33 @@ pub fn program_words(segment: &[String]) -> &[String] {
             [a, b, rest @ ..]
                 if matches!(
                     (a.as_str(), b.as_str()),
-                    ("poetry" | "pipenv" | "hatch", "run") | ("pnpm" | "bundle" | "yarn", "exec")
+                    ("poetry" | "pipenv" | "hatch" | "pipx", "run")
+                        | ("pnpm" | "bundle" | "yarn", "exec")
                 ) =>
             {
                 w = rest
             }
-            [py, m, rest @ ..]
-                if m == "-m" && (py.starts_with("python") || py.ends_with("/python")) =>
+            // `python -u -W ignore -m pytest`: interpreter options before `-m`.
+            [py, rest @ ..]
+                if program_name(py).starts_with("python") && python_m(rest).is_some() =>
             {
-                w = rest
+                w = python_m(rest).unwrap_or(rest)
             }
             _ => return w,
+        }
+    }
+}
+
+/// After `-m` in the options of a Python interpreter, if the options lead to it.
+fn python_m(mut w: &[String]) -> Option<&[String]> {
+    loop {
+        match w {
+            [m, rest @ ..] if m == "-m" => return Some(rest),
+            [o, _, rest @ ..] if o == "-W" || o == "-X" => w = rest,
+            [o, rest @ ..] if o.starts_with('-') && o != "-c" && o != "--" && o.len() > 1 => {
+                w = rest
+            }
+            _ => return None,
         }
     }
 }

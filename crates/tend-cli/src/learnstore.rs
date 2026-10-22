@@ -24,6 +24,16 @@ fn dir() -> PathBuf {
     paths::home().join("learn")
 }
 
+/// A store file as text. Bytes that are not UTF-8 (a torn write) become U+FFFD on that
+/// line only; a read error is not "empty", or a rewrite would wipe the file.
+fn read_lossy(path: &Path) -> std::io::Result<String> {
+    match fs::read(path) {
+        Ok(b) => Ok(String::from_utf8_lossy(&b).into_owned()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e),
+    }
+}
+
 /// The repo root of `cwd`, or `cwd` outside git: what "project" means here.
 pub fn project_of(cwd: &Path) -> String {
     // Every worktree of a repo is one project: a fleet worker's fixes and the user's
@@ -96,7 +106,7 @@ pub fn load_fixes(except_session: &str) -> Vec<KnownFix> {
 }
 
 fn load_fixes_in(dir: &Path, except_session: &str) -> Vec<KnownFix> {
-    let Ok(text) = fs::read_to_string(dir.join("fixes.jsonl")) else {
+    let Ok(text) = read_lossy(&dir.join("fixes.jsonl")) else {
         return Vec::new();
     };
     let mut fixes: Vec<KnownFix> = text
@@ -151,11 +161,15 @@ fn save_fixes_in(dir: &Path, decisions: &[Decision], session: &str, project: &st
         return;
     };
     let path = dir.join("fixes.jsonl");
+    // A torn last line must not swallow the first new fix.
+    if crate::store::ends_torn(&path) {
+        lines.insert(0, '\n');
+    }
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = f.write_all(lines.as_bytes());
     }
     // Keep it short: the newest MAX_KNOWN, once it holds twice that.
-    if let Ok(text) = fs::read_to_string(&path) {
+    if let Ok(text) = read_lossy(&path) {
         let all: Vec<&str> = text.lines().collect();
         if all.len() > 2 * MAX_KNOWN {
             let keep = all[all.len() - MAX_KNOWN..].join("\n") + "\n";
@@ -231,7 +245,7 @@ pub fn forget(all: bool) -> Result<String> {
     let dir = dir();
     let _lock = lock(&dir, "fixes.lock")?;
     let path = dir.join("fixes.jsonl");
-    let text = fs::read_to_string(&path).unwrap_or_default();
+    let text = read_lossy(&path)?;
     let (mut dropped, mut kept) = (0, String::new());
     for line in text.lines() {
         let theirs =
@@ -265,7 +279,7 @@ pub struct Note {
 }
 
 fn load_notes() -> Vec<Note> {
-    fs::read_to_string(dir().join("notes.jsonl"))
+    read_lossy(&dir().join("notes.jsonl"))
         .map(|t| {
             t.lines()
                 .filter_map(|l| serde_json::from_str(l).ok())
@@ -443,6 +457,39 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!((got[0].project.as_str(), got[0].at_ms), ("/repo", 42));
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_torn_or_non_utf8_line_costs_only_itself() {
+        let d = std::env::temp_dir().join(format!("tend-learn-torn-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("fixes.jsonl"), b"{\"x\":\"\xe2\x82").unwrap();
+        assert!(load_fixes_in(&d, "").is_empty());
+        let fix = Decision {
+            entries: vec![tend_core::Entry {
+                seq: 1,
+                ts_ms: 9,
+                causes: vec![],
+                body: Body::Learned {
+                    signature: "s".into(),
+                    message: "m".into(),
+                    test: None,
+                    command: "pytest".into(),
+                    files: vec![],
+                    change: None,
+                },
+            }],
+            ..Decision::default()
+        };
+        save_fixes_in(&d, &[fix], "s1", "/r");
+        assert_eq!(
+            load_fixes_in(&d, "").len(),
+            1,
+            "new fix not glued to the torn line"
+        );
+        assert!(read_lossy(&d.join("fixes.jsonl")).unwrap().contains("s1"));
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

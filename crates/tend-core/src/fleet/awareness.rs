@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use crate::event::PeerActivity;
 use crate::perception::shell;
 
+use super::scope::lexical;
+
 /// Messages delivered with one hook reply, at most. Notices of one kind about one file
 /// make one message (F-S2: 8 workers editing one file gave each 7 notices).
 const MAX_PER_HOOK: usize = 3;
@@ -170,7 +172,6 @@ impl Fleet {
         let Some(rel) = relative(path, &peer.top) else {
             return;
         };
-        let rel = rel.to_string();
         let rel_kind = self.relation(session);
         if rel_kind == Relation::Other {
             return;
@@ -250,7 +251,6 @@ impl Fleet {
         let Some(rel) = relative(path, top) else {
             return;
         };
-        let rel = rel.to_string();
         self.my_edits.insert(rel.clone(), now);
         // An edit reads the file first (Claude Code checks it), so earlier peer-edit
         // notices for it are moot, and a later peer edit is news again.
@@ -424,9 +424,12 @@ pub fn relation(top: &str, common: &str, peer_top: &str, peer_common: &str) -> R
 }
 
 /// `path` relative to directory `top`, if it is inside it.
-fn relative<'a>(path: &'a str, top: &str) -> Option<&'a str> {
-    let rest = path.strip_prefix(top)?.strip_prefix('/')?;
-    (!rest.is_empty()).then_some(rest)
+fn relative(path: &str, top: &str) -> Option<String> {
+    let (path, top) = (lexical(path), lexical(top));
+    let rest = path
+        .strip_prefix(top.trim_end_matches('/'))?
+        .strip_prefix('/')?;
+    (!rest.is_empty()).then(|| rest.to_string())
 }
 
 /// `output` names `rel` as a path: at the start, or after a separator, so `a.py` does
@@ -829,6 +832,14 @@ mod tests {
             "{text}"
         );
         assert_eq!(message(&groups[0][..1]), groups[0][0].text);
+    }
+
+    #[test]
+    fn odd_spellings_of_a_path_are_the_same_file() {
+        let mut f = fleet_with(TOP);
+        f.on_my_edit("/repo//src/./api.rs", 10);
+        edited(&mut f, "/repo/lib/../src/api.rs", 20, 5);
+        assert_eq!(kinds(&mut f), [NoticeKind::PeerEdit]);
     }
 
     #[test]

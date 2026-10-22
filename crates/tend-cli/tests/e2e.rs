@@ -24,6 +24,8 @@ fn hermetic() {
                 std::env::remove_var(k);
             }
         }
+        // The user's own config must not change what a test sees.
+        std::env::set_var("TEND_CONFIG", "/nonexistent/tend-e2e/config.toml");
     });
 }
 
@@ -2874,4 +2876,125 @@ fn fleet_merges_parts_work_three_ways() {
             );
         }
     }
+}
+
+// ---- E1: shim, ipc, daemon ----
+
+/// Run the shim with raw stdin bytes. Returns (exit code, stdout, elapsed).
+fn raw_shim(
+    sock: Option<&Path>,
+    stdin: &[u8],
+    timeout_ms: &str,
+) -> (Option<i32>, Vec<u8>, Duration) {
+    use std::io::Write;
+    let start = std::time::Instant::now();
+    let mut cmd = Command::new(bin());
+    cmd.args(["hook", "PostToolUse"])
+        .env("TEND_HOOK_TIMEOUT_MS", timeout_ms)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    if let Some(s) = sock {
+        cmd.env("TEND_SOCKET", s);
+    }
+    let mut child = cmd.spawn().unwrap();
+    let mut stdin_pipe = child.stdin.take().unwrap();
+    let data = stdin.to_vec();
+    let writer = thread::spawn(move || {
+        let _ = stdin_pipe.write_all(&data);
+    });
+    let out = child.wait_with_output().unwrap();
+    let _ = writer.join();
+    (out.status.code(), out.stdout, start.elapsed())
+}
+
+#[test]
+fn e1_shim_exits_zero_and_prints_nothing_on_bad_input_and_bad_daemons() {
+    let dir = tmp("e1-shim");
+    let dead = dir.join("nothing.sock");
+    let post = fs::read(fixture("post_tool_use_bash.json")).unwrap();
+    // Dead socket, no socket variable, empty / non-UTF-8 / not-JSON stdin.
+    for (sock, input) in [
+        (Some(dead.as_path()), post.clone()),
+        (None, post.clone()),
+        (Some(dead.as_path()), Vec::new()),
+        (Some(dead.as_path()), vec![0xff, 0xfe, b'{']),
+        (Some(dead.as_path()), b"{\"a\":".to_vec()),
+    ] {
+        let (code, out, _) = raw_shim(sock, &input, "200");
+        assert_eq!(code, Some(0));
+        assert!(out.is_empty());
+    }
+    // A live daemon: no trailing newline, a huge payload, non-UTF-8, all print nothing in look mode.
+    let (_d, sock) = start_daemon(&dir.join("session"), "look");
+    let mut huge: serde_json::Value = serde_json::from_slice(&post).unwrap();
+    huge["tool_response"] = serde_json::json!({ "stdout": "x".repeat(12 << 20) });
+    for input in [
+        post.clone(),
+        huge.to_string().into_bytes(),
+        vec![0xff, 0xfe],
+    ] {
+        let (code, out, took) = raw_shim(Some(&sock), &input, "250");
+        assert_eq!(code, Some(0));
+        assert!(out.is_empty(), "look mode never answers");
+        assert!(took < Duration::from_secs(5), "{took:?}");
+    }
+    wait_for_daemon(&sock);
+}
+
+#[test]
+fn e1_a_daemon_that_cannot_write_its_ledger_sends_nothing_and_lives() {
+    let dir = tmp("e1-ledger");
+    let session = dir.join("session");
+    let (_d, sock) = start_daemon(&session, "optimize");
+    // Blobs can no longer be written: persisting a decision with a blob fails.
+    fs::remove_dir_all(session.join("blobs")).unwrap();
+    fs::write(session.join("blobs"), "not a directory").unwrap();
+    let mut pre: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("pre_tool_use_bash_auto.json")).unwrap())
+            .unwrap();
+    pre["tool_input"]["command"] = "ls".into();
+    let post: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("post_tool_use_bash.json")).unwrap())
+            .unwrap();
+    let start = std::time::Instant::now();
+    assert_eq!(hook(&sock, "PreToolUse", &pre), "");
+    assert_eq!(hook(&sock, "PostToolUse", &post), "");
+    // Closed at once, not after the shim's whole timeout; the daemon still answers.
+    assert!(
+        start.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        start.elapsed()
+    );
+    wait_for_daemon(&sock);
+}
+
+#[test]
+fn e1_a_second_daemon_for_a_live_session_does_not_take_its_socket() {
+    let dir = tmp("e1-two");
+    let session = dir.join("session");
+    let (_d, sock) = start_daemon(&session, "look");
+    let out = Command::new(bin())
+        .args(["daemon", "--session-dir"])
+        .arg(&session)
+        .args(["--mode", "look"])
+        .env("TEND_HOME", dir.join("home"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "the second daemon must refuse");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("already"));
+    wait_for_daemon(&sock);
+    // The first daemon still serves: a stale socket (nobody listening) is replaced, though.
+    drop(_d);
+    let (_d2, sock2) = start_daemon(&session, "look");
+    wait_for_daemon(&sock2);
+}
+
+#[test]
+fn e1_daemon_runs_with_spaces_in_the_session_path() {
+    let dir = tmp("e1 spaces");
+    let (_d, sock) = start_daemon(&dir.join("a session  dir"), "look");
+    let post: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("post_tool_use_bash.json")).unwrap())
+            .unwrap();
+    assert_eq!(hook(&sock, "PostToolUse", &post), "");
 }

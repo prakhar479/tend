@@ -6,7 +6,7 @@ Design: [`docs/tend-reference.md`](docs/tend-reference.md). Work items: [`docs/T
 
 ## Status
 
-Prototype. Claude Code only (tested with 2.1.303). Look mode, the default, records only. Optimize mode summarizes test, build, and install output, guards test edits, and steers loops. Linux and WSL are tested; macOS is not yet (N15). Windows is not supported.
+Prototype. Claude Code only (tested with 2.1.303 and 2.1.304). Look mode, the default, records only. Optimize mode summarizes test, build, and install output, guards test edits, and steers loops. Linux and WSL are tested; macOS is not yet (N15). Windows is not supported.
 
 ## Install
 

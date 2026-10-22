@@ -2313,3 +2313,82 @@ fn a_waiting_oneshot_with_a_task_does_not_start_empty_after_a_hub_restart() {
         "its task went back to the queue: {c:?}"
     );
 }
+
+#[test]
+fn a_task_cannot_depend_on_one_that_already_ended_badly_or_on_its_own_parent() {
+    let mut r = Sim::new(preset(Preset::Lead));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    r.ev(add(Actor::User, "Ship it", &[], Some("lead")));
+    // A part may not wait for its own whole: neither could ever finish.
+    let c = r.ev(add(slot("lead-1"), "loop", &["t-1"], None));
+    assert!(
+        refused(&c).is_some_and(|t| t.contains("t-1") && t.contains("part")),
+        "{c:?}"
+    );
+    // A task that is blocked will not become done: depending on it waits forever.
+    r.ev(add(Actor::User, "Other", &[], Some("worker")));
+    r.ev(FleetEvent::TaskBlocked {
+        by: Actor::User,
+        task: "t-2".into(),
+        reason: "no".into(),
+    });
+    assert_eq!(task_state(&r, "t-2"), TaskState::Blocked);
+    let c = r.ev(add(Actor::User, "After", &["t-2"], Some("worker")));
+    assert!(
+        refused(&c).is_some_and(|t| t.contains("t-2") && t.contains("blocked")),
+        "{c:?}"
+    );
+}
+
+#[test]
+fn a_second_exit_for_the_same_session_changes_nothing() {
+    let mut r = Sim::new(preset(Preset::Lead));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let exit = || FleetEvent::Exited {
+        slot: "lead-1".into(),
+        code: None,
+    };
+    r.ev(usage("lead-1", 5, 1.0));
+    r.ev(exit());
+    let (restarts, spent) = (r.m.slots()["lead-1"].restarts, r.m.spend().1);
+    let cmds = r.ev(exit());
+    assert!(cmds.is_empty(), "{cmds:?}");
+    assert_eq!(r.m.slots()["lead-1"].restarts, restarts);
+    assert_eq!(r.m.spend().1, spent);
+    // A failed slot stays failed.
+    for _ in 0..MAX_RESTARTS {
+        r.now += 1_000_000;
+        let c = r.ev(FleetEvent::Tick);
+        r.start_all(&c);
+        r.ev(exit());
+    }
+    assert_eq!(r.state("lead-1"), SlotState::Failed);
+    r.ev(exit());
+    assert_eq!(r.state("lead-1"), SlotState::Failed);
+}
+
+#[test]
+fn stopping_a_waiting_slot_returns_its_bound_task_to_the_queue() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead", "limits": {"sessions": 2}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let c = r.ev(add(slot("lead-1"), "one", &[], None));
+    r.start_all(&c);
+    let c = r.ev(add(slot("lead-1"), "two", &[], None));
+    r.start_all(&c);
+    assert_eq!(r.state("worker-2"), SlotState::Waiting);
+    r.ev(FleetEvent::StopRequest {
+        by: Actor::User,
+        slot: "worker-2".into(),
+    });
+    assert_eq!(r.state("worker-2"), SlotState::Stopped);
+    assert!(
+        r.m.tasks()
+            .all(|t| t.slot.as_deref() != Some("worker-2") || t.state != TaskState::Bound),
+        "a task stays bound to a stopped slot"
+    );
+}

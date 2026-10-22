@@ -51,6 +51,8 @@ fn params(level: u8) -> Option<Params> {
 
 fn is_pass(l: &str) -> bool {
     re!(r"(\bPASSED\b|\.\.\. ok$|^\s*(✓|√|✔)\s|^ok\s+\S|--- PASS|^\s*PASS\s)").is_match(l)
+        // A failure that quotes the word (`expected PASSED`) is still a failure.
+        && !re!(r"\b(FAILED|FAIL|ERROR)\b|\.\.\. FAILED").is_match(l)
 }
 
 /// Claude Code's mark where it cut long output: `... [16523 characters truncated] ...`.
@@ -451,6 +453,20 @@ mod tests {
                 "level {level}"
             );
         }
+    }
+
+    #[test]
+    fn failure_line_mentioning_passed_stays() {
+        let mut out = String::new();
+        for i in 0..300 {
+            out.push_str(&format!("tests/t_{i}.py::test_ok PASSED\n"));
+        }
+        out.push_str("FAILED tests/t.py::test_z - AssertionError: expected PASSED got ERROR\n");
+        for i in 0..300 {
+            out.push_str(&format!("tests/u_{i}.py::test_ok PASSED\n"));
+        }
+        let s = shape(&out, 3, 0.9).unwrap();
+        assert!(s.text.contains("test_z - AssertionError"), "{}", s.text);
     }
 
     #[test]

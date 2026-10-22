@@ -1,0 +1,21 @@
+# kind<TAB>command. `\n` is a newline. kinds: test, build, write, nowrite, other
+write	perl -pi -e 's/a/b/' f.py
+write	perl -i.bak -pe 's/a/b/' f.py
+write	sed --in-place s/a/b/ f.py
+write	sed -Ei 's/a/b/' f.py
+nowrite	perl -Mstrict -e 'print 1' f.py
+nowrite	sed -n '1,5p' f.py
+test	bash -c 'pytest -q'
+test	sh -c "cd api && cargo test"
+test	sudo -u ci pytest
+test	command pytest
+test	if true; then pytest; fi
+test	! pytest
+test	cargo +nightly test
+test	cargo -q test
+build	cargo +nightly build
+test	python -u -W ignore -m pytest
+test	uvx pytest
+test	pipx run pytest
+test	cat <<\EOF\nx\nEOF\npytest
+other	echo hello

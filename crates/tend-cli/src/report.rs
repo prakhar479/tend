@@ -26,15 +26,17 @@ pub struct Usage {
 
 impl Usage {
     fn add(&mut self, o: &Usage) {
-        self.input += o.input;
-        self.cache_creation += o.cache_creation;
-        self.cache_read += o.cache_read;
-        self.output += o.output;
-        self.messages += o.messages;
+        self.input = self.input.saturating_add(o.input);
+        self.cache_creation = self.cache_creation.saturating_add(o.cache_creation);
+        self.cache_read = self.cache_read.saturating_add(o.cache_read);
+        self.output = self.output.saturating_add(o.output);
+        self.messages = self.messages.saturating_add(o.messages);
     }
 
     pub fn prompt_total(&self) -> u64 {
-        self.input + self.cache_creation + self.cache_read
+        self.input
+            .saturating_add(self.cache_creation)
+            .saturating_add(self.cache_read)
     }
 }
 
@@ -117,7 +119,9 @@ pub fn k(n: u64) -> String {
 }
 
 pub fn pct(part: u64, whole: u64) -> u64 {
-    (part * 100).checked_div(whole).unwrap_or(0)
+    (u128::from(part) * 100)
+        .checked_div(u128::from(whole))
+        .map_or(0, |p| u64::try_from(p).unwrap_or(u64::MAX))
 }
 
 /// Whole minutes, or seconds under a minute.
@@ -172,24 +176,26 @@ pub fn totals(entries: &[Entry]) -> Totals {
         .map(|e| e.seq)
         .collect();
     t.guard_allowed = overrides.len() as u64;
-    for (i, e) in entries.iter().enumerate() {
-        if let Body::Action {
-            action:
-                ActionKind::Steer {
-                    trigger: SteerTrigger::Loop { signatures, .. },
-                    ..
-                },
-            ..
-        } = &e.body
-        {
-            let again = entries[i + 1..]
-                .iter()
-                .filter(|later| {
-                    matches!(&later.body, Body::Judgment { question, subject, .. }
-                        if question == "same_failure" && signatures.contains(subject))
-                })
-                .count();
-            t.loops_stopped += u64::from(again <= STOPPED_WITHIN_RUNS);
+    // One pass from the end: how often each failure was judged "same" after this point.
+    let mut later: HashMap<&str, usize> = HashMap::new();
+    for e in entries.iter().rev() {
+        match &e.body {
+            Body::Judgment {
+                question, subject, ..
+            } if question == "same_failure" => *later.entry(subject.as_str()).or_default() += 1,
+            Body::Action {
+                action:
+                    ActionKind::Steer {
+                        trigger: SteerTrigger::Loop { signatures, .. },
+                        ..
+                    },
+                ..
+            } => {
+                let distinct: HashSet<&str> = signatures.iter().map(String::as_str).collect();
+                let again: usize = distinct.iter().filter_map(|s| later.get(s)).sum();
+                t.loops_stopped += u64::from(again <= STOPPED_WITHIN_RUNS);
+            }
+            _ => {}
         }
     }
     for e in entries {
@@ -667,8 +673,10 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
         }
     }
     // One transcript per conversation (`/clear` and `/resume` start another, R3).
+    let mut seen_transcripts = HashSet::new();
     let usage = transcripts
         .iter()
+        .filter(|t| seen_transcripts.insert(t.as_str()))
         .filter_map(|t| usage_from_transcript(&find_transcript(Path::new(t))))
         .reduce(|mut a, b| {
             a.add(&b);
@@ -891,8 +899,8 @@ fn describe(e: &Entry) -> String {
 /// The entry an id names: an action (a-N), an output (o-N), or an entry number.
 pub fn find_target<'a>(entries: &'a [Entry], id: &str) -> Option<&'a Entry> {
     entries.iter().find(|e| match &e.body {
-        Body::Action { id: a, .. } => a == id,
-        Body::Output { id: o, .. } => o == id,
+        Body::Action { id: a, .. } if a == id => true,
+        Body::Output { id: o, .. } if o == id => true,
         _ => id.parse::<u64>().ok() == Some(e.seq),
     })
 }
@@ -1269,5 +1277,75 @@ mod tests {
         let u = usage_from_transcript(&p).unwrap();
         assert_eq!(u.output, 4, "both messages: {u:?}");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Token counts come from a file the user does not control: huge ones must not
+    /// overflow (a panic in debug builds, a wrong total in release).
+    #[test]
+    fn huge_usage_saturates() {
+        let big = u64::MAX;
+        let l = |id: &str| {
+            format!(
+                r#"{{"message":{{"id":"{id}","usage":{{"input_tokens":{big},"cache_read_input_tokens":{big},"output_tokens":{big}}}}}}}"#
+            )
+        };
+        let u = usage_from_lines([l("a"), l("b")].into_iter()).unwrap();
+        assert_eq!(u.output, u64::MAX);
+        assert_eq!(u.prompt_total(), u64::MAX);
+        assert_eq!(pct(u64::MAX, u64::MAX), 100);
+    }
+
+    /// `tend why 1` takes an entry number even when that entry is an action or an output.
+    #[test]
+    fn why_takes_entry_numbers_of_actions_and_outputs() {
+        let entries = [
+            entry(7, output("o-1", 10)),
+            entry(8, shape("a-1", 10, 1, true, false)),
+        ];
+        assert_eq!(find_target(&entries, "7").map(|e| e.seq), Some(7));
+        assert_eq!(find_target(&entries, "8").map(|e| e.seq), Some(8));
+        assert_eq!(find_target(&entries, "a-1").map(|e| e.seq), Some(8));
+        assert!(find_target(&entries, "9").is_none());
+    }
+
+    /// A transcript named by two conversations is one transcript.
+    #[test]
+    fn a_transcript_named_twice_counts_once() {
+        let d = std::env::temp_dir().join(format!("tend-usage-twice-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("t.jsonl");
+        std::fs::write(
+            &p,
+            r#"{"message":{"id":"a","usage":{"input_tokens":1,"output_tokens":2}}}"#,
+        )
+        .unwrap();
+        let path = p.display().to_string();
+        let entries = [
+            entry(
+                0,
+                Body::Event {
+                    event: Event::SessionStarted {
+                        agent: "a".into(),
+                        cwd: String::new(),
+                        transcript_path: Some(path.clone()),
+                        mode: None,
+                    },
+                },
+            ),
+            entry(
+                1,
+                Body::Event {
+                    event: Event::SessionStarted {
+                        agent: "a".into(),
+                        cwd: String::new(),
+                        transcript_path: Some(path),
+                        mode: None,
+                    },
+                },
+            ),
+        ];
+        let r = render("t", &entries, true, false);
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(r.contains("1 messages"), "{r}");
     }
 }

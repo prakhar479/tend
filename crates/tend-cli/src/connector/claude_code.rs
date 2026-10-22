@@ -485,7 +485,11 @@ impl Connector for ClaudeCode {
         match hook_event {
             "PreToolUse" => {
                 if r.wrap {
-                    let mut input = payload.get("tool_input").cloned().unwrap_or(json!({}));
+                    let mut input = payload
+                        .get("tool_input")
+                        .filter(|i| i.is_object())
+                        .cloned()
+                        .unwrap_or(json!({}));
                     let command = s(&input, "command").to_string();
                     // The daemon is the tend binary; its absolute path does not depend on
                     // the PATH in the agent's shell snapshot (R0.4).
@@ -1071,5 +1075,19 @@ mod tests {
         assert_eq!(out["hookSpecificOutput"]["hookEventName"], "PreToolUse");
         assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "ask");
         assert_eq!(out["hookSpecificOutput"]["permissionDecisionReason"], "why");
+    }
+
+    #[test]
+    fn wrap_with_non_object_tool_input_does_not_panic() {
+        let c = ClaudeCode::default();
+        let r = Response {
+            wrap: true,
+            ..Default::default()
+        };
+        for input in [json!("ls"), json!([1]), json!(7), Value::Null] {
+            let p = json!({ "tool_use_id": "t1", "tool_input": input });
+            let out = c.encode("PreToolUse", &p, &r).unwrap();
+            assert!(out["hookSpecificOutput"]["updatedInput"].is_object());
+        }
     }
 }

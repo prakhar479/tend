@@ -549,6 +549,16 @@ fn resolve_at(
             }
         }
     }
+    // A team the preset brings (`tree`) is held to the depth limit too.
+    for (name, r) in &roles {
+        let from_file = file.role.get(name).is_some_and(|f| f.team.is_some());
+        if r.team.is_some() && !from_file && level + 1 > max_level {
+            errors.push(format!(
+                "{at}role.{name}.team is {} levels deep, but the fleet allows {max_level}.",
+                level + 1
+            ));
+        }
+    }
     // In presets with a lead, a role the file adds is a member: it takes tasks from the
     // lead and reports to it, like the preset's own members.
     if matches!(p, Preset::Lead | Preset::Specialists | Preset::Tree) {
@@ -679,7 +689,7 @@ fn check(
             "{at}the fleet has no roles. Set a preset or add a role."
         ));
     }
-    let mut start = 0;
+    let mut start: u32 = 0;
     for (name, r) in roles {
         let here = format!("{at}role.{name}");
         if r.max == 0 || r.min > r.max {
@@ -706,7 +716,7 @@ fn check(
             ));
         }
         if r.run == Run::Stream {
-            start += r.min;
+            start = start.saturating_add(r.min);
         }
     }
     if start > limits.sessions {
@@ -782,7 +792,11 @@ pub fn tokens(a: &Amount) -> Option<u64> {
                 _ => (t, 1.0),
             };
             let v: f64 = num.trim().parse().ok()?;
-            (v >= 0.0).then_some((v * mul) as u64)
+            let v = v * mul;
+            // Refuse inf, NaN, and anything a u64 cannot hold, rather than saturate.
+            (0.0..18_446_744_073_709_551_615.0)
+                .contains(&v)
+                .then_some(v as u64)
         }
     }
 }
@@ -1179,5 +1193,25 @@ mod tests {
         .unwrap();
         let e = resolve(&f).unwrap_err();
         assert!(e.iter().any(|m| m.contains("stuck_minutes")), "{e:?}");
+    }
+
+    #[test]
+    fn huge_replicas_and_token_amounts_do_not_overflow() {
+        let e = errors(serde_json::json!({
+            "role": {
+                "a": {"run": "stream", "replicas": 4000000000u64},
+                "b": {"run": "stream", "replicas": 4000000000u64}
+            }
+        }));
+        assert!(e.iter().any(|m| m.contains("limits.sessions")), "{e:?}");
+        assert_eq!(tokens(&Amount::Text("1e30".into())), None);
+        assert_eq!(tokens(&Amount::Text("inf".into())), None);
+        assert_eq!(tokens(&Amount::Text("NaN".into())), None);
+    }
+
+    #[test]
+    fn a_preset_team_obeys_limits_depth() {
+        let e = errors(serde_json::json!({"preset": "tree", "limits": {"depth": 1}}));
+        assert!(e.iter().any(|m| m.contains("levels deep")), "{e:?}");
     }
 }

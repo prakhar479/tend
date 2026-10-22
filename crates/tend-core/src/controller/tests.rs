@@ -1613,3 +1613,26 @@ fn removing_a_test_this_session_added_is_not_weakening() {
     assert!(!warned(&d2), "its own probe");
     assert!(warned(&c.handle(changed(orig, ""), 3)), "an original test");
 }
+
+#[test]
+fn late_session_start_records_the_real_mode() {
+    let mut c = ctl(Mode::Optimize);
+    let d = c.handle_unanswered(
+        Event::SessionStarted {
+            agent: "a".into(),
+            cwd: "/".into(),
+            transcript_path: None,
+            mode: None,
+        },
+        0,
+    );
+    assert!(d.entries.iter().any(|e| matches!(
+        &e.body,
+        Body::Event {
+            event: Event::SessionStarted {
+                mode: Some(Mode::Optimize),
+                ..
+            }
+        }
+    )));
+}

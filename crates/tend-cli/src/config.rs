@@ -26,12 +26,11 @@ use tend_core::{Config, FleetSetting};
 
 /// $TEND_CONFIG, then $XDG_CONFIG_HOME/tend/config.toml, then ~/.config/tend/config.toml.
 pub fn path() -> PathBuf {
-    if let Some(p) = env::var_os("TEND_CONFIG") {
-        return PathBuf::from(p);
+    if let Some(p) = crate::paths::env_path("TEND_CONFIG") {
+        return p;
     }
-    let base = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    let base = crate::paths::env_path("XDG_CONFIG_HOME")
+        .or_else(|| crate::paths::env_path("HOME").map(|h| h.join(".config")))
         .unwrap_or_else(env::temp_dir);
     base.join("tend/config.toml")
 }
@@ -79,6 +78,7 @@ fn parse(text: &str) -> (Config, Vec<String>) {
     let mut c = Config::default();
     let mut warnings = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for (n, raw) in text.lines().enumerate() {
         let line = raw.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
@@ -102,9 +102,11 @@ fn apply(c: &mut Config, line: &str, seen: &mut std::collections::BTreeSet<Strin
             None => bail!("unknown key `{key}`"),
         }
     }
-    if !seen.insert(key.to_string()) {
+    if seen.contains(key) {
         bail!("`{key}` is set twice; the first value stays");
     }
+    // Quotes are allowed on any value, as in TOML.
+    let value = value.trim_matches('"');
     let int = |min: u64, max: u64| -> Result<u64> {
         let v: u64 = value.parse().map_err(|e| anyhow!("{key}: {e}"))?;
         if !(min..=max).contains(&v) {
@@ -126,7 +128,7 @@ fn apply(c: &mut Config, line: &str, seen: &mut std::collections::BTreeSet<Strin
         "idle_gap_minutes" => c.idle_gap_minutes = int(1, 24 * 60)?,
         "keep_days" => c.keep_days = int(0, 36_500)?,
         "plugin_mode" => {
-            c.plugin_mode = match value.trim_matches('"') {
+            c.plugin_mode = match value {
                 "look" => tend_core::Mode::Look,
                 "optimize" => tend_core::Mode::Optimize,
                 v => bail!("{key} must be look or optimize, got {v}"),
@@ -171,6 +173,7 @@ fn apply(c: &mut Config, line: &str, seen: &mut std::collections::BTreeSet<Strin
         }
         _ => unreachable!("checked against KEYS"),
     }
+    seen.insert(key.to_string());
     Ok(())
 }
 
@@ -244,12 +247,30 @@ mod tests {
     }
 
     #[test]
+    fn a_byte_order_mark_is_ignored() {
+        let (c, w) = parse("\u{feff}loop_threshold = 4\n");
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(c.loop_threshold, 4);
+    }
+
+    #[test]
     fn fleet_setting() {
         assert_eq!(parse("fleet = on").0.fleet, FleetSetting::On);
         assert_eq!(parse("fleet = off").0.fleet, FleetSetting::Off);
         let (c, w) = parse("fleet = yes");
         assert_eq!(c.fleet, FleetSetting::Look);
         assert!(w[0].contains("off, look, or on"), "{w:?}");
+    }
+
+    /// A rejected line does not count as the first value, and quotes work everywhere.
+    #[test]
+    fn rejected_first_value_is_not_the_first() {
+        let (c, w) =
+            parse("loop_threshold = 0\nloop_threshold = 4\nfleet = \"on\"\nnotify = \"true\"\n");
+        assert_eq!(c.loop_threshold, 4);
+        assert_eq!(c.fleet, FleetSetting::On);
+        assert!(c.notify);
+        assert_eq!(w.len(), 1, "{w:?}");
     }
 
     #[test]

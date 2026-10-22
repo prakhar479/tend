@@ -503,4 +503,30 @@ mod tests {
         }
         assert_eq!(tail.offset, text.len() as u64, "read past the long line");
     }
+
+    #[test]
+    fn a_round_over_many_idle_peers_is_cheap_and_quiet() {
+        let d = tmp("many");
+        let mut socks = Vec::new();
+        for n in 0..25 {
+            let dir = d.join(format!("s{n:02}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("ledger.jsonl"), PEER_LEDGER).unwrap();
+            socks.push(std::os::unix::net::UnixListener::bind(socket_path(&dir)).unwrap());
+        }
+        let mut w = Watcher::new(d.join("me"), "/elsewhere/.git".into());
+        let first = w.poll(&d, 0);
+        assert_eq!(first.len(), 25, "one start per peer");
+        let t = std::time::Instant::now();
+        for r in 1..=20 {
+            assert!(w.poll(&d, r).is_empty(), "nothing new");
+        }
+        let per_round = t.elapsed() / 20;
+        eprintln!("idle round over 25 peers: {per_round:?}");
+        assert!(
+            per_round < std::time::Duration::from_millis(50),
+            "{per_round:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

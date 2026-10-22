@@ -137,47 +137,6 @@ pub fn settle_undelivered(entries: &mut [Entry]) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn undelivered_actions_read_as_not_applied() {
-        let action = |id: &str| Entry {
-            seq: 0,
-            ts_ms: 0,
-            causes: vec![],
-            body: Body::Action {
-                id: id.into(),
-                action: ActionKind::Wrap {
-                    tool_use_id: "t".into(),
-                },
-                reason: "Wrapped.".into(),
-                applied: true,
-                unsupported: false,
-            },
-        };
-        let late = Entry {
-            seq: 2,
-            ts_ms: 0,
-            causes: vec![0],
-            body: Body::Undelivered {
-                actions: vec!["a-1".into()],
-                reason: "late".into(),
-            },
-        };
-        let mut entries = vec![action("a-1"), action("a-2"), late];
-        settle_undelivered(&mut entries);
-        assert!(
-            matches!(&entries[0].body, Body::Action { applied: false, reason, .. } if reason.ends_with("too late]"))
-        );
-        assert!(matches!(
-            &entries[1].body,
-            Body::Action { applied: true, .. }
-        ));
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ActionKind {
@@ -244,4 +203,45 @@ pub enum SteerTrigger {
     Cycle {
         path: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn undelivered_actions_read_as_not_applied() {
+        let action = |id: &str| Entry {
+            seq: 0,
+            ts_ms: 0,
+            causes: vec![],
+            body: Body::Action {
+                id: id.into(),
+                action: ActionKind::Wrap {
+                    tool_use_id: "t".into(),
+                },
+                reason: "Wrapped.".into(),
+                applied: true,
+                unsupported: false,
+            },
+        };
+        let late = Entry {
+            seq: 2,
+            ts_ms: 0,
+            causes: vec![0],
+            body: Body::Undelivered {
+                actions: vec!["a-1".into()],
+                reason: "late".into(),
+            },
+        };
+        let mut entries = vec![action("a-1"), action("a-2"), late];
+        settle_undelivered(&mut entries);
+        assert!(
+            matches!(&entries[0].body, Body::Action { applied: false, reason, .. } if reason.ends_with("too late]"))
+        );
+        assert!(matches!(
+            &entries[1].body,
+            Body::Action { applied: true, .. }
+        ));
+    }
 }

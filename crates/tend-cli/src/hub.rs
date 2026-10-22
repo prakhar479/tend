@@ -292,7 +292,8 @@ struct Hub {
     tx: Sender<Msg>,
     /// Events the hub itself caused while running commands (a spawn's start).
     queue: VecDeque<FleetEvent>,
-    down_since: Option<u64>,
+    /// A monotonic instant: the wall clock may go back (rule: waits never use it).
+    down_since: Option<std::time::Instant>,
     /// Each slot's working directory, kept after its session ends (checks run there).
     worktrees: BTreeMap<String, PathBuf>,
     /// The worktree's tree when each task was delivered, for the audit at check time
@@ -332,6 +333,9 @@ pub fn run_hub(dir: &Path, resume: bool) -> Result<()> {
         .create(true)
         .append(true)
         .open(dir.join("ledger.jsonl"))?;
+    // A hub killed mid-write leaves a torn last line: end it, so the next record is
+    // not glued to it and lost.
+    end_torn_line(&dir.join("ledger.jsonl"), &ledger);
     let mut hub = Hub {
         dir: dir.to_path_buf(),
         model: Model::new(meta.spec.clone()),
@@ -392,6 +396,17 @@ pub fn run_hub(dir: &Path, resume: bool) -> Result<()> {
     Ok(())
 }
 
+fn end_torn_line(path: &Path, file: &File) {
+    if fs::read(path).is_ok_and(|b| b.last().is_some_and(|c| *c != b'\n')) {
+        let _ = (&*file).write_all(b"\n");
+    }
+}
+
+/// How long to wait for a message before the next tick, `since_tick` after the last.
+fn tick_wait(since_tick: Duration) -> Duration {
+    TICK.saturating_sub(since_tick)
+}
+
 fn listen(listener: UnixListener, tx: Sender<Msg>) {
     for conn in listener.incoming().flatten() {
         let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
@@ -434,11 +449,9 @@ fn reply(mut conn: UnixStream, message: &str) {
 impl Hub {
     fn serve(&mut self, rx: Receiver<Msg>) {
         // Tick on elapsed time: a busy hub (status polls, output) must still tick.
-        let mut last_tick = now_ms();
-        let tick_ms = TICK.as_millis() as u64;
+        let mut last_tick = std::time::Instant::now();
         loop {
-            let wait = tick_ms.saturating_sub(now_ms().saturating_sub(last_tick));
-            match rx.recv_timeout(Duration::from_millis(wait)) {
+            match rx.recv_timeout(tick_wait(last_tick.elapsed())) {
                 Ok(Msg::Event(e)) => {
                     self.apply(e);
                 }
@@ -460,8 +473,8 @@ impl Hub {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
-            if now_ms().saturating_sub(last_tick) >= tick_ms {
-                last_tick = now_ms();
+            if last_tick.elapsed() >= TICK {
+                last_tick = std::time::Instant::now();
                 self.apply(FleetEvent::Tick);
                 // A terminal session that went away without `leave` (F4).
                 let gone: Vec<String> = self
@@ -489,7 +502,7 @@ impl Hub {
                     return;
                 }
                 // Sessions that ignore every signal: do not wait forever.
-                if now_ms().saturating_sub(since) > 30_000 {
+                if since.elapsed() > Duration::from_secs(30) {
                     for p in self.procs.values() {
                         kill(-p.pid, libc::SIGKILL);
                     }
@@ -657,7 +670,7 @@ impl Hub {
     /// and run every command. Returns the records of `event` itself.
     fn apply(&mut self, event: FleetEvent) -> Vec<FleetRecord> {
         if matches!(event, FleetEvent::Down) && self.down_since.is_none() {
-            self.down_since = Some(now_ms());
+            self.down_since = Some(std::time::Instant::now());
         }
         let mut first = None;
         self.queue.push_back(event);
@@ -1172,6 +1185,13 @@ impl Hub {
         }
         let diff =
             git(&["diff-tree", "-p", "--binary", &into, &tree]).map_err(|e| e.to_string())?;
+        if !diff.status.success() {
+            return Err(String::from_utf8_lossy(&diff.stderr)
+                .lines()
+                .next()
+                .unwrap_or("git diff-tree failed")
+                .to_string());
+        }
         let mut apply = Command::new("git")
             .arg("-C")
             .arg(target)
@@ -1244,18 +1264,8 @@ impl Hub {
             }
             moved = true;
         }
-        let new = git_out(
-            src,
-            &[
-                "-c",
-                "core.quotePath=false",
-                "ls-files",
-                "--others",
-                "--exclude-standard",
-            ],
-        )
-        .unwrap_or_default();
-        for f in new.lines() {
+        let new = untracked(src);
+        for f in &new {
             let to = target.join(f);
             if to.exists() {
                 continue;
@@ -1578,9 +1588,11 @@ fn run_with_timeout(dir: &Path, command: &str, timeout: Duration) -> (Option<i32
         String::from_utf8_lossy(&buf).to_string()
     });
     let start = std::time::Instant::now();
+    let mut signal = None;
     let code = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                signal = std::os::unix::process::ExitStatusExt::signal(&status);
                 // Anything the check left running holds the pipe open and would block
                 // the reader, and every later check behind the lock.
                 kill(-(child.id() as i32), libc::SIGKILL);
@@ -1600,6 +1612,11 @@ fn run_with_timeout(dir: &Path, command: &str, timeout: Duration) -> (Option<i32
             "\n[tend: the check ran over {} min and was stopped]",
             timeout.as_secs() / 60
         ));
+    }
+    if code.is_none() && start.elapsed() < timeout {
+        if let Some(sig) = signal {
+            output.push_str(&format!("\n[tend: the check was killed by signal {sig}]"));
+        }
     }
     (code, output)
 }
@@ -1635,18 +1652,8 @@ fn diff_size(wt: &Path, base_tree: Option<&str>) -> Option<u64> {
             Some(f.next()?.parse::<u64>().unwrap_or(0) + f.next()?.parse::<u64>().unwrap_or(0))
         })
         .sum();
-    let new = git_out(
-        wt,
-        &[
-            "-c",
-            "core.quotePath=false",
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-        ],
-    )
-    .unwrap_or_default();
-    for f in new.lines() {
+    let new = untracked(wt);
+    for f in &new {
         n += fs::read_to_string(wt.join(f)).map_or(0, |t| t.lines().count() as u64);
     }
     Some(n)
@@ -1902,6 +1909,27 @@ fn branch_name(fleet: &str, name: &str) -> String {
     format!("tend/{fleet}/{}", file_name(name))
 }
 
+/// New files (untracked, not ignored), exact: `-z`, because git quotes a name with a
+/// quote, tab, or backslash otherwise, and `git_out` trims a name's leading space.
+fn untracked(dir: &Path) -> Vec<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["ls-files", "-z", "--others", "--exclude-standard"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => o
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|n| !n.is_empty())
+            .map(|n| String::from_utf8_lossy(n).to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn git_out(dir: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
         .arg("-C")
@@ -2032,9 +2060,10 @@ fn read_meta(dir: &Path) -> Result<Meta> {
 
 /// The fleet's records, from its ledger.
 pub fn read_ledger(dir: &Path) -> Vec<FleetRecord> {
-    let Ok(text) = fs::read_to_string(dir.join("ledger.jsonl")) else {
+    let Ok(bytes) = fs::read(dir.join("ledger.jsonl")) else {
         return Vec::new();
     };
+    let text = String::from_utf8_lossy(&bytes);
     text.lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect()
@@ -2172,9 +2201,10 @@ fn render_tasks(model: &Model) -> String {
 
 /// The last 20 lines of an inbox file, oldest first.
 fn render_inbox(path: &Path) -> String {
-    let Ok(text) = fs::read_to_string(path) else {
+    let Ok(bytes) = fs::read(path) else {
         return "No messages.".into();
     };
+    let text = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = text.lines().collect();
     let mut out = String::new();
     for l in &lines[lines.len().saturating_sub(20)..] {
@@ -2305,7 +2335,7 @@ pub fn list() -> String {
 }
 
 fn line_count(path: &Path) -> usize {
-    fs::read_to_string(path).map_or(0, |t| t.lines().count())
+    fs::read(path).map_or(0, |b| String::from_utf8_lossy(&b).lines().count())
 }
 
 /// The user's fleet messages since `tend inbox` last showed them (G6).
@@ -2314,7 +2344,10 @@ fn unread_for_user(dir: &Path) -> usize {
         .ok()
         .and_then(|t| t.trim().parse().ok())
         .unwrap_or(0);
-    line_count(&dir.join("inbox.jsonl")).saturating_sub(read)
+    let total = line_count(&dir.join("inbox.jsonl"));
+    // A count past the end means the inbox got shorter: nothing of it was read.
+    let read = if read > total { 0 } else { read };
+    total - read
 }
 
 /// Messages a fleet session's inbox holds that its agent has not seen yet: the lines
@@ -2334,8 +2367,8 @@ pub fn unread_for_session(inbox: &Path, entries: &[tend_core::Entry]) -> usize {
     line_count(inbox).saturating_sub(seen)
 }
 
-/// `tend fleet prune`: worktrees of fleets that are down, with no uncommitted changes
-/// and no commits beyond the fleet's base. Lists them; removes them with `yes`.
+static NEXT_INDEX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Whether everything `wt` changed since `base` is already in `repo`'s HEAD: its diff
 /// (commits and uncommitted edits) reverses cleanly on the index, and each new file
 /// is at HEAD with the same content. Nothing is changed.
@@ -2361,9 +2394,30 @@ fn changes_in_head(repo: &Path, wt: &Path, base: &str) -> bool {
         return false;
     }
     if !diff.stdout.is_empty() {
+        // Against HEAD's tree, not the repo's index: a change only staged is not in HEAD.
+        let index = std::env::temp_dir().join(format!(
+            "tend-prune-index-{}-{}",
+            std::process::id(),
+            NEXT_INDEX.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let read = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["read-tree", "HEAD"])
+            .env("GIT_INDEX_FILE", &index)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !read {
+            let _ = fs::remove_file(&index);
+            return false;
+        }
         let applies = Command::new("git")
             .arg("-C")
             .arg(repo)
+            .env("GIT_INDEX_FILE", &index)
             .args(["apply", "--check", "-R", "--cached", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -2376,6 +2430,7 @@ fn changes_in_head(repo: &Path, wt: &Path, base: &str) -> bool {
                 c.wait()
             })
             .is_ok_and(|s| s.success());
+        let _ = fs::remove_file(&index);
         if !applies {
             return false;
         }
@@ -2406,6 +2461,8 @@ fn changes_in_head(repo: &Path, wt: &Path, base: &str) -> bool {
     })
 }
 
+/// `tend fleet prune`: worktrees of fleets that are down, with no uncommitted changes
+/// and no commits beyond the fleet's base. Lists them; removes them with `yes`.
 pub fn prune(yes: bool) -> Result<String> {
     let mut out = String::new();
     let (mut removed, mut kept) = (0, 0);
@@ -2569,7 +2626,10 @@ pub fn report(spec: Option<&str>) -> Result<String> {
 /// unstaged, or new.
 fn changed_files(wt: &Path, base: &str) -> Vec<String> {
     let mut files: Vec<String> = Vec::new();
-    if let Some(t) = git_out(wt, &["diff", "--name-only", base]) {
+    if let Some(t) = git_out(
+        wt,
+        &["-c", "core.quotePath=false", "diff", "--name-only", base],
+    ) {
         files.extend(t.lines().map(String::from));
     }
     if let Some(t) = git_out(
@@ -3051,6 +3111,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_read_count_past_a_shorter_inbox_is_not_zero_forever() {
+        let dir = std::env::temp_dir().join(format!("tend-unread-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("inbox.jsonl"), "{}\n{}\n").unwrap();
+        fs::write(dir.join("inbox.read"), "5").unwrap();
+        assert_eq!(unread_for_user(&dir), 2);
+        fs::write(dir.join("inbox.read"), "1").unwrap();
+        assert_eq!(unread_for_user(&dir), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_non_utf8_byte_in_the_ledger_hides_only_its_line() {
+        let dir = std::env::temp_dir().join(format!("tend-ledger-utf8-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let good = r#"{"seq":1,"ts_ms":5,"body":{"kind":"event","event":{"type":"usage","slot":"w-1","tokens":3,"cost_usd":0.1}}}"#;
+        let mut bytes = format!("{good}\n").into_bytes();
+        bytes.extend_from_slice(b"{\"seq\":2,\xff\xfe\n");
+        bytes.extend_from_slice(format!("{good}\n").as_bytes());
+        fs::write(dir.join("ledger.jsonl"), bytes).unwrap();
+        let n = read_ledger(&dir).len();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(n, 2);
+    }
+
+    #[test]
     fn usage_and_the_usage_limit_come_from_result_lines() {
         let line = r#"{"type":"result","subtype":"success","total_cost_usd":0.0035,"usage":{"input_tokens":2,"cache_creation_input_tokens":242,"cache_read_input_tokens":22345,"output_tokens":5},"result":"ok"}"#;
         assert_eq!(
@@ -3144,6 +3231,26 @@ mod tests {
         };
         assert_eq!(unread_for_session(&inbox, &[seen]), 2);
         assert_eq!(unread_for_session(&d.join("missing"), &[]), 0);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_tick_wait_is_what_is_left_of_a_tick_and_never_more() {
+        assert_eq!(tick_wait(Duration::ZERO), TICK);
+        assert_eq!(tick_wait(TICK / 2), TICK / 2);
+        assert_eq!(tick_wait(TICK * 5), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_torn_ledger_line_does_not_swallow_the_next_record() {
+        let d = std::env::temp_dir().join(format!("tend-torn-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let p = d.join("ledger.jsonl");
+        fs::write(&p, "{\"torn\":").unwrap();
+        let f = OpenOptions::new().append(true).open(&p).unwrap();
+        end_torn_line(&p, &f);
+        assert_eq!(fs::read_to_string(&p).unwrap().lines().count(), 1);
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -3246,6 +3353,117 @@ tokens   = "20M"
         // One more change in the worktree: not taken.
         fs::write(wt.join("a.txt"), "a\nb\nc\n").unwrap();
         assert!(!changes_in_head(&repo, &wt, &base));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_check_killed_by_a_signal_says_so() {
+        let d = std::env::temp_dir();
+        let (code, out) = run_with_timeout(&d, "echo partial; kill -9 $$", Duration::from_secs(20));
+        assert_eq!(code, None);
+        assert!(out.contains("killed by signal 9"), "{out}");
+    }
+
+    #[test]
+    fn new_files_with_quoted_names_are_counted_and_listed() {
+        let d = std::env::temp_dir().join(format!("tend-quoted-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&d)
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "base",
+        ]);
+        fs::write(d.join("a\"b.txt"), "1\n2\n3\n").unwrap();
+        fs::write(d.join(" lead.txt"), "1\n").unwrap();
+        assert_eq!(diff_size(&d, None), Some(4));
+        let mut names = untracked(&d);
+        names.sort();
+        assert_eq!(names, vec![" lead.txt".to_string(), "a\"b.txt".to_string()]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn changes_only_staged_in_the_repo_are_not_in_head() {
+        let d = std::env::temp_dir().join(format!("tend-staged-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        let repo = d.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let git = |at: &Path, args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(at)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success());
+        };
+        fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "base"]);
+        let base = git_out(&repo, &["rev-parse", "HEAD"]).unwrap();
+        git(&repo, &["worktree", "add", "-q", "../wt"]);
+        let wt = d.join("wt");
+        fs::write(wt.join("a.txt"), "a\nb\n").unwrap();
+        // The user staged the same change but did not commit it: HEAD lacks it.
+        fs::write(repo.join("a.txt"), "a\nb\n").unwrap();
+        git(&repo, &["add", "."]);
+        assert!(!changes_in_head(&repo, &wt, &base), "staged is not in HEAD");
+        git(&repo, &["commit", "-qm", "taken"]);
+        assert!(changes_in_head(&repo, &wt, &base));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn changed_files_lists_non_ascii_names_unquoted() {
+        let d = std::env::temp_dir().join(format!("tend-cf-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&d)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        fs::write(d.join("é.txt"), "a\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let base = git_out(&d, &["rev-parse", "HEAD"]).unwrap();
+        fs::write(d.join("é.txt"), "b\n").unwrap();
+        fs::write(d.join("ü new.txt"), "n\n").unwrap();
+        assert_eq!(changed_files(&d, &base), vec!["é.txt", "ü new.txt"]);
         let _ = fs::remove_dir_all(&d);
     }
 }

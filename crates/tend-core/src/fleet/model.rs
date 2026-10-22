@@ -767,6 +767,11 @@ impl Model {
         let Some(slot) = self.slots.get(id).cloned() else {
             return;
         };
+        // A second exit for one session (or one for a session that never ran) must not
+        // count a crash, add its cost again, or bring a failed slot back.
+        if !slot.live() {
+            return;
+        }
         let run = self.role_def(&slot).map(|r| r.run);
         self.told_limit = false;
         let restarts = slot.restarts + 1;
@@ -986,7 +991,22 @@ impl Model {
             return;
         };
         match s.state {
-            SlotState::Waiting => s.state = SlotState::Stopped,
+            SlotState::Waiting => {
+                s.state = SlotState::Stopped;
+                // A task bound to it, waiting for room, goes back to the queue.
+                let role = s.role.clone();
+                if let Some(tid) = s.task.take() {
+                    if let Some(t) = self.tasks.get_mut(&tid) {
+                        if t.state == TaskState::Bound {
+                            t.state = TaskState::Queued;
+                            t.slot = None;
+                            if t.target.as_deref() == Some(id) {
+                                t.target = Some(role);
+                            }
+                        }
+                    }
+                }
+            }
             SlotState::Starting | SlotState::Running => {
                 s.stopping = true;
                 self.cmd(cx, Command::Stop { slot: id.into() }, why);

@@ -449,6 +449,21 @@ impl Controller {
     /// so the ledger records no action as applied, and with no response.
     pub fn handle_unanswered(&mut self, event: Event, now_ms: u64) -> Decision {
         let mode = std::mem::replace(&mut self.session.mode, Mode::Look);
+        // The ledger shows the session's real mode, not the one used to hold back actions.
+        let event = match event {
+            Event::SessionStarted {
+                agent,
+                cwd,
+                transcript_path,
+                ..
+            } => Event::SessionStarted {
+                agent,
+                cwd,
+                transcript_path,
+                mode: Some(mode),
+            },
+            e => e,
+        };
         let mut d = self.handle(event, now_ms);
         self.session.mode = mode;
         d.response = Response::default();
@@ -656,13 +671,13 @@ impl Controller {
                 agent,
                 cwd,
                 transcript_path,
-                ..
+                mode,
             } => {
                 let event = Event::SessionStarted {
                     agent,
                     cwd,
                     transcript_path,
-                    mode: Some(self.session.mode),
+                    mode: mode.or(Some(self.session.mode)),
                 };
                 let ev = self.push(&mut d, now_ms, vec![], Body::Event { event });
                 let overrides = self.cfg.overrides();

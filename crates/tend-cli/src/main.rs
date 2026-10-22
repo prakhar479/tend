@@ -505,6 +505,15 @@ fn main() {
     }
 }
 
+/// Whether `dir` is a direct child of the sessions dir (`--session` also takes a path;
+/// purge must not delete an arbitrary directory).
+fn in_sessions_dir(dir: &std::path::Path, root: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(dir), std::fs::canonicalize(root)) {
+        (Ok(d), Ok(r)) => d.parent() == Some(r.as_path()),
+        _ => false,
+    }
+}
+
 /// The value of `--name value` or `--name=value` in raw arguments.
 fn arg_value(argv: &[String], name: &str) -> Option<String> {
     let eq = format!("{name}=");
@@ -738,6 +747,12 @@ fn run(cli: Cli) -> Result<i32> {
             let removed = match (session, all, older_than) {
                 (Some(spec), _, _) => {
                     let dir = sessions::resolve(Some(&spec), false)?;
+                    if !in_sessions_dir(&dir, &root) {
+                        bail!(
+                            "{} is not a stored tend session; not deleting it",
+                            dir.display()
+                        );
+                    }
                     if sessions::is_live(&dir) {
                         bail!("session {} is live; end it first", dir.display());
                     }
@@ -893,5 +908,24 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Hook { .. } | Cmd::Run { .. } => unreachable!("handled in main"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn purge_only_deletes_inside_the_sessions_dir() {
+        let t = std::env::temp_dir().join(format!("tend-purge-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let root = t.join("sessions");
+        std::fs::create_dir_all(root.join("s1")).unwrap();
+        std::fs::create_dir_all(t.join("other")).unwrap();
+        assert!(in_sessions_dir(&root.join("s1"), &root));
+        assert!(!in_sessions_dir(&t.join("other"), &root));
+        assert!(!in_sessions_dir(&root, &root));
+        assert!(!in_sessions_dir(&root.join("s1/.."), &root));
+        let _ = std::fs::remove_dir_all(&t);
     }
 }

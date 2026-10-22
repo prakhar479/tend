@@ -92,8 +92,9 @@ pub fn extract_failures(output: &str) -> Vec<Failure> {
             };
             found.push((Some(test), unittest_message(&lines, i)));
         // cargo test: test orders::tests::total ... FAILED
-        } else if let Some(c) = re!(r"^test (\S+) \.\.\. FAILED$").captures(line) {
-            let t = c[1].to_string();
+        } else if let Some(c) = re!(r"^test (.+?) \.\.\. FAILED$").captures(line) {
+            // A doctest is `src/lib.rs - total (line 12)`; the line moves with edits.
+            let t = re!(r" \(line \d+\)$").replace(&c[1], "").into_owned();
             let msg = panics.get(&t).cloned().unwrap_or_default();
             found.push((Some(t), msg));
         // go test: --- FAIL: TestX (0.00s)
@@ -128,7 +129,7 @@ pub fn extract_failures(output: &str) -> Vec<Failure> {
     // Generic error lines are failures only in a run that did not pass: `pytest -s` and
     // `cargo test -- --nocapture` print logged errors from green tests (I3, L1).
     if found.is_empty() && !run_passed(&lines) {
-        for line in &lines {
+        for (idx, line) in lines.iter().enumerate() {
             let l = line.trim();
             // pytest's `E   KeyError: 'total'` detail lines, when the agent cut the summary.
             let l = match l.strip_prefix("E ") {
@@ -144,7 +145,16 @@ pub fn extract_failures(output: &str) -> Vec<Failure> {
             if !summary && re!(r"^\w+(Error|Exception)(: .+)?$|^assert\s.+|^error(\[E\d+\])?: .+|\berror TS\d+: .+|:\d+:\d+: error: .+")
                 .is_match(l)
             {
-                found.push((None, l.to_string()));
+                // rustc puts the place on the next line; the same message in two files
+                // is two failures.
+                let place = (l.starts_with("error"))
+                    .then(|| next_nonempty(&lines, idx))
+                    .flatten()
+                    .filter(|n| n.starts_with("--> "));
+                found.push((
+                    None,
+                    place.map_or_else(|| l.to_string(), |p| format!("{l} {p}")),
+                ));
             }
         }
     }
@@ -338,6 +348,28 @@ mod tests {
         f.iter()
             .map(|f| (f.test.as_deref().unwrap_or(""), f.message.as_str()))
             .collect()
+    }
+
+    #[test]
+    fn cargo_doctest_failure_is_found() {
+        let out = "running 2 tests\ntest src/lib.rs - total (line 12) ... FAILED\ntest src/lib.rs - ok (line 3) ... ok\n\nfailures:\n\ntest result: FAILED. 1 passed; 1 failed\n";
+        let f = extract_failures(out);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(!f[0].summary_only);
+        // Editing above the example moves its line; the failure is the same one.
+        let moved = out.replace("line 12", "line 15");
+        assert_eq!(extract_failures(&moved)[0].signature, f[0].signature);
+    }
+
+    #[test]
+    fn same_rustc_message_in_two_files_is_two_failures() {
+        let out = "error[E0425]: cannot find value `x` in this scope\n --> src/a.rs:3:5\n  |\nerror[E0425]: cannot find value `x` in this scope\n --> src/b.rs:9:1\nerror: could not compile `c`\n";
+        assert_eq!(extract_failures(out).len(), 2);
+        let shifted = out.replace("a.rs:3", "a.rs:30");
+        assert_eq!(
+            extract_failures(out)[0].signature,
+            extract_failures(&shifted)[0].signature
+        );
     }
 
     #[test]

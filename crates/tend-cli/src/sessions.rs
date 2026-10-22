@@ -62,7 +62,14 @@ fn last_active_secs(dir: &Path) -> u64 {
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_secs());
-    started.max(modified)
+    // The dir's own mtime covers a session with no ledger and an id that is not a
+    // timestamp: neither may count as "last active in 1970".
+    let touched = fs::metadata(dir)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
+    started.max(modified).max(touched)
 }
 
 /// Delete sessions with no activity for `days` days. Live sessions are kept.
@@ -114,6 +121,9 @@ pub fn resolve(spec: Option<&str>, live: bool) -> Result<PathBuf> {
             .unwrap_or_default()
     };
     if let Some(spec) = spec {
+        if spec.is_empty() {
+            bail!("empty session name (see `tend sessions`)");
+        }
         let dir = if Path::new(spec).is_dir() {
             PathBuf::from(spec)
         } else if let Some(n) = spec.strip_prefix('-').and_then(|n| n.parse::<usize>().ok()) {
@@ -121,7 +131,12 @@ pub fn resolve(spec: Option<&str>, live: bool) -> Result<PathBuf> {
                 .cloned()
                 .ok_or_else(|| anyhow!("there are only {} sessions", all.len()))?
         } else {
-            let hits: Vec<&PathBuf> = all.iter().filter(|d| name(d).starts_with(spec)).collect();
+            let mut hits: Vec<&PathBuf> =
+                all.iter().filter(|d| name(d).starts_with(spec)).collect();
+            // An exact id wins over longer ids it is a prefix of.
+            if let Some(exact) = hits.iter().find(|d| name(d) == spec) {
+                hits = vec![*exact];
+            }
             match hits[..] {
                 [one] => one.clone(),
                 [] => bail!("no session `{spec}` (see `tend sessions`)"),
@@ -316,6 +331,18 @@ mod tests {
             .unwrap()
             .iter()
             .all(|d| d != &live));
+        let _ = fs::remove_dir_all(&r);
+    }
+
+    /// A session dir whose id is not a timestamp and that has no ledger yet is new, not old.
+    #[test]
+    fn prune_keeps_a_fresh_dir_with_an_odd_name() {
+        let r = root("odd");
+        let d = r.join("agent-1");
+        fs::create_dir_all(&d).unwrap();
+        let now = UNIX_EPOCH.elapsed().unwrap().as_secs();
+        assert!(prune(&r, 7, now).unwrap().is_empty());
+        assert!(d.exists());
         let _ = fs::remove_dir_all(&r);
     }
 

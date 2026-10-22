@@ -62,14 +62,38 @@ pub fn run(
     if let Some(parent) = sock.parent() {
         crate::paths::ensure_private_dir(parent)?;
     }
-    // Bind under a temporary name and rename: the socket appears at its path only once
+    // Bind under a temporary name and link: the socket appears at its path only once
     // it listens, so a client never finds a socket that refuses (bind creates the file
     // before listen).
     // The temporary name is no longer than `tendd.sock`, so it fits the path limit too.
     let tmp = sock.with_file_name(format!("{}.t", std::process::id() % 10_000_000));
     let _ = fs::remove_file(&tmp);
     let listener = UnixListener::bind(&tmp).with_context(|| format!("bind {}", tmp.display()))?;
-    fs::rename(&tmp, &sock).with_context(|| format!("rename to {}", sock.display()))?;
+    // `link` fails if the path exists, so two daemons for one session cannot both take
+    // it (a rename would replace a live daemon's socket and orphan it). A socket nobody
+    // listens on is stale: replace it.
+    let linked = fs::hard_link(&tmp, &sock).or_else(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists
+            && UnixStream::connect(&sock).is_err_and(|c| {
+                matches!(
+                    c.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                )
+            })
+        {
+            fs::remove_file(&sock)?;
+            fs::hard_link(&tmp, &sock)
+        } else {
+            Err(e)
+        }
+    });
+    let _ = fs::remove_file(&tmp);
+    if let Err(e) = linked {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            anyhow::bail!("a daemon is already running for {}", dir.display());
+        }
+        return Err(e).with_context(|| format!("link {}", sock.display()));
+    }
     let connector = connector::for_agent(agent)?;
     let mut controller = Controller::new(crate::config::load(), connector.capabilities(), mode);
     // A fleet's hub starts its sessions with TEND_FLEET_SLOT set (F5a).
@@ -462,6 +486,8 @@ fn serve(
 ) -> Result<()> {
     // A client that connects and sends nothing must not pin a thread forever (F9).
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
+    // Nor may one that never reads its reply.
+    stream.set_write_timeout(Some(READ_TIMEOUT))?;
     let mut line = String::new();
     BufReader::new(stream.try_clone()?)
         .take(MAX_REQUEST_BYTES)

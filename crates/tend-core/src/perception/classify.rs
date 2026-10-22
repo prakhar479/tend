@@ -76,7 +76,7 @@ pub struct CommandInfo {
 }
 
 pub fn classify(command: &str) -> CommandInfo {
-    let show_target = re!(r"(?:^|[\s;&|])tend\s+show\s+(o-\d+)")
+    let show_target = re!(r"(?:^|[\s;&|])tend\s+show\s+(o-\d+)(?:$|[\s;&|)])")
         .captures(command)
         .map(|c| c[1].to_string());
     let runner = detect_runner(command);
@@ -112,6 +112,11 @@ pub fn classify(command: &str) -> CommandInfo {
 /// The kind of output a simple command makes, from its program (not a runner or a view).
 fn kind_of(w: &[String]) -> Option<OutputKind> {
     let first = shell::program_name(w.first()?);
+    let w = &w[..1]
+        .iter()
+        .chain(skip_options(first, &w[1..]))
+        .cloned()
+        .collect::<Vec<_>>();
     let arg = |i: usize| w.get(i).map(String::as_str);
     let pkg = matches!(first, "npm" | "pnpm" | "yarn" | "bun");
     let kind = match (first, arg(1)) {
@@ -301,9 +306,11 @@ fn skip_options<'a>(program: &str, mut w: &'a [String]) -> &'a [String] {
             "--cwd",
         ],
         "make" => &["-C", "-f", "-j", "--directory", "--file"],
+        // `cargo +nightly test`, `cargo -q test`.
+        "cargo" => &["-C", "--config", "-Z", "--color", "--manifest-path"],
         _ => return w,
     };
-    while let Some(o) = w.first().filter(|o| o.starts_with('-')) {
+    while let Some(o) = w.first().filter(|o| o.starts_with(['-', '+'])) {
         let n = if with_value.contains(&o.as_str()) {
             2
         } else {
@@ -415,7 +422,6 @@ fn segment_writes(seg: &[String]) -> bool {
         return false;
     };
     let first = shell::program_name(first);
-    let has = |flag: &str| w.iter().skip(1).any(|x| x == flag || x.starts_with(flag));
     // `>file`, `>> file`, `1>file`, `&>file`: a redirection to a real file.
     let redirect = seg.iter().enumerate().any(|(k, x)| {
         let t = x.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
@@ -438,12 +444,33 @@ fn segment_writes(seg: &[String]) -> bool {
     redirect
         || tee
         || matches!(first, "cp" | "mv" | "rm" | "patch" | "truncate" | "touch")
-        || (matches!(first, "sed" | "perl" | "ruby") && has("-i"))
+        || (matches!(first, "sed" | "perl" | "ruby") && w.iter().skip(1).any(|x| in_place(x)))
         || (first == "git"
             && matches!(
                 w.get(1).map(String::as_str),
                 Some("apply" | "checkout" | "restore" | "stash")
             ))
+}
+
+/// An in-place option of sed, perl, or ruby: `-i`, `-i.bak`, `-pi`, `-Ei`, `--in-place`.
+/// Clusters stop at an option that takes the rest of the word (`-e`, `-Mstrict`).
+fn in_place(x: &str) -> bool {
+    if x.starts_with("--in-place") {
+        return true;
+    }
+    let Some(cluster) = x.strip_prefix('-').filter(|c| !c.starts_with('-')) else {
+        return false;
+    };
+    for c in cluster.chars() {
+        match c {
+            'i' => return true,
+            'e' | 'M' | 'm' | 'I' | 'x' | 'f' | 'l' | '0' | 'F' | 'C' | 'd' | 'D' | 's' => {
+                return false
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// A place for logs and scratch output, not the project's files.
@@ -584,10 +611,26 @@ pub fn snapshot_update(cmd: &str) -> Option<String> {
 
 /// The first simple command that runs a test runner, and its words.
 pub fn runner_segment(cmd: &str) -> Option<(TestRunner, Vec<String>)> {
-    shell::parse(cmd)
-        .segments
-        .into_iter()
-        .find_map(|seg| runner_of(&seg).map(|r| (r, seg)))
+    shell::parse(cmd).segments.into_iter().find_map(|seg| {
+        if let Some(script) = shell_script(&seg) {
+            if let Some(found) = runner_segment(script) {
+                return Some(found);
+            }
+        }
+        runner_of(&seg).map(|r| (r, seg))
+    })
+}
+
+/// The script of `bash -c '…'` (also sh, zsh), behind any wrapper prefixes.
+fn shell_script(seg: &[String]) -> Option<&str> {
+    match shell::program_words(seg) {
+        [sh, c, script, ..]
+            if matches!(shell::program_name(sh), "bash" | "sh" | "zsh") && c == "-c" =>
+        {
+            Some(script)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -887,5 +930,32 @@ mod tests {
             Some("o-17")
         );
         assert_eq!(classify("echo reinshow o-1").show_target, None);
+    }
+
+    #[test]
+    fn odd_wrappers_and_in_place_edits() {
+        let text = include_str!("../../../../fixtures/commands/odd_wrappers.txt");
+        for line in text
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let (want, cmd) = line.split_once('\t').unwrap();
+            let cmd = cmd.replace("\\n", "\n");
+            let c = classify(&cmd);
+            let got = match want {
+                "test" => c.kind == OutputKind::Test,
+                "build" => c.kind == OutputKind::Build,
+                "write" => writes_files(&cmd),
+                "nowrite" => !writes_files(&cmd),
+                "other" => c.kind == OutputKind::Other && c.show_target.is_none(),
+                _ => panic!("{line}"),
+            };
+            assert!(got, "{line}");
+        }
+        assert_eq!(classify("tend show o-3x").show_target, None);
+        assert_eq!(
+            classify("tend show o-3 | head").show_target.as_deref(),
+            Some("o-3")
+        );
     }
 }

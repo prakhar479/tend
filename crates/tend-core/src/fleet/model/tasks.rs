@@ -156,10 +156,35 @@ impl Model {
         if let Some(d) = t.depends_on.iter().find(|d| !self.tasks.contains_key(*d)) {
             return self.refuse(cx, &by, &format!("There is no task {d} to depend on."));
         }
+        // A task that ended badly never becomes done: waiting for it would never end.
+        if let Some(d) = t.depends_on.iter().find(|d| {
+            self.tasks
+                .get(*d)
+                .is_some_and(|x| matches!(x.state, TaskState::Failed | TaskState::Blocked))
+        }) {
+            let how = format!("{:?}", self.tasks[d].state).to_lowercase();
+            return self.refuse(
+                cx,
+                &by,
+                &format!("{d} is {how}; a task cannot wait for it."),
+            );
+        }
         let parent = match &by {
             Actor::Slot { id } => self.slots.get(id).and_then(|s| s.task.clone()),
             _ => None,
         };
+        // A part cannot wait for the whole it belongs to: the whole waits for the part.
+        let mut up = parent.as_deref();
+        while let Some(p) = up {
+            if t.depends_on.iter().any(|d| d == p) {
+                return self.refuse(
+                    cx,
+                    &by,
+                    &format!("{p} is the task this one is a part of; it cannot wait for {p}."),
+                );
+            }
+            up = self.tasks.get(p).and_then(|x| x.parent.as_deref());
+        }
         // best-of (G9): a task for the candidates fans out to one part each.
         let fan = match (&target, self.scope(board.as_deref())) {
             (Some(r), Some(sp))
@@ -239,10 +264,11 @@ impl Model {
                 cx,
                 &by,
                 &format!(
-                    "{task} is {:?}; only open or queued tasks are assigned.",
-                    t.state
-                )
-                .replace("Working", "being worked on"),
+                    "{task} is {}; only open or queued tasks are assigned.",
+                    format!("{:?}", t.state)
+                        .to_lowercase()
+                        .replace("working", "being worked on")
+                ),
             );
         }
         let role = match self.slots.get(to) {

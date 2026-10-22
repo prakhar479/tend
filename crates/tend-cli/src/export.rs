@@ -15,10 +15,10 @@ pub fn export(dir: &Path, outputs: bool) -> Result<String> {
     let clean = |text: &str| -> String {
         let mut t = tend_core::text::redact(text).into_owned();
         if cwd.len() > 1 {
-            t = t.replace(&cwd, "/project");
+            t = replace_path(&t, &cwd, "/project");
         }
         if home.len() > 1 {
-            t = t.replace(&home, "~");
+            t = replace_path(&t, &home, "~");
         }
         if user.len() > 2 {
             t = t.replace(&user, "user");
@@ -54,6 +54,30 @@ pub fn export(dir: &Path, outputs: bool) -> Result<String> {
     Ok(serde_json::to_string_pretty(&bundle)?)
 }
 
+/// Replace `prefix` (a directory, trailing slashes ignored) where it ends at a path
+/// boundary: `/work/app` is replaced in `/work/app/x`, not in `/work/app2`.
+fn replace_path(text: &str, prefix: &str, with: &str) -> String {
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(prefix) {
+        let end = i + prefix.len();
+        let after = rest[end..].chars().next();
+        out.push_str(&rest[..i]);
+        if after.is_none_or(|c| !(c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))) {
+            out.push_str(with);
+        } else {
+            out.push_str(prefix);
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Apply `clean` to every string in `v`, keys left as they are.
 fn clean_strings(v: &mut Value, clean: &dyn Fn(&str) -> String) {
     match v {
@@ -67,6 +91,14 @@ fn clean_strings(v: &mut Value, clean: &dyn Fn(&str) -> String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paths_are_replaced_at_boundaries_only() {
+        assert_eq!(
+            replace_path("/w/app/x /w/app2 /w/app", "/w/app/", "/project"),
+            "/project/x /w/app2 /project"
+        );
+    }
 
     #[test]
     fn a_user_name_that_is_also_a_key_does_not_rename_keys() {

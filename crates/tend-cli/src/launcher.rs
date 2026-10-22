@@ -33,6 +33,11 @@ struct Session {
 pub fn run_claude(mode: Mode, args: Vec<String>) -> Result<i32> {
     let (mode, args) = take_mode(mode, args);
     let (join, args) = take_fleet(args);
+    let bin = env::var("TEND_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+    // A missing agent is the user's to fix; set nothing up for it.
+    if find_program(&bin).is_none() {
+        bail!("`{bin}` not found on PATH (set TEND_CLAUDE_BIN to use another binary)");
+    }
     // Join a fleet from this terminal (F4): the daemon and the agent run as its slot.
     let joined = match join {
         Some((fleet, role, name)) => {
@@ -49,11 +54,6 @@ pub fn run_claude(mode: Mode, args: Vec<String>) -> Result<i32> {
         }
         None => None,
     };
-    let bin = env::var("TEND_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
-    // A missing agent is the user's to fix; set nothing up for it.
-    if find_program(&bin).is_none() {
-        bail!("`{bin}` not found on PATH (set TEND_CLAUDE_BIN to use another binary)");
-    }
     let (user_settings, args) = take_settings(args);
     let exe = env::current_exe().context("find tend executable")?;
     // In parallel with the daemon's start: is this Claude Code version checked?
@@ -94,7 +94,8 @@ pub fn run_claude(mode: Mode, args: Vec<String>) -> Result<i32> {
             }
         }
     }
-    let status = run_child(cmd.args(&args)).with_context(|| format!("start `{bin}`"))?;
+    let status = run_child(cmd.args(&args));
+    // Clean up even when the agent did not start: no daemon or fleet slot left behind.
 
     if let Some(mut s) = session {
         finish(&mut s);
@@ -102,7 +103,7 @@ pub fn run_claude(mode: Mode, args: Vec<String>) -> Result<i32> {
     if let Some((id, slot)) = joined {
         crate::hub::leave(&id, &slot);
     }
-    Ok(exit_code(status))
+    Ok(exit_code(status.with_context(|| format!("start `{bin}`"))?))
 }
 
 /// Session dir, token, settings, daemon. Any error here means: run without tend.
@@ -530,7 +531,9 @@ fn agent_path(exe: &Path, dir: &Path) -> OsString {
     if let Some(p) = env::var_os("PATH") {
         parts.extend(env::split_paths(&p));
     }
-    env::join_paths(parts).unwrap_or_default()
+    // A directory with `:` in its name cannot join a PATH; keep the user's PATH then,
+    // not an empty one.
+    env::join_paths(parts).unwrap_or_else(|_| env::var_os("PATH").unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -540,6 +543,14 @@ mod tests {
 
     fn strings(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn agent_path_survives_a_colon_in_the_session_path() {
+        let d = env::temp_dir().join(format!("tend-a:b-{}", std::process::id()));
+        let p = agent_path(Path::new("/usr/bin/tend"), &d);
+        assert_eq!(Some(p), env::var_os("PATH"));
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

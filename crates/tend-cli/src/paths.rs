@@ -17,26 +17,35 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use tend_core::text::sha256_hex;
 
-pub fn home() -> PathBuf {
-    if let Some(h) = env::var_os("TEND_HOME") {
-        return PathBuf::from(h);
-    }
-    if let Some(x) = env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(x).join("tend");
-    }
-    let base = env::var_os("HOME")
+/// An environment variable that is set and not empty (an empty one means unset).
+pub fn env_path(key: &str) -> Option<PathBuf> {
+    env::var_os(key)
+        .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(env::temp_dir);
-    base.join(".local/share/tend")
+}
+
+pub fn home() -> PathBuf {
+    home_from(&env_path)
+}
+
+fn home_from(get: &dyn Fn(&str) -> Option<PathBuf>) -> PathBuf {
+    if let Some(h) = get("TEND_HOME") {
+        return h;
+    }
+    if let Some(x) = get("XDG_DATA_HOME") {
+        return x.join("tend");
+    }
+    get("HOME")
+        .unwrap_or_else(env::temp_dir)
+        .join(".local/share/tend")
 }
 
 /// Where Claude Code keeps session transcripts.
 pub fn claude_projects_dir() -> PathBuf {
-    if let Some(d) = env::var_os("CLAUDE_CONFIG_DIR") {
-        return PathBuf::from(d).join("projects");
+    if let Some(d) = env_path("CLAUDE_CONFIG_DIR") {
+        return d.join("projects");
     }
-    env::var_os("HOME")
-        .map(PathBuf::from)
+    env_path("HOME")
         .unwrap_or_else(env::temp_dir)
         .join(".claude/projects")
 }
@@ -181,6 +190,20 @@ mod tests {
         assert_eq!(sock, socket_path(&long), "same path both sides");
         let uid = unsafe { libc::getuid() };
         assert!(sock.parent().unwrap().ends_with(format!("tend-{uid}")));
+    }
+
+    /// An empty `TEND_HOME=` is unset, not the current directory.
+    #[test]
+    fn empty_env_values_are_unset() {
+        let get = |k: &str| match k {
+            "TEND_HOME" | "XDG_DATA_HOME" => None,
+            "HOME" => Some(PathBuf::from("/h")),
+            _ => None,
+        };
+        assert_eq!(home_from(&get), PathBuf::from("/h/.local/share/tend"));
+        let get = |k: &str| (k == "XDG_DATA_HOME").then(|| PathBuf::from("/x"));
+        assert_eq!(home_from(&get), PathBuf::from("/x/tend"));
+        assert_eq!(env_path("TEND_SURELY_UNSET_VAR"), None);
     }
 
     #[test]

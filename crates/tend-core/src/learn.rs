@@ -72,7 +72,6 @@ fn last_is_test(command: &str) -> bool {
 fn partial(command: &str) -> bool {
     let words: Vec<&str> = command.split_whitespace().collect();
     words.iter().enumerate().any(|(i, &w)| {
-        // `python -m pytest` names a module; pytest's own `-m` picks tests.
         // `python -m pytest` and `python -mpytest` name a module; pytest's own `-m`
         // picks tests.
         let interpreter_flag = w.starts_with("-m") && i > 0 && words[i - 1].starts_with("python");
@@ -90,10 +89,9 @@ fn partial(command: &str) -> bool {
                     | "-run"
             ) || w.starts_with("--maxfail")
                 || w.starts_with("--deselect")
-                || (w.starts_with("-k") || w.starts_with("-m"))
+                || (w.starts_with("-k") || w.starts_with("-m") && !w.starts_with("-mod"))
                     && !w.starts_with("--")
                     && w.len() > 2
-                    && !interpreter_flag
                 || w.starts_with("--bail=")
                 || w.starts_with("-run="))
     })
@@ -394,6 +392,13 @@ mod tests {
         assert!(!complete_run("pytest -mslow"));
         assert!(!complete_run("pytest --deselect tests/a.py::t"));
         assert!(complete_run("pytest tests"));
+    }
+
+    /// `go test -mod=vendor` is a Go flag, not pytest's `-m` selector.
+    #[test]
+    fn go_mod_flag_is_not_a_selector() {
+        assert!(complete_run("go test -mod=vendor ./..."));
+        assert!(!complete_run("pytest -mslow"));
     }
 
     #[test]

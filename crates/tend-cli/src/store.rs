@@ -18,6 +18,16 @@ pub struct Store {
     hooks: Option<File>,
 }
 
+/// True when the file's last byte is not a newline. Reads one byte, not the file.
+pub fn ends_torn(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = File::open(path) else {
+        return false;
+    };
+    let mut c = [0u8; 1];
+    f.seek(SeekFrom::End(-1)).is_ok() && f.read_exact(&mut c).is_ok() && c[0] != b'\n'
+}
+
 fn append_file(path: &Path) -> Result<File> {
     OpenOptions::new()
         .create(true)
@@ -35,7 +45,7 @@ impl Store {
         let mut ledger = append_file(&ledger_path)?;
         // A crash can leave a last line without its newline. End it, so the next entry
         // is not glued to it (R0.6). Readers skip the torn line.
-        if fs::read(&ledger_path).is_ok_and(|b| b.last().is_some_and(|c| *c != b'\n')) {
+        if ends_torn(&ledger_path) {
             ledger.write_all(b"\n")?;
         }
         Ok(Self {

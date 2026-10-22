@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 /// Remove ANSI escape sequences (colors, cursor moves, OSC titles).
 pub fn strip_ansi(s: &str) -> String {
-    re!(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
+    re!(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
         .replace_all(s, "")
         .into_owned()
 }
@@ -59,11 +59,14 @@ pub fn redact(text: &str) -> std::borrow::Cow<'_, str> {
         r"|\bsk-ant-[A-Za-z0-9_-]{20,}|\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}",
         r"|\bxox[abposr]-[A-Za-z0-9-]{10,}|\bAIza[0-9A-Za-z_-]{35}",
         r"|\b(?:sk|rk)_live_[0-9a-zA-Z]{20,}|\bglpat-[A-Za-z0-9_-]{20,}",
-        r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+        r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+        r"|\b[Bb]earer [A-Za-z0-9._~+/-]{20,}=*",
+        // A key block cut short (the agent's own truncation) still hides what is there.
+        r"|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[A-Za-z0-9+/=\s]|\\n)*"
     ));
-    let url_password = re!(r"(\b[a-z][a-z0-9+.-]*://[^:/\s@]+:)([^@\s/]{3,})@");
+    let url_password = re!(r#"(\b[a-z][a-z0-9+.-]*://[^:/\s@"'\\]+:)([^@\s/"'\\]{3,})@"#);
     let assignment = re!(
-        r#"(?i)\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)(\s*[=:]\s*)([^\s"'\\,;]{8,})"#
+        r#"(?i)\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)((?:\\*["'])?\s*[=:]\s*(?:\\*["'])?)([^\s"'\\,;]{8,})"#
     );
     let mut out = std::borrow::Cow::Borrowed(text);
     if shaped.is_match(&out) {
@@ -80,8 +83,11 @@ pub fn redact(text: &str) -> std::borrow::Cow<'_, str> {
         let replaced = assignment.replace_all(&out, |c: &regex::Captures| {
             let value = &c[3];
             // Counts and sizes (`max_tokens=4096`) and already-redacted values stay.
+            // `PWD=/home/me/x` is a directory, not a password.
+            let dir = matches!(&c[1], "PWD" | "OLDPWD") && value.starts_with('/');
             if value.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
                 || value.starts_with("[redacted")
+                || dir
             {
                 c[0].to_string()
             } else {
@@ -136,6 +142,41 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn quoted_and_json_secrets_are_redacted() {
+        for text in [
+            r#"export API_KEY="abcdefgh12345678""#,
+            r#"{"password":"hunter2hunter2","n":1}"#,
+            r#"{"command":"export API_KEY=\"abcdefgh12345678\" && run"}"#,
+            "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123",
+            r#"{"u":"https://me:pw12345@h","x":"y@z"}"#,
+            "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\n... [100 characters truncated]",
+        ] {
+            let r = redact(text);
+            for s in [
+                "abcdefgh12345678",
+                "hunter2",
+                "abcdefghijklmnopqrstuvwxyz",
+                "pw12345",
+                "MIIEvQ",
+            ] {
+                assert!(!r.contains(s), "{s} left in {r}");
+            }
+            if text.starts_with('{') {
+                serde_json::from_str::<serde_json::Value>(&r).expect(&r);
+            }
+        }
+        // Not secrets: the working directory.
+        assert_eq!(redact("PWD=/home/user/project"), "PWD=/home/user/project");
+    }
+
+    #[test]
+    fn st_terminated_osc_does_not_eat_output() {
+        let raw = "\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\\nreal error line\nbell\x07";
+        let s = strip_ansi(raw);
+        assert!(s.contains("real error line") && s.contains("link"), "{s:?}");
+    }
 
     #[test]
     fn strips_ansi_and_progress() {

@@ -46,15 +46,27 @@ pub fn forward(
     let req = Request::Hook {
         event: event.to_string(),
         payload,
-        deadline_ms: Some(crate::paths::now_ms() + timeout.as_millis() as u64),
+        deadline_ms: Some(deadline_from(crate::paths::now_ms(), timeout)),
     };
     let reply = ipc::send(socket, &req, timeout).ok()?;
     reply.output.map(|v| v.to_string())
 }
 
+/// When the shim stops waiting. A huge `TEND_HOOK_TIMEOUT_MS` must not overflow.
+fn deadline_from(now_ms: u64, timeout: Duration) -> u64 {
+    now_ms.saturating_add(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_huge_timeout_does_not_overflow_the_deadline() {
+        let d = deadline_from(1_700_000_000_000, Duration::from_millis(u64::MAX));
+        assert_eq!(d, u64::MAX);
+        assert_eq!(deadline_from(10, Duration::from_millis(250)), 260);
+    }
 
     #[test]
     fn fails_open() {

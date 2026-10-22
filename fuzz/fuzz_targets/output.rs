@@ -8,6 +8,8 @@ use tend_core::shape::shape;
 
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
+    let _ = tend_core::text::redact(&text);
+    let _ = tend_core::text::strip_ansi(&text);
     for f in extract_failures(&text) {
         let _ = normalize_message(&f.message);
     }

@@ -60,23 +60,25 @@ pub fn run(event: &str) {
     }
 }
 
-/// The session directory a conversation id maps to; a new one on its first hook.
-pub fn session_dir(session_id: &str, cwd: &Path) -> Option<PathBuf> {
-    let id: String = session_id
+/// A conversation id as a file name: only letters, digits, and `-`, at most 64.
+fn clean_id(session_id: &str) -> String {
+    session_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .take(64)
-        .collect();
+        .collect()
+}
+
+/// The session directory a conversation id maps to; a new one on its first hook.
+pub fn session_dir(session_id: &str, cwd: &Path) -> Option<PathBuf> {
+    let id = clean_id(session_id);
     if id.is_empty() {
         return None;
     }
     let map_dir = paths::home().join("by-session");
     let map = map_dir.join(&id);
-    if let Ok(name) = fs::read_to_string(&map) {
-        let dir = paths::sessions_dir().join(name.trim());
-        if dir.is_dir() {
-            return Some(dir);
-        }
+    if let Some(dir) = mapped_dir(&paths::sessions_dir(), &map) {
+        return Some(dir);
     }
     paths::ensure_private_dir(&paths::home()).ok()?;
     paths::ensure_private_dir(&map_dir).ok()?;
@@ -85,7 +87,21 @@ pub fn session_dir(session_id: &str, cwd: &Path) -> Option<PathBuf> {
     let dir = paths::sessions_dir().join(&name);
     paths::ensure_private_dir(&dir).ok()?;
     paths::new_token(&dir).ok()?;
-    fs::write(&map, &name).ok()?;
+    // Publish the mapping all at once, and only if nobody did first: hooks of one
+    // conversation can run in parallel, and each must end up with the same daemon.
+    let tmp = map_dir.join(format!(".{id}.{}", std::process::id()));
+    fs::write(&tmp, &name).ok()?;
+    let linked = fs::hard_link(&tmp, &map);
+    let _ = fs::remove_file(&tmp);
+    if linked.is_err() {
+        if let Some(winner) = mapped_dir(&paths::sessions_dir(), &map) {
+            if winner != dir {
+                let _ = fs::remove_dir_all(&dir);
+            }
+            return Some(winner);
+        }
+        return None;
+    }
     let cfg = config::load();
     if cfg.experimental_audit {
         launcher::record_audit_base(&dir, cwd);
@@ -96,12 +112,26 @@ pub fn session_dir(session_id: &str, cwd: &Path) -> Option<PathBuf> {
 /// The session directory for a status line's stdin JSON (`session_id`), if the plugin
 /// started one.
 pub fn existing_session_dir(session_id: &str) -> Option<PathBuf> {
-    // An id is a name in `by-session/`, never a path.
-    if session_id.is_empty() || session_id.contains(['/', '\\']) || session_id.starts_with('.') {
+    // An id is a name in `by-session/`, never a path; clean it as `session_dir` did.
+    let id = clean_id(session_id);
+    if id.is_empty() {
         return None;
     }
-    let name = fs::read_to_string(paths::home().join("by-session").join(session_id)).ok()?;
-    let dir = paths::sessions_dir().join(name.trim());
+    mapped_dir(
+        &paths::sessions_dir(),
+        &paths::home().join("by-session").join(id),
+    )
+}
+
+/// The session directory a mapping file names. An empty or path-like name (a file
+/// caught half written, or damaged) names nothing: it must not resolve to `sessions/`.
+fn mapped_dir(sessions: &Path, map: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(map).ok()?;
+    let name = text.trim();
+    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+        return None;
+    }
+    let dir = sessions.join(name);
     dir.is_dir().then_some(dir)
 }
 
@@ -122,6 +152,30 @@ fn start(dir: &Path, sock: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_or_odd_mapping_names_no_session() {
+        let root = std::env::temp_dir().join(format!("tend-plugin-map-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sessions/s1")).unwrap();
+        let map = root.join("map");
+        for bad in ["", "\n", "..", "../x", "a/b"] {
+            fs::write(&map, bad).unwrap();
+            assert_eq!(mapped_dir(&root.join("sessions"), &map), None, "{bad:?}");
+        }
+        fs::write(&map, "s1\n").unwrap();
+        assert_eq!(
+            mapped_dir(&root.join("sessions"), &map),
+            Some(root.join("sessions/s1"))
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn both_lookups_clean_the_id_alike() {
+        assert_eq!(clean_id("ab_cd:ef-1"), "abcdef-1");
+        assert_eq!(clean_id(&"a".repeat(100)).len(), 64);
+    }
 
     #[test]
     fn a_session_id_is_never_a_path() {
