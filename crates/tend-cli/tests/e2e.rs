@@ -2629,13 +2629,28 @@ fn project_notes_reach_new_sessions_once_approved() {
         );
         String::from_utf8(o.stdout).unwrap()
     };
-    assert!(run(&["note", "integration tests need DB_URL"], false).contains("Kept n-1"));
+    // Without a terminal, even outside a session, a note waits (an agent can clear
+    // TEND_SESSION_DIR, but its shell has no terminal).
+    assert!(
+        run(&["note", "integration tests need DB_URL"], false).contains("for the user's review")
+    );
     assert!(run(&["note", "the cache dir is ./tmp"], true).contains("for the user's review"));
     let list = run(&["notes"], false);
     assert!(
-        list.contains("n-1  approved") && list.contains("n-2  pending"),
+        list.contains("n-1  pending") && list.contains("n-2  pending"),
         "{list}"
     );
+    // An agent cannot approve one.
+    let refused = Command::new(bin())
+        .args(["notes", "approve", "n-2"])
+        .current_dir(&project)
+        .env("TEND_HOME", &home)
+        .env("TEND_SESSION_DIR", dir.join("sessions/agent-1"))
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(run(&["notes"], false).contains("n-2  pending"));
+    run(&["notes", "approve", "n-1"], false);
     run(&["notes", "approve", "n-2"], false);
 
     let (_d, sock, _) = start_fleet_daemon(&home, "1000000001-1", &config);

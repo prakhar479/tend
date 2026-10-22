@@ -572,7 +572,13 @@ impl Model {
         for (name, run, min) in roles {
             match run {
                 Run::Stream => {
-                    for _ in 0..min {
+                    // A leader that starts again keeps its team: only the missing ones.
+                    let have = self
+                        .slots
+                        .values()
+                        .filter(|s| s.role == name && s.leader.as_deref() == leader && s.active())
+                        .count() as u32;
+                    for _ in have..min {
                         let id = self.new_slot(leader, &name);
                         self.try_spawn(cx, &id, "Its role starts with the fleet.");
                     }

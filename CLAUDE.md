@@ -42,6 +42,8 @@ crates/tend-core/src/        pure logic, no I/O
   fleet/spec.rs                fleet files: roles, channels, limits, presets
   fleet/model.rs, model/tasks.rs  fleet state machine: slots, tasks, checks, messages
   fleet/scope.rs               a fleet role's write scope and others' claims
+  learn.rs                     F2: learned fixes (fail → edits → full pass) and recall
+  audit.rs                     experimental audit of changes to tests and checks
 crates/tend-cli/src/         binary `tend`: all I/O
   main.rs                      CLI
   launcher.rs                  `tend claude`: daemon + agent with hooks
@@ -57,6 +59,8 @@ crates/tend-cli/src/         binary `tend`: all I/O
   paths.rs                     session dirs, socket path, Claude projects dir
   fleet.rs                     F1 watcher (tails peers' ledgers), `tend fleet` view
   hub.rs                       fleet hub: runs a fleet file; `tend fleet/task/msg/inbox`
+  learnstore.rs                <home>/learn: fixes.jsonl, notes; `tend note/notes`
+  audit.rs                     `tend audit`: worktree snapshots, diffs
 crates/tend-cli/tests/e2e.rs launcher → daemon → shim with a fake agent
 fixtures/                      outputs, hook payloads, transcripts
 ```

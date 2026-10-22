@@ -153,6 +153,10 @@ fn read_new(dir: &Path, session: &str, tail: &mut Tail, my_common: &str, out: &m
     let Ok(mut f) = File::open(dir.join("ledger.jsonl")) else {
         return;
     };
+    // A ledger shorter than what was read was rewritten: read it again.
+    if f.metadata().is_ok_and(|m| m.len() < tail.offset) {
+        tail.offset = 0;
+    }
     if f.seek(SeekFrom::Start(tail.offset)).is_err() {
         return;
     }
@@ -465,5 +469,18 @@ mod tests {
         read_new(&dir, "peer", &mut tail, "/elsewhere/.git", &mut out);
         assert_eq!(out.len(), 1);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_rewritten_peer_ledger_is_read_again_from_the_start() {
+        let d = tmp("trunc");
+        std::fs::write(d.join("ledger.jsonl"), "x\n".repeat(50)).unwrap();
+        let mut tail = Tail::default();
+        let mut out = Vec::new();
+        read_new(&d, "s", &mut tail, "", &mut out);
+        assert_eq!(tail.offset, 100);
+        std::fs::write(d.join("ledger.jsonl"), "y\n").unwrap();
+        read_new(&d, "s", &mut tail, "", &mut out);
+        assert_eq!(tail.offset, 2, "the shorter file was read from 0");
     }
 }

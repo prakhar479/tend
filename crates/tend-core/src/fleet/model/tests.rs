@@ -2068,3 +2068,85 @@ fn tasks_that_depend_on_a_failed_one_are_blocked_not_left_waiting() {
         "{c:?}"
     );
 }
+
+// --- Review fixes, second pass ----------------------------------------------------------
+
+#[test]
+fn a_leader_that_restarts_keeps_its_team() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead", "limits": {"depth": 2, "sessions": 6},
+        "role": {"api": {"run": "stream", "replicas": 1,
+                 "team": {"preset": "lead", "role": {"db": {"run": "stream", "replicas": 1}}}}}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    assert_eq!(r.state("api-1/db-1"), SlotState::Running);
+    let t = r.now;
+    r.at(
+        t,
+        FleetEvent::Exited {
+            slot: "api-1".into(),
+            code: Some(1),
+        },
+    );
+    let c = r.at(t + BACKOFF_MS, FleetEvent::Tick);
+    r.start_all(&c);
+    assert!(
+        !r.m.slots().contains_key("api-1/db-2"),
+        "no second db: {:?}",
+        r.m.slots().keys().collect::<Vec<_>>()
+    );
+    // After a hub restart too.
+    let c = r.ev(FleetEvent::HubRestarted);
+    r.start_all(&c);
+    assert!(!r.m.slots().contains_key("api-1/db-2"));
+    assert_eq!(r.state("api-1/db-1"), SlotState::Running);
+}
+
+#[test]
+fn a_blocked_candidate_does_not_hold_up_the_judging() {
+    for judge in ["rule", "agent"] {
+        let mut r = best_of(judge);
+        finish_part(&mut r, "candidate-1", "t-1.1", true, 5);
+        finish_part(&mut r, "candidate-2", "t-1.2", true, 9);
+        let c = r.ev(FleetEvent::TaskBlocked {
+            by: slot("candidate-3"),
+            task: "t-1.3".into(),
+            reason: "no idea".into(),
+        });
+        if judge == "rule" {
+            assert_eq!(task_state(&r, "t-1"), TaskState::Done, "{c:?}");
+            continue;
+        }
+        assert_eq!(
+            run_tasks(&mut r, &c),
+            [("judge-1".into(), "t-1".into())],
+            "{c:?}"
+        );
+        let c = r.ev(FleetEvent::TaskDone {
+            by: slot("judge-1"),
+            task: "t-1".into(),
+            summary: "t-1.2 is cleaner".into(),
+        });
+        assert!(runs_check(&c).is_some(), "the judge may finish: {c:?}");
+        r.ev(checked("t-1", true, "", &[]));
+        assert_eq!(task(&r, "t-1.2").picked, Some(true));
+        assert_eq!(task(&r, "t-1.1").picked, Some(false));
+    }
+}
+
+#[test]
+fn a_check_whose_session_ended_runs_again_after_a_hub_restart() {
+    let mut r = gated();
+    r.ev(done("worker-1", "t-1"));
+    r.ev(FleetEvent::Exited {
+        slot: "worker-1".into(),
+        code: None,
+    });
+    let c = r.ev(FleetEvent::HubRestarted);
+    assert!(
+        c.iter()
+            .any(|c| matches!(c, Command::RunCheck { task, .. } if task == "t-1")),
+        "{c:?}"
+    );
+}

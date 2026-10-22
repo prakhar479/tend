@@ -872,6 +872,8 @@ impl Controller {
         if writes_files(command) {
             self.loops.note_edit();
         }
+        // Learning (F2) needs the run as written: a pipe or `-x` hides what it shows.
+        let complete = crate::learn::complete_run(command);
         // Loops and re-runs compare normalized keys: agents vary pipes and flags (R1.3).
         let key = command_key(command);
         let command = key.as_str();
@@ -929,7 +931,7 @@ impl Controller {
         if matches!(kind, OutputKind::Test | OutputKind::Build)
             && self.cfg.learn != FleetSetting::Off
         {
-            let passed = self.run_failed == Some(false);
+            let passed = self.run_failed == Some(false) && complete;
             for f in self.learning.on_run(command, &failures, passed) {
                 self.push(
                     d,

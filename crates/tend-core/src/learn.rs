@@ -31,6 +31,33 @@ pub struct KnownFix {
     pub at_ms: u64,
 }
 
+/// A run that can show a fix: no pipe (it hides the exit code and can cut the summary),
+/// and no flag that stops early or runs only some tests.
+pub fn complete_run(command: &str) -> bool {
+    let piped = command.replace("||", "").contains('|');
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let partial = words.iter().enumerate().any(|(i, &w)| {
+        // `python -m pytest` names a module; pytest's own `-m` picks tests.
+        let interpreter_flag = w == "-m" && i > 0 && words[i - 1].starts_with("python");
+        !interpreter_flag
+            && (matches!(
+                w,
+                "-x" | "--exitfirst"
+                    | "--lf"
+                    | "--last-failed"
+                    | "-k"
+                    | "-m"
+                    | "--bail"
+                    | "-failfast"
+                    | "--fail-fast"
+                    | "-run"
+            ) || w.starts_with("--maxfail")
+                || w.starts_with("--bail=")
+                || w.starts_with("-run="))
+    });
+    !piped && !partial
+}
+
 /// A fix this session just learned.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fixed {
@@ -83,41 +110,40 @@ impl Learning {
         }
     }
 
-    /// A test or build run of command `key`. `passed`: it is known to have exited 0.
-    /// Failures of an earlier failing run that are gone now, with files changed in
-    /// between, are learned.
+    /// A test or build run of command `key`. `passed`: it exited 0, showed no failure,
+    /// and ran everything (`complete_run`). Only such a pass, after files changed,
+    /// teaches fixes: a failing run whose failures differ may have stopped early or
+    /// broken elsewhere (a syntax error hides the test that failed before).
     pub fn on_run(&mut self, key: &str, failures: &[Failure], passed: bool) -> Vec<Fixed> {
-        let now: BTreeSet<&str> = failures.iter().map(|f| f.signature.as_str()).collect();
-        let mut fixed = Vec::new();
-        if let Some(o) = self.open.get_mut(key) {
-            // Only what is gone counts, and only when the run says it is gone: a pass,
-            // or a failing run whose failures the parsers read.
-            if passed || !failures.is_empty() {
-                let files: Vec<String> = o.files.iter().cloned().collect();
-                if !files.is_empty() {
-                    fixed = o
-                        .failures
-                        .iter()
-                        .filter(|f| !now.contains(f.signature.as_str()) && !f.summary_only)
-                        .map(|f| Fixed {
-                            failure: f.clone(),
-                            command: key.to_string(),
-                            files: files.clone(),
-                        })
-                        .collect();
+        if passed && failures.is_empty() {
+            let Some(o) = self.open.remove(key) else {
+                return Vec::new();
+            };
+            let files: Vec<String> = o.files.into_iter().collect();
+            if files.is_empty() {
+                return Vec::new();
+            }
+            return o
+                .failures
+                .into_iter()
+                .filter(|f| !f.summary_only)
+                .map(|failure| Fixed {
+                    failure,
+                    command: key.to_string(),
+                    files: files.clone(),
+                })
+                .collect();
+        }
+        if !failures.is_empty() {
+            // Every failure seen since the first failing run: a pass fixes them all.
+            let o = self.open.entry(key.to_string()).or_default();
+            for f in failures {
+                if !o.failures.iter().any(|x| x.signature == f.signature) {
+                    o.failures.push(f.clone());
                 }
             }
         }
-        if passed && failures.is_empty() {
-            self.open.remove(key);
-        } else if !failures.is_empty() {
-            let o = self.open.entry(key.to_string()).or_default();
-            o.failures = failures.to_vec();
-            if !fixed.is_empty() {
-                o.files.clear();
-            }
-        }
-        fixed
+        Vec::new()
     }
 
     /// The second time this session hits a failure that another session fixed: that
@@ -182,31 +208,20 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_that_goes_away_after_edits_is_learned() {
+    fn failures_that_a_later_pass_shows_gone_are_learned() {
         let mut l = Learning::default();
         l.set_context("/repo", vec![]);
         assert!(l
             .on_run("pytest", &[fail("a"), fail("b")], false)
             .is_empty());
         l.on_edit("/repo/src/x.py");
-        // b is gone, a stays: b is learned.
-        let f = l.on_run("pytest", &[fail("a")], false);
-        assert_eq!(f.len(), 1);
-        assert_eq!(f[0].failure.signature, "b");
-        assert_eq!(f[0].files, ["src/x.py"]);
+        // b is gone, a stays: a failing run teaches nothing (it may have stopped early).
+        assert!(l.on_run("pytest", &[fail("a")], false).is_empty());
         l.on_edit("/repo/src/y.py");
         let f = l.on_run("pytest", &[], true);
-        assert_eq!(
-            f.iter()
-                .map(|x| x.failure.signature.as_str())
-                .collect::<Vec<_>>(),
-            ["a"]
-        );
-        assert_eq!(
-            f[0].files,
-            ["src/y.py"],
-            "the files since the last learned fix"
-        );
+        let sigs: Vec<&str> = f.iter().map(|x| x.failure.signature.as_str()).collect();
+        assert_eq!(sigs, ["a", "b"], "the pass shows both gone");
+        assert_eq!(f[0].files, ["src/x.py", "src/y.py"]);
     }
 
     #[test]
@@ -259,5 +274,29 @@ mod tests {
         assert!(Learning::default()
             .recall(&[fail("zz"), fail("zz")])
             .is_none());
+    }
+
+    #[test]
+    fn only_complete_runs_can_show_a_fix() {
+        for cmd in [
+            "pytest -x",
+            "pytest | tail -20",
+            "pytest --lf",
+            "pytest -k api",
+            "go test -run TestX ./...",
+            "pytest --maxfail=1",
+            "python -m pytest -m slow",
+        ] {
+            assert!(!complete_run(cmd), "{cmd}");
+        }
+        for cmd in [
+            "pytest",
+            "cargo test",
+            "pytest tests/ -q",
+            "npm test || true",
+            "make check",
+        ] {
+            assert!(complete_run(cmd), "{cmd}");
+        }
     }
 }

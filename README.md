@@ -107,7 +107,7 @@ learn = look                    # recall fixes other sessions learned, and proje
 
 ### Learning
 
-tend remembers fixes across sessions on this machine. When a test or build failure goes away after edits, the session keeps a learned fix (the failure, the command, the files changed) in `~/.local/share/tend/learn/fixes.jsonl`. The second time another session hits the same failure, tend tells it where and how it was fixed, this project's fix first. Notes (`tend note`) are what you want every session of a project to know; an agent may write one, but only you approve it. With `learn = on` (optimize mode) the agent gets both; with `look`, the default, they are only recorded.
+tend remembers fixes across sessions on this machine. When a test or build failure goes away after edits and a complete run passes (no pipe, no `-x`, `-k`, or `--lf`), the session keeps a learned fix (the failure, the command, the files changed) in `~/.local/share/tend/learn/fixes.jsonl`. The second time another session hits the same failure, tend tells it where and how it was fixed, this project's fix first. Notes (`tend note`) are what you want every session of a project to know. A note you type in your terminal is kept; one written from an agent's shell (or without a terminal) waits until you `tend notes approve` it. With `learn = on` (optimize mode) the agent gets both; with `look`, the default, they are only recorded.
 
 ### Fleet
 
@@ -134,6 +134,8 @@ audit_ignore = ["vendor/**"]                      # left out of `tend audit`
 
 An edit of a protected path is denied in optimize mode (and recorded in look mode) until you run `! tend allow`, like any guard flag. Globs are relative to the repo root; `*` stays within a directory, `**` crosses them, and a pattern without `/` matches a file name anywhere.
 
+A bad line is skipped with a warning when `tend claude` starts; the other lines still apply.
+
 ### Audit (experimental)
 
 `tend audit` reads a git diff, or a whole `tend claude` session with `experimental_audit = true`, and lists what changed in the project's checks:
@@ -145,7 +147,6 @@ An edit of a protected path is denied in optimize mode (and recorded in look mod
 
 It only reports; it never blocks. It reads the working tree through a temporary index, so your index, branch, and files are untouched. The feature is under test: its output may change.
 
-A bad line is skipped with a warning when `tend claude` starts; the other lines still apply.
 
 ## Environment
 

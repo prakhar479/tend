@@ -369,6 +369,17 @@ pub fn run_hub(dir: &Path, resume: bool) -> Result<()> {
                 hub.worktrees.insert(slot, dir);
             }
         }
+        // Done parts went up before the hub stopped; their starts are gone with it.
+        let done: Vec<String> = hub
+            .model
+            .tasks()
+            .filter(|t| t.state == tend_core::fleet::model::TaskState::Done)
+            .map(|t| t.id.clone())
+            .collect();
+        hub.lifted.extend(done);
+        hub.integrated.extend(hub.model.slots().keys().cloned());
+        // Sessions of the old hub may still finish a turn: stop them before new ones start.
+        stop_old_sessions(dir);
         eprintln!("tend fleet hub {}: restarted", hub.meta.id);
         hub.apply(FleetEvent::HubRestarted);
     } else {
@@ -480,7 +491,7 @@ impl Hub {
                 // Sessions that ignore every signal: do not wait forever.
                 if now_ms().saturating_sub(since) > 30_000 {
                     for p in self.procs.values() {
-                        kill(p.pid, libc::SIGKILL);
+                        kill(-p.pid, libc::SIGKILL);
                     }
                     return;
                 }
@@ -544,7 +555,7 @@ impl Hub {
                 cwd,
             } => return self.join(role, name, pid, cwd),
             HubRequest::Leave { slot } => {
-                if !self.attached.contains(&slot) {
+                if !self.attached.remove(&slot) {
                     return format!("tend: refused. {slot} did not join from a terminal.");
                 }
                 FleetEvent::Exited {
@@ -715,7 +726,7 @@ impl Hub {
                             if exited.load(Ordering::SeqCst) {
                                 return;
                             }
-                            kill(pid, sig);
+                            kill(-pid, sig);
                         }
                     });
                 }
@@ -862,6 +873,8 @@ impl Hub {
             .spawn()
             .context("start tend claude")?;
         let pid = child.id() as i32;
+        // For a restarted hub to stop it (G1): the launcher leads the session's group.
+        let _ = fs::write(files.join(format!("{name}.pid")), pid.to_string());
         // Its own writer: a full pipe blocks this thread, not the hub.
         let stdin = child.stdin.take().map(|mut pipe| {
             let (tx, rx) = mpsc::channel::<String>();
@@ -1054,6 +1067,10 @@ impl Hub {
             .as_ref()
             .and_then(|s| self.worktrees.get(s).cloned().or_else(|| self.slot_dir(s)))
             .ok_or("its worktree is gone")?;
+        // Whole worktrees: `git apply` in a subdirectory would skip what is outside it.
+        let top = |p: &Path| crate::audit::repo_root(p).unwrap_or_else(|_| p.to_path_buf());
+        let (src, target) = (top(&src), top(target));
+        let target = target.as_path();
         if src == target {
             return Ok(Moved::default());
         }
@@ -1145,7 +1162,8 @@ impl Hub {
         if tree == into {
             return Ok(Moved::default());
         }
-        let diff = git(&["diff", "--binary", &into, &tree]).map_err(|e| e.to_string())?;
+        let diff =
+            git(&["diff-tree", "-p", "--binary", &into, &tree]).map_err(|e| e.to_string())?;
         let mut apply = Command::new("git")
             .arg("-C")
             .arg(target)
@@ -1182,7 +1200,15 @@ impl Hub {
         let diff = Command::new("git")
             .arg("-C")
             .arg(src)
-            .args(["diff", "--binary", base])
+            .args([
+                "diff",
+                "--binary",
+                "--no-ext-diff",
+                "--no-color",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                base,
+            ])
             .stdin(Stdio::null())
             .output()
             .map_err(|e| e.to_string())?;
@@ -1210,7 +1236,17 @@ impl Hub {
             }
             moved = true;
         }
-        let new = git_out(src, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+        let new = git_out(
+            src,
+            &[
+                "-c",
+                "core.quotePath=false",
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+            ],
+        )
+        .unwrap_or_default();
         for f in new.lines() {
             let to = target.join(f);
             if to.exists() {
@@ -1287,6 +1323,13 @@ impl Hub {
         };
         let scratch = self.dir.join("scratch");
         let _ = paths::ensure_private_dir(&scratch);
+        // Once per task: a retry to the same session (or a lead's message that looks like
+        // a task) must not move the start past the first attempt's work.
+        let holds =
+            self.model.slots().get(slot).and_then(|s| s.task.as_deref()) == Some(task.as_str());
+        if !holds || self.bases.contains_key(&task) {
+            return;
+        }
         if let Ok(tree) = crate::audit::worktree_tree(&root, &scratch) {
             self.bases.insert(task, (root, tree));
         }
@@ -1575,7 +1618,17 @@ fn diff_size(wt: &Path, base_tree: Option<&str>) -> Option<u64> {
             Some(f.next()?.parse::<u64>().unwrap_or(0) + f.next()?.parse::<u64>().unwrap_or(0))
         })
         .sum();
-    let new = git_out(wt, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+    let new = git_out(
+        wt,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+        ],
+    )
+    .unwrap_or_default();
     for f in new.lines() {
         n += fs::read_to_string(wt.join(f)).map_or(0, |t| t.lines().count() as u64);
     }
@@ -1637,6 +1690,52 @@ fn read_output(out: impl Read, mut log: File, slot: &str, tx: &Sender<Msg>) {
             return;
         }
     }
+}
+
+/// A restarted hub stops the sessions the old one left: each slot's process group,
+/// from `slots/<slot>.pid`, is sent SIGTERM, then SIGKILL after a second.
+fn stop_old_sessions(dir: &Path) {
+    let mut groups = Vec::new();
+    for e in fs::read_dir(dir.join("slots"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "pid") {
+            if let Some(pid) = fs::read_to_string(&p)
+                .ok()
+                .and_then(|t| t.trim().parse::<i32>().ok())
+            {
+                // SAFETY: signal 0 only checks that the group exists. The pid may have
+                // been reused since: signal it only if it is still a `tend claude`.
+                if pid > 1 && unsafe { libc::kill(-pid, 0) } == 0 && is_tend_claude(pid) {
+                    kill(-pid, libc::SIGTERM);
+                    groups.push(pid);
+                }
+            }
+            let _ = fs::remove_file(&p);
+        }
+    }
+    if !groups.is_empty() {
+        thread::sleep(Duration::from_secs(1));
+        for pid in groups {
+            kill(-pid, libc::SIGKILL);
+        }
+    }
+}
+
+fn is_tend_claude(pid: i32) -> bool {
+    let cmd = fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|b| String::from_utf8_lossy(&b).replace('\0', " "))
+        .or_else(|_| {
+            Command::new("ps")
+                .args(["-o", "command=", "-p", &pid.to_string()])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        })
+        .unwrap_or_default();
+    cmd.contains("tend") && cmd.contains("claude") && cmd.contains("stream-json")
 }
 
 /// The pid of the process at the other end of a Unix socket.
@@ -1828,7 +1927,16 @@ pub fn send(dir: &Path, req: &HubRequest) -> Result<String> {
     line.push('\n');
     stream.write_all(line.as_bytes())?;
     let mut out = String::new();
-    BufReader::new(stream).read_line(&mut out)?;
+    if let Err(e) = BufReader::new(stream).read_line(&mut out) {
+        if matches!(
+            e.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ) {
+            // Not "down": the hub got it and is busy. Repeating it could do it twice.
+            return Ok("tend: the hub is busy and did not answer in 10 s; your request may still apply. Check with `tend task list` or `tend fleet status` before you repeat it.".into());
+        }
+        return Err(e.into());
+    }
     let r: Reply = serde_json::from_str(&out)?;
     Ok(r.message.unwrap_or_default())
 }
@@ -2212,9 +2320,14 @@ pub fn prune(yes: bool) -> Result<String> {
                 .unwrap_or_default();
             let branch = branch_name(&meta.id, &name);
             let dirty = git_out(&wt, &["status", "--porcelain"]).is_some();
-            let ahead = git_out(repo, &["rev-list", "--count", &format!("{base}..{branch}")])
-                .and_then(|n| n.parse::<u64>().ok())
-                .unwrap_or(0);
+            let count = |range: String, at: &Path| {
+                git_out(at, &["rev-list", "--count", &range])
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(0)
+            };
+            // Its branch, or a detached HEAD in it, past the base: unmerged commits.
+            let ahead =
+                count(format!("{base}..{branch}"), repo).max(count(format!("{base}..HEAD"), &wt));
             let why = if dirty {
                 Some("it has uncommitted changes".to_string())
             } else if ahead > 0 {
@@ -2337,7 +2450,16 @@ fn changed_files(wt: &Path, base: &str) -> Vec<String> {
     if let Some(t) = git_out(wt, &["diff", "--name-only", base]) {
         files.extend(t.lines().map(String::from));
     }
-    if let Some(t) = git_out(wt, &["ls-files", "--others", "--exclude-standard"]) {
+    if let Some(t) = git_out(
+        wt,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+        ],
+    ) {
         files.extend(t.lines().map(String::from));
     }
     files.sort();
@@ -2547,6 +2669,30 @@ fn merge_plan(dir: &Path, meta: &Meta, model: &Model, yes: bool) -> Result<Strin
                     .stdin(Stdio::null())
                     .output()
             };
+            let markers = Command::new("git")
+                .arg("-C")
+                .arg(wt)
+                .args([
+                    "grep",
+                    "-l",
+                    "--untracked",
+                    "-e",
+                    "^<<<<<<< ",
+                    "-e",
+                    "^>>>>>>> ",
+                ])
+                .stdin(Stdio::null())
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            if !markers.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "  not committing {name}: conflict markers in {}. Resolve them first.",
+                    markers.lines().collect::<Vec<_>>().join(", ")
+                );
+                continue;
+            }
             let failed = [&["add", "-A"][..], &["commit", "-q", "-m", &msg]]
                 .into_iter()
                 .find_map(|args| match run(args) {
@@ -2741,8 +2887,18 @@ pub fn restart(spec: Option<&str>) -> Result<String> {
     )
 }
 
+/// Fleet control is the user's: refuse it in a fleet session's shell. The hub also
+/// tells sessions apart by their process tree.
+fn refuse_in_fleet_session() -> Result<()> {
+    if std::env::var_os("TEND_FLEET_SLOT").is_some() {
+        bail!("Fleet control is the user's. A fleet session asks its lead or the user.");
+    }
+    Ok(())
+}
+
 /// `tend fleet down`: stop every session, and wait for the hub to finish.
 pub fn down(spec: Option<&str>) -> Result<String> {
+    refuse_in_fleet_session()?;
     let dir = resolve(spec)?;
     let said =
         send(&dir, &HubRequest::Down).map_err(|_| anyhow!("the fleet's hub is not running"))?;
@@ -2763,6 +2919,7 @@ pub fn down(spec: Option<&str>) -> Result<String> {
 
 /// A request to the fleet's hub, for stop, spawn, and scale.
 pub fn ask(spec: Option<&str>, req: HubRequest) -> Result<String> {
+    refuse_in_fleet_session()?;
     let dir = resolve(spec)?;
     send(&dir, &req).map_err(|_| anyhow!("the fleet's hub is not running"))
 }

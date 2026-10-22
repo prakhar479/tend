@@ -85,6 +85,9 @@ pub struct Task {
     /// A best-of candidate: picked by the judge, or not (G9).
     #[serde(default)]
     pub picked: Option<bool>,
+    /// A part a best-of task fanned out.
+    #[serde(default)]
+    pub candidate: bool,
 }
 
 impl Model {
@@ -202,6 +205,7 @@ impl Model {
                 best_of: false,
                 diff_lines: None,
                 picked: None,
+                candidate: false,
             },
         );
         if let Some(n) = fan {
@@ -335,6 +339,7 @@ impl Model {
                 best_of: false,
                 diff_lines: None,
                 picked: None,
+                candidate: false,
             },
         );
         id
@@ -360,13 +365,12 @@ impl Model {
                 "You are candidate {k} of {n} on this task; the others work on it in their own worktrees. Do it your own way.\n{}",
                 t.body
             );
-            parts.push(self.add_follow_up(
-                &t,
-                Some(id.to_string()),
-                "candidate",
-                t.title.clone(),
-                body,
-            ));
+            let part =
+                self.add_follow_up(&t, Some(id.to_string()), "candidate", t.title.clone(), body);
+            if let Some(x) = self.tasks.get_mut(&part) {
+                x.candidate = true;
+            }
+            parts.push(part);
         }
         if let Some(x) = self.tasks.get_mut(id) {
             x.best_of = true;
@@ -608,6 +612,13 @@ impl Model {
         if let Some(cur) = &s.task {
             return self.refuse(cx, &by, &format!("{id} already has {cur}."));
         }
+        if self.paused {
+            return self.refuse(
+                cx,
+                &by,
+                "The fleet is paused; no new work until `tend fleet resume`.",
+            );
+        }
         let fits = |t: &Task| {
             t.board == s.leader
                 && matches!(t.state, TaskState::Open | TaskState::Queued)
@@ -679,9 +690,16 @@ impl Model {
             );
         }
         if outcome.is_ok() {
+            // A best-of candidate that failed or is blocked has ended: the judge picks
+            // among the others.
             let open = self
                 .tasks()
-                .find(|c| c.parent.as_deref() == Some(task) && c.state != TaskState::Done)
+                .find(|c| {
+                    c.parent.as_deref() == Some(task)
+                        && c.state != TaskState::Done
+                        && !(c.candidate
+                            && matches!(c.state, TaskState::Failed | TaskState::Blocked))
+                })
                 .map(|c| c.id.clone());
             if let Some(o) = open {
                 return self.refuse(cx, &by, &format!("{o}, a part of {task}, is not done yet."));
@@ -782,7 +800,7 @@ impl Model {
             .unwrap_or_default();
         if state == TaskState::Done {
             if let Some(win) = parts.iter().find(|p| {
-                note.contains(p.as_str())
+                mentions_id(&note, p)
                     && self
                         .tasks
                         .get(*p)
@@ -810,13 +828,14 @@ impl Model {
         match state {
             TaskState::Done => self.after_done(cx, task),
             TaskState::Blocked => self.after_blocked(cx, task),
-            TaskState::Failed => {
-                let parent = self.tasks.get(task).and_then(|t| t.parent.clone());
-                if let Some(p) = parent.filter(|p| self.tasks.get(p).is_some_and(|x| x.best_of)) {
-                    self.judge_if_ready(cx, &p);
-                }
-            }
             _ => {}
+        }
+        // A candidate that ended any way may complete its best-of task's judging.
+        if matches!(state, TaskState::Failed | TaskState::Blocked) {
+            let parent = self.tasks.get(task).and_then(|t| t.parent.clone());
+            if let Some(p) = parent.filter(|p| self.tasks.get(p).is_some_and(|x| x.best_of)) {
+                self.judge_if_ready(cx, &p);
+            }
         }
     }
 
@@ -1029,7 +1048,7 @@ impl Model {
             }
             return self.deliver_task(cx, task, &slot);
         }
-        let at_ms = cx.now + (BACKOFF_MS << (attempts - 1));
+        let at_ms = cx.now + (BACKOFF_MS << attempts.saturating_sub(1));
         if let Some(sid) = &t.slot {
             if let Some(s) = self.slots.get_mut(sid) {
                 if s.task.as_deref() == Some(task) {
@@ -1042,7 +1061,11 @@ impl Model {
             x.slot = None;
             x.not_before = Some(at_ms);
             if x.target.is_none() || x.target.as_deref() == t.slot.as_deref() {
-                x.target = Some(role.clone());
+                // No role to give it to: it goes back on the board for `assign`.
+                x.target = (!role.is_empty()).then(|| role.clone());
+                if x.target.is_none() {
+                    x.state = TaskState::Open;
+                }
             }
         }
         if let Some(sid) = &t.slot {
@@ -1094,10 +1117,8 @@ impl Model {
         let Some(t) = self.tasks.get(&tid).cloned() else {
             return;
         };
+        // Its check decides; the slot stays named, for the worktree to check.
         if t.state == TaskState::Checking {
-            if let Some(x) = self.tasks.get_mut(&tid) {
-                x.slot = None;
-            }
             return;
         }
         if !matches!(t.state, TaskState::Working | TaskState::Bound) {
@@ -1116,16 +1137,13 @@ impl Model {
         if attempts >= budget {
             if let Some(x) = self.tasks.get_mut(&tid) {
                 x.attempts = attempts;
-                x.state = TaskState::Failed;
-                x.slot = None;
-                x.outcome = Some(format!("its session {how}"));
             }
+            self.finish(cx, &tid, TaskState::Failed, format!("its session {how}"));
             let text = format!("{tid} failed: its session {how}, attempt {attempts} of {budget}.");
             self.tell_creator(cx, &t.created_by, MsgKind::Report, &text);
-            self.block_dependents(cx, &tid);
             return;
         }
-        let at_ms = cx.now + (BACKOFF_MS << (attempts - 1));
+        let at_ms = cx.now + (BACKOFF_MS << attempts.saturating_sub(1));
         if let Some(x) = self.tasks.get_mut(&tid) {
             x.attempts = attempts;
             x.state = TaskState::Queued;
@@ -1322,4 +1340,15 @@ impl Model {
         ));
         out
     }
+}
+
+/// `text` names task `id` as a whole id: `t-1.1` is not found in `t-1.12`.
+fn mentions_id(text: &str, id: &str) -> bool {
+    text.match_indices(id).any(|(i, _)| {
+        let after = text[i + id.len()..].chars().next();
+        !after.is_some_and(|c| {
+            c.is_ascii_digit()
+                || c == '.' && text[i + id.len() + 1..].starts_with(|d: char| d.is_ascii_digit())
+        })
+    })
 }

@@ -325,7 +325,8 @@ impl Fleet {
     /// A new conversation in this session: its edits are not this one's.
     pub fn reset_conversation(&mut self) {
         self.my_edits.clear();
-        self.pending.retain(|n| n.kind == NoticeKind::PeerGit);
+        self.pending
+            .retain(|n| matches!(n.kind, NoticeKind::PeerGit | NoticeKind::Message));
         self.told.retain(|(k, _, _)| *k != NoticeKind::PeerEdit);
     }
 
@@ -335,9 +336,10 @@ impl Fleet {
         let mut groups: Vec<Vec<Notice>> = Vec::new();
         let mut rest = Vec::new();
         for n in std::mem::take(&mut self.pending) {
-            // Past the session limit the rest is dropped: more would be noise.
-            if self.sent >= MAX_NOTICES {
-                break;
+            // Past the session limit the rest is dropped: more would be noise. Messages
+            // are not notices: they always go (F4).
+            if self.sent >= MAX_NOTICES && n.kind != NoticeKind::Message {
+                continue;
             }
             match groups.iter().position(|g| same_message(&g[0], &n)) {
                 Some(i) => groups[i].push(n),
@@ -824,6 +826,25 @@ mod tests {
         ] {
             assert_eq!(git_effect(cmd).as_deref(), want, "{cmd}");
         }
+    }
+
+    #[test]
+    fn messages_are_never_capped() {
+        let mut f = fleet_with(TOP);
+        for i in 0..(MAX_NOTICES as u64 + 5) {
+            f.on_peer(
+                "p1",
+                "claude",
+                i,
+                &PeerActivity::Git {
+                    command: "git commit".into(),
+                },
+                i,
+            );
+        }
+        while !flat(&mut f).is_empty() {}
+        f.on_message("lead-1", "answer", "42", 99, 1);
+        assert_eq!(kinds(&mut f), [NoticeKind::Message]);
     }
 
     #[test]

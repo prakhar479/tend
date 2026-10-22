@@ -46,7 +46,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Start Claude Code under tend. Other arguments, `--help` included, go to `claude`.
-    /// `--tend-mode` may come anywhere.
+    ///
+    /// tend's own flags may come anywhere: `--tend-mode look|optimize`; to join a fleet
+    /// from this terminal, `--tend-fleet [ID]` with `--tend-role R` and `--tend-name N`.
+    /// `tend help claude` shows this text.
     #[command(disable_help_flag = true)]
     Claude {
         #[arg(long = "tend-mode", value_enum, default_value = "look")]
@@ -168,25 +171,34 @@ enum Cmd {
     /// team worktree), or a session. Without --kind: an answer to a question, else the
     /// first kind the fleet's channels allow.
     Msg {
+        /// `user`, `@role`, `#team`, or a session's slot (`worker-1`)
         to: String,
+        /// The message
         text: String,
+        /// task, report, question, answer, or notice
         #[arg(long)]
         kind: Option<String>,
+        /// The fleet's id (default: this session's fleet, else the newest live one)
         #[arg(long)]
         fleet: Option<String>,
     },
     /// Messages: this fleet session's, or (for you) the fleet's inbox.
     Inbox {
+        /// The fleet's id (default: this session's fleet, else the newest live one)
         #[arg(long)]
         fleet: Option<String>,
     },
     /// Keep a note for this project: what sessions should know (`tend notes` lists them).
-    /// A note an agent writes waits for your review.
-    Note { text: String },
+    /// A note typed in your terminal is kept; one from an agent waits for your review.
+    Note {
+        /// What every new session of this project should know
+        text: String,
+    },
     /// This project's notes; `approve <id>` or `drop <id>` reviews one (yours to run).
     Notes {
         /// approve or drop
         verb: Option<String>,
+        /// The note's id (`n-3`)
         id: Option<String>,
         /// Every project's notes.
         #[arg(long)]

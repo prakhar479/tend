@@ -15,7 +15,8 @@ use tend_core::{Body, Decision};
 
 use crate::paths;
 
-/// Fixes a session starts with, at most (the newest).
+/// Fixes a session starts with, at most (the newest). The store is cut back to this
+/// many when it holds twice as many, so a session start stays quick.
 const MAX_KNOWN: usize = 2000;
 
 fn dir() -> PathBuf {
@@ -84,12 +85,20 @@ fn save_fixes_in(dir: &Path, decisions: &[Decision], session: &str, project: &st
     if lines.is_empty() || paths::ensure_private_dir(dir).is_err() {
         return;
     }
-    if let Ok(mut f) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("fixes.jsonl"))
-    {
+    let path = dir.join("fixes.jsonl");
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = f.write_all(lines.as_bytes());
+    }
+    // Keep it short: the newest MAX_KNOWN, once it holds twice that.
+    if let Ok(text) = fs::read_to_string(&path) {
+        let all: Vec<&str> = text.lines().collect();
+        if all.len() > 2 * MAX_KNOWN {
+            let keep = all[all.len() - MAX_KNOWN..].join("\n") + "\n";
+            let tmp = dir.join(format!("fixes.jsonl.{}", std::process::id()));
+            if fs::write(&tmp, keep).is_ok() {
+                let _ = fs::rename(&tmp, &path);
+            }
+        }
     }
 }
 
@@ -115,6 +124,20 @@ fn load_notes() -> Vec<Note> {
         .unwrap_or_default()
 }
 
+/// Hold the notes lock (an flock on `notes.lock`) while `f` reads and writes them: two
+/// sessions writing notes at once must not lose one.
+fn with_notes_lock<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    use std::os::unix::io::AsRawFd;
+    paths::ensure_private_dir(&dir())?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir().join("notes.lock"))?;
+    // SAFETY: flock on an open file; the lock goes with the file when it is dropped.
+    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+    f()
+}
+
 fn save_notes(notes: &[Note]) -> Result<()> {
     paths::ensure_private_dir(&dir())?;
     let text: String = notes
@@ -122,7 +145,7 @@ fn save_notes(notes: &[Note]) -> Result<()> {
         .filter_map(|n| serde_json::to_string(n).ok())
         .map(|l| l + "\n")
         .collect();
-    let tmp = dir().join("notes.jsonl.t");
+    let tmp = dir().join(format!("notes.jsonl.{}", std::process::id()));
     fs::write(&tmp, text)?;
     fs::rename(&tmp, dir().join("notes.jsonl"))?;
     Ok(())
@@ -144,15 +167,30 @@ pub fn note(text: &str) -> Result<String> {
         bail!("a note needs text");
     }
     let project = project_of(&std::env::current_dir()?);
-    let by = std::env::var_os("TEND_SESSION_DIR")
-        .and_then(|d| {
-            PathBuf::from(d)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-        })
-        .unwrap_or_else(|| "user".into());
+    // The user's own note: outside a tend session, typed in a terminal. An agent's
+    // shell has no terminal, so clearing TEND_SESSION_DIR does not make it the user's.
+    use std::io::IsTerminal;
+    let by = match std::env::var_os("TEND_SESSION_DIR") {
+        Some(d) => PathBuf::from(d)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "agent".into()),
+        None if std::io::stdin().is_terminal() => "user".into(),
+        None => "no terminal".into(),
+    };
+    with_notes_lock(|| add_note(project, text, by))
+}
+
+fn add_note(project: String, text: &str, by: String) -> Result<String> {
     let mut notes = load_notes();
-    let id = format!("n-{}", notes.len() + 1);
+    // One past the highest: ids are never reused, even after a rewrite.
+    let next = notes
+        .iter()
+        .filter_map(|n| n.id.strip_prefix("n-")?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let id = format!("n-{next}");
     let state = if by == "user" { "approved" } else { "pending" };
     notes.push(Note {
         id: id.clone(),
@@ -172,21 +210,28 @@ pub fn note(text: &str) -> Result<String> {
 
 /// `tend notes [approve|drop <id>] [--all]`.
 pub fn notes(action: Option<(&str, &str)>, all: bool) -> Result<String> {
-    let mut notes = load_notes();
     if let Some((verb, id)) = action {
-        let Some(n) = notes.iter_mut().find(|n| n.id == id) else {
-            bail!("no note {id}");
-        };
-        n.state = if verb == "approve" {
-            "approved"
-        } else {
-            "dropped"
+        // Approving is the user's: an agent must not approve its own note.
+        if std::env::var_os("TEND_SESSION_DIR").is_some() {
+            bail!("approving notes is the user's; run it outside a tend session");
         }
-        .into();
-        let said = format!("{id} is {}.", n.state);
-        save_notes(&notes)?;
-        return Ok(said);
+        return with_notes_lock(|| {
+            let mut notes = load_notes();
+            let Some(n) = notes.iter_mut().find(|n| n.id == id) else {
+                bail!("no note {id}");
+            };
+            n.state = if verb == "approve" {
+                "approved"
+            } else {
+                "dropped"
+            }
+            .into();
+            let said = format!("{id} is {}.", n.state);
+            save_notes(&notes)?;
+            Ok(said)
+        });
     }
+    let notes = load_notes();
     let project = project_of(&std::env::current_dir()?);
     let mut out = String::new();
     for n in notes
@@ -240,6 +285,39 @@ mod tests {
         let got = load_fixes_in(&home, "sess-2");
         assert_eq!(got.len(), 1);
         assert_eq!((got[0].project.as_str(), got[0].at_ms), ("/repo", 42));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_fix_store_is_cut_back_when_it_doubles() {
+        let home = std::env::temp_dir().join(format!("tend-learn-cut-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        let dir = home.clone();
+        fs::create_dir_all(&dir).unwrap();
+        let old: String = (0..2 * MAX_KNOWN)
+            .map(|i| format!("{{\"n\":{i}}}\n"))
+            .collect();
+        fs::write(dir.join("fixes.jsonl"), old).unwrap();
+        let d = Decision {
+            entries: vec![tend_core::Entry {
+                seq: 1,
+                ts_ms: 7,
+                causes: vec![],
+                body: Body::Learned {
+                    signature: "s".into(),
+                    message: "m".into(),
+                    test: None,
+                    command: "pytest".into(),
+                    files: vec!["a.py".into()],
+                },
+            }],
+            ..Decision::default()
+        };
+        save_fixes_in(&home, &[d], "sess-1", "/repo");
+        let text = fs::read_to_string(dir.join("fixes.jsonl")).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), MAX_KNOWN);
+        assert!(lines.last().unwrap().contains("sess-1"), "the newest stays");
         let _ = fs::remove_dir_all(&home);
     }
 }

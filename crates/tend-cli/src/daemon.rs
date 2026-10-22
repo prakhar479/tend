@@ -92,10 +92,11 @@ pub fn run(
             .as_ref()
             .and_then(|r| r.claims.clone())
             .map(|p| (PathBuf::from(p), None)),
-        inbox: rules
-            .as_ref()
-            .and_then(|r| r.inbox.clone())
-            .map(|p| (PathBuf::from(p), 0)),
+        inbox: rules.as_ref().and_then(|r| r.inbox.clone()).map(|p| {
+            let p = PathBuf::from(p);
+            let seen = inbox_seen(&p);
+            (p, seen)
+        }),
         session_id: dir
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -262,19 +263,7 @@ fn read_inbox(st: &mut State) -> Result<()> {
     let Some((path, offset)) = &mut st.inbox else {
         return Ok(());
     };
-    let Ok(text) = fs::read_to_string(&*path) else {
-        return Ok(());
-    };
-    let Some(new) = text.get(*offset as usize..) else {
-        return Ok(());
-    };
-    let end = new.rfind('\n').map_or(0, |i| i + 1);
-    let lines: Vec<serde_json::Value> = new[..end]
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    *offset += end as u64;
-    for v in lines {
+    for v in new_inbox_lines(path, offset) {
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let ev = tend_core::Event::Message {
             from: s("from"),
@@ -285,6 +274,36 @@ fn read_inbox(st: &mut State) -> Result<()> {
         st.store.persist(&d)?;
     }
     Ok(())
+}
+
+/// Where an earlier daemon of this slot stopped reading its inbox (a restart, a
+/// rejoin): old messages are not delivered twice.
+fn inbox_seen(path: &Path) -> u64 {
+    fs::read_to_string(format!("{}.seen", path.display()))
+        .ok()
+        .and_then(|t| t.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Whole lines of the inbox past `offset`, which moves past them and is kept in
+/// `<inbox>.seen`.
+fn new_inbox_lines(path: &Path, offset: &mut u64) -> Vec<serde_json::Value> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Some(new) = text.get(*offset as usize..) else {
+        return Vec::new();
+    };
+    let end = new.rfind('\n').map_or(0, |i| i + 1);
+    let lines = new[..end]
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    *offset += end as u64;
+    if end > 0 {
+        let _ = fs::write(format!("{}.seen", path.display()), offset.to_string());
+    }
+    lines
 }
 
 /// How often the fleet watcher looks at the other sessions (F1).
@@ -598,6 +617,24 @@ fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_daemon_does_not_deliver_old_inbox_messages_again() {
+        let d = std::env::temp_dir().join(format!("tend-inbox-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let inbox = d.join("inbox.jsonl");
+        fs::write(&inbox, "{\"text\":\"one\"}\n{\"text\":\"half").unwrap();
+        let mut offset = inbox_seen(&inbox);
+        assert_eq!(new_inbox_lines(&inbox, &mut offset).len(), 1);
+        fs::write(&inbox, "{\"text\":\"one\"}\n{\"text\":\"two\"}\n").unwrap();
+        // A restart: the offset comes from the file, not from 0.
+        let mut offset = inbox_seen(&inbox);
+        let got = new_inbox_lines(&inbox, &mut offset);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["text"], "two");
+        let _ = fs::remove_dir_all(&d);
+    }
     use crate::connector::claude_code::ClaudeCode;
     use tend_core::{Body, Capabilities, Config};
 
