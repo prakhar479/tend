@@ -251,9 +251,18 @@ fn runner_of(words: &[String]) -> Option<TestRunner> {
         {
             Some(TestRunner::Other)
         }
-        (_, _) if w[0].contains('/') && test_script(&w[0]) => Some(TestRunner::Other),
+        (_, _) if w[0].contains('/') && !is_system_bin(&w[0]) && test_script(&w[0]) => {
+            Some(TestRunner::Other)
+        }
         _ => None,
     }
+}
+
+/// `/usr/bin/test` is the shell's `test` builtin, not a project's test script.
+fn is_system_bin(path: &str) -> bool {
+    ["/bin/", "/usr/bin/", "/usr/local/bin/"]
+        .iter()
+        .any(|d| path.starts_with(d))
 }
 
 /// A script named as a test runner or a test file: `run_tests.py`, `runtests.py`,

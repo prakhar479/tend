@@ -185,6 +185,9 @@ pub struct Decision {
     pub response: Response,
 }
 
+/// Test files whose first text a session keeps for the shell-write guard.
+const MAX_SHELL_BASELINES: usize = 64;
+
 pub struct Controller {
     cfg: Config,
     caps: Capabilities,
@@ -211,6 +214,9 @@ pub struct Controller {
     /// Command keys never to wrap again: a wrapped run of them got no tool result
     /// (Claude Code's auto-mode classifier can deny a rewrite as a bypass).
     no_wrap: std::collections::BTreeSet<String>,
+    /// Test files a shell command changed: their text when this session first saw
+    /// them. Removing a test the session itself added is not weakening.
+    shell_baseline: BTreeMap<String, String>,
     /// The last summary the agent saw, to spot an immediate re-run of its command.
     last_summary: Option<LastSummary>,
     /// Set by `observe` in deferred mode; `filter` moves it into the wrapped call.
@@ -371,6 +377,7 @@ impl Controller {
             failure_values: BTreeMap::new(),
             rewrite_ignored: false,
             no_wrap: std::collections::BTreeSet::new(),
+            shell_baseline: BTreeMap::new(),
             last_summary: None,
             deferred: None,
             last_ms: None,
@@ -869,6 +876,10 @@ impl Controller {
                     self.adapt(d, now, ev, change);
                 }
             }
+            d.blobs.push(Blob {
+                hash,
+                content: output,
+            });
             return;
         }
 
@@ -1628,8 +1639,30 @@ impl Controller {
             let reason = format!("Content hash of {path} repeated an earlier state.");
             self.steer(d, now, ev, SteerTrigger::Cycle { path }, text, reason);
         }
-        let Some((j, reasons)) = self.judge_test_edit(d, now, ev, &path, &old_text, &new_text)
-        else {
+        // Judged against the file as this session first saw it, when that shows no
+        // weakening: dogfood workers were warned for deleting a probe test they had
+        // added themselves a few calls before.
+        let base = match self.shell_baseline.get(&path) {
+            Some(b) => b.clone(),
+            None => {
+                if self.shell_baseline.len() < MAX_SHELL_BASELINES {
+                    self.shell_baseline.insert(path.clone(), old_text.clone());
+                }
+                old_text.clone()
+            }
+        };
+        let from_start_fine = base != old_text
+            && self.policy.protected_by(&path).is_none()
+            && !matches!(
+                self.broker.ask(&Question::TestWeakened {
+                    path: &path,
+                    old: &base,
+                    new: &new_text
+                }),
+                (Answer::Weakened { .. }, _)
+            );
+        let old = if from_start_fine { &base } else { &old_text };
+        let Some((j, reasons)) = self.judge_test_edit(d, now, ev, &path, old, &new_text) else {
             return;
         };
         let message = format!(

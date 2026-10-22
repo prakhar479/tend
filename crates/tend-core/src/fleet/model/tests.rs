@@ -2180,3 +2180,92 @@ fn a_check_whose_session_ended_runs_again_after_a_hub_restart() {
         "{c:?}"
     );
 }
+
+// --- Bug hunt (t-1.4) ---------------------------------------------------------------
+
+#[test]
+fn an_attached_name_does_not_make_a_later_slot_overwrite_it() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "role": {"a": {"run": "attached"}, "b": {"run": "attached"}}
+    })));
+    r.ev(FleetEvent::Up);
+    // `b` takes the name the next unnamed `a` would get.
+    r.ev(FleetEvent::Attached {
+        role: "b".into(),
+        name: Some("a-1".into()),
+        session: "s1".into(),
+    });
+    r.ev(FleetEvent::Attached {
+        role: "a".into(),
+        name: None,
+        session: "s2".into(),
+    });
+    let roles: Vec<(&str, &str)> =
+        r.m.slots()
+            .values()
+            .map(|s| (s.id.as_str(), s.role.as_str()))
+            .collect();
+    assert_eq!(roles.len(), 2, "{roles:?}");
+    assert_eq!(r.m.slots()["a-1"].role, "b");
+}
+
+#[test]
+fn a_huge_attempt_budget_does_not_overflow_the_backoff() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead", "role": {"worker": {"budget": {"attempts": 70}}}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let mut c = r.ev(add(slot("lead-1"), "flaky", &[], None));
+    for _ in 0..90 {
+        r.start_all(&c);
+        let running: Vec<String> =
+            r.m.slots()
+                .values()
+                .filter(|s| s.role == "worker" && s.state == SlotState::Running)
+                .map(|s| s.id.clone())
+                .collect();
+        for id in running {
+            r.ev(FleetEvent::Exited {
+                slot: id,
+                code: Some(0),
+            });
+        }
+        r.now += 6_000_000;
+        c = r.ev(FleetEvent::Tick);
+    }
+    assert_eq!(task_state(&r, "t-1"), TaskState::Failed);
+}
+
+#[test]
+fn usage_after_a_session_ended_is_not_counted_twice() {
+    let mut r = Sim::new(spec(serde_json::json!({"preset": "lead"})));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    r.ev(usage("lead-1", 10, 0.5));
+    r.ev(FleetEvent::Exited {
+        slot: "lead-1".into(),
+        code: None,
+    });
+    r.ev(usage("lead-1", 5, 0.5));
+    assert_eq!(r.m.spend().1, 0.5);
+}
+
+#[test]
+fn a_waiting_oneshot_with_a_task_does_not_start_empty_after_a_hub_restart() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead", "limits": {"sessions": 2}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let c = r.ev(add(slot("lead-1"), "one", &[], None));
+    r.start_all(&c);
+    let c = r.ev(add(slot("lead-1"), "two", &[], None));
+    r.start_all(&c);
+    assert_eq!(r.state("worker-2"), SlotState::Waiting);
+    let c = r.ev(FleetEvent::HubRestarted);
+    assert!(
+        !spawned(&c).contains(&"worker-2"),
+        "its task went back to the queue: {c:?}"
+    );
+}

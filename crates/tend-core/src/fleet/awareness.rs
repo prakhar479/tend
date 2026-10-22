@@ -390,7 +390,8 @@ pub fn message(group: &[Notice]) -> String {
         return first.text.clone();
     }
     let mut names: Vec<&str> = group.iter().map(|n| n.peer.as_str()).collect();
-    names.dedup();
+    let mut seen = BTreeSet::new();
+    names.retain(|n| seen.insert(*n));
     let who = match names.split_last() {
         Some((last, [])) => format!("session {last}"),
         Some((last, rest)) => format!("sessions {} and {last}", rest.join(", ")),
@@ -434,7 +435,10 @@ fn mentions(output: &str, rel: &str) -> bool {
     output.match_indices(rel).any(|(i, _)| {
         output[..i].chars().next_back().is_none_or(|c| {
             matches!(c, '/' | '"' | '\'' | '(' | '[' | ':' | '`') || c.is_whitespace()
-        })
+        }) && !output[i + rel.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
     })
 }
 
@@ -517,7 +521,7 @@ pub fn git_effect(cmd: &str) -> Option<String> {
         let mut i = 1;
         while let Some(a) = w.get(i) {
             match a.as_str() {
-                "-C" | "-c" => i += 2,
+                "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" => i += 2,
                 a if a.starts_with('-') => i += 1,
                 _ => break,
             }
@@ -913,5 +917,35 @@ mod tests {
         assert!(mentions("File \"/repo/src/api.rs\"", "src/api.rs"));
         assert!(!mentions("xsrc/api.rs", "src/api.rs"));
         assert!(!mentions("data.py", "a.py"));
+    }
+
+    #[test]
+    fn a_path_is_not_found_inside_a_longer_name() {
+        assert!(mentions("error in a.py:3", "a.py"));
+        assert!(!mentions("a.pyc is stale", "a.py"));
+        assert!(!mentions("see src/abc.py", "src/ab"));
+        assert!(mentions("FAILED a.py.", "a.py"));
+    }
+
+    #[test]
+    fn git_global_options_with_a_separate_value_are_skipped() {
+        assert!(git_effect("git --git-dir /x/.git commit -m a").is_some());
+        assert!(git_effect("git --work-tree /x checkout main").is_some());
+        assert!(git_effect("git --git-dir=/x/.git commit -m a").is_some());
+    }
+
+    #[test]
+    fn a_group_names_each_peer_once() {
+        let n = |peer: &str| Notice {
+            kind: NoticeKind::PeerFailure,
+            peer: peer.into(),
+            path: Some("a.py".into()),
+            text: String::new(),
+            reason: String::new(),
+            cause: 1,
+            at_ms: 0,
+        };
+        let m = message(&[n("a"), n("b"), n("a")]);
+        assert!(m.contains("sessions a and b "), "{m}");
     }
 }

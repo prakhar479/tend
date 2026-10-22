@@ -68,7 +68,7 @@ fn last_active_secs(dir: &Path) -> u64 {
 /// Delete sessions with no activity for `days` days. Live sessions are kept.
 /// Returns the directories removed.
 pub fn prune(root: &Path, days: u64, now_secs: u64) -> Result<Vec<PathBuf>> {
-    let cutoff = now_secs.saturating_sub(days * 86_400);
+    let cutoff = now_secs.saturating_sub(days.saturating_mul(86_400));
     let mut removed = Vec::new();
     for dir in dirs(root) {
         if last_active_secs(&dir) >= cutoff || is_live(&dir) {
@@ -269,6 +269,19 @@ mod tests {
         let removed = prune(&r, 7, now).unwrap();
         assert_eq!(removed, vec![old.clone()]);
         assert!(!old.exists() && recent.exists());
+        let _ = fs::remove_dir_all(&r);
+    }
+
+    /// `--older-than` with a huge number of days must not wrap and purge everything.
+    #[test]
+    fn prune_with_huge_days_keeps_everything() {
+        let r = root("huge");
+        let now = 2_000_000_000;
+        let recent = r.join(format!("{:010}-2", now - 86_400));
+        fs::create_dir_all(&recent).unwrap();
+        let days = u64::MAX / 86_400 + 2;
+        assert!(prune(&r, days, now).unwrap().is_empty());
+        assert!(recent.exists());
         let _ = fs::remove_dir_all(&r);
     }
 

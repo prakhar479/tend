@@ -98,6 +98,9 @@ pub fn new_token(dir: &Path) -> Result<String> {
         .open(token_path(dir))
         .context("write control token")?;
     f.write_all(token.as_bytes())?;
+    // `mode` applies only when the file is created: an older one keeps its own.
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(token_path(dir), fs::Permissions::from_mode(0o600))?;
     Ok(token)
 }
 
@@ -205,5 +208,19 @@ mod tests {
         let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755, "target untouched");
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_new_token_is_private_even_over_an_old_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("tend-token-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(token_path(&d), "old").unwrap();
+        fs::set_permissions(token_path(&d), fs::Permissions::from_mode(0o644)).unwrap();
+        new_token(&d).unwrap();
+        let mode = fs::metadata(token_path(&d)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = fs::remove_dir_all(&d);
     }
 }

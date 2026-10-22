@@ -671,6 +671,9 @@ impl Hub {
                     let _ = writeln!(self.ledger, "{line}");
                 }
             }
+            // A done part's work goes up before its lead hears "is done": a lead that
+            // looks at once must find it (the e2e test hid this with a sleep).
+            self.bring_up_done_parts();
             for r in &recs {
                 if let FleetBody::Command { command, .. } = &r.body {
                     self.run(command);
@@ -1577,7 +1580,12 @@ fn run_with_timeout(dir: &Path, command: &str, timeout: Duration) -> (Option<i32
     let start = std::time::Instant::now();
     let code = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status.code(),
+            Ok(Some(status)) => {
+                // Anything the check left running holds the pipe open and would block
+                // the reader, and every later check behind the lock.
+                kill(-(child.id() as i32), libc::SIGKILL);
+                break status.code();
+            }
             Ok(None) if start.elapsed() < timeout => thread::sleep(Duration::from_millis(100)),
             _ => {
                 kill(-(child.id() as i32), libc::SIGKILL);
@@ -1982,22 +1990,31 @@ fn fleet_dirs() -> Vec<PathBuf> {
     d
 }
 
+/// The fleet dir named by `s`: its id, or a unique prefix of one.
+fn pick(dirs: &[PathBuf], s: &str) -> Result<PathBuf> {
+    let hits: Vec<&PathBuf> = dirs
+        .iter()
+        .filter(|d| {
+            d.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(s))
+        })
+        .collect();
+    // An id that is also the start of a longer one names itself.
+    if let Some(exact) = hits.iter().find(|d| d.file_name().is_some_and(|n| n == s)) {
+        return Ok((*exact).clone());
+    }
+    match hits[..] {
+        [one] => Ok(one.clone()),
+        [] => bail!("no fleet `{s}` (`tend fleet status` lists them)"),
+        _ => bail!("`{s}` matches {} fleets; give more of the id", hits.len()),
+    }
+}
+
 /// A fleet by id or unique prefix; else the newest one that is up; else the newest.
 pub fn resolve(spec: Option<&str>) -> Result<PathBuf> {
     let dirs = fleet_dirs();
     if let Some(s) = spec {
-        let hits: Vec<&PathBuf> = dirs
-            .iter()
-            .filter(|d| {
-                d.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with(s))
-            })
-            .collect();
-        return match hits[..] {
-            [one] => Ok(one.clone()),
-            [] => bail!("no fleet `{s}` (`tend fleet status` lists them)"),
-            _ => bail!("`{s}` matches {} fleets; give more of the id", hits.len()),
-        };
+        return pick(&dirs, s);
     }
     if let Some(d) = dirs.iter().rev().find(|d| is_up(d)) {
         return Ok(d.clone());
@@ -2982,6 +2999,25 @@ mod tests {
         assert!(limit_of(short, "w-1").is_none());
         let reached = r#"{"type":"result","result":"You've hit your session limit · resets 4pm"}"#;
         assert!(limit_of(reached, "w-1").is_some());
+    }
+
+    #[test]
+    fn an_exact_fleet_id_wins_over_longer_ids_it_starts() {
+        let dirs = vec![PathBuf::from("/f/100-1"), PathBuf::from("/f/100-12")];
+        assert_eq!(pick(&dirs, "100-1").unwrap(), PathBuf::from("/f/100-1"));
+        assert!(pick(&dirs, "100-").is_err());
+    }
+
+    #[test]
+    fn a_check_that_leaves_a_background_process_still_finishes() {
+        let d = std::env::temp_dir();
+        let t = std::time::Instant::now();
+        let (code, out) = run_with_timeout(&d, "sleep 30 & echo hi", Duration::from_secs(60));
+        assert_eq!(code, Some(0), "{out}");
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "waited for the leftover"
+        );
     }
 
     #[test]

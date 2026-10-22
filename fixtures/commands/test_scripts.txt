@@ -21,3 +21,10 @@ not	python3 contest.py
 not	./testdata/gen.sh
 not	vim test.sh
 not	python3 latest.py
+test	timeout -k 5 60 pytest -q
+test	timeout --signal=KILL 60 pytest
+test	env -i pytest
+test	nice -n 10 pytest
+test	time -p pytest
+test	env -u FOO pytest
+not	/usr/bin/test -f x

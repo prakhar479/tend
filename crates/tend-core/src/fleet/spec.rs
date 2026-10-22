@@ -472,6 +472,9 @@ fn resolve_at(
             )),
         }
     }
+    if file.stuck_minutes == Some(0) {
+        errors.push(format!("{at}stuck_minutes must be at least 1."));
+    }
     if limits.sessions == 0 {
         errors.push(format!("{at}limits.sessions must be at least 1."));
     }
@@ -481,7 +484,7 @@ fn resolve_at(
             limits.depth
         ));
     }
-    let own = (level - 1 + limits.depth).min(MAX_DEPTH);
+    let own = (level - 1).saturating_add(limits.depth).min(MAX_DEPTH);
     let max_level = max_level.map_or(own, |m| m.min(own));
     if let Some(pl) = parent {
         if limits.sessions > pl.sessions {
@@ -1155,5 +1158,26 @@ mod tests {
             None
         );
         assert_eq!(duration_ms(&Amount::Text("2h".into())), Some(7_200_000));
+    }
+
+    #[test]
+    fn a_huge_team_depth_is_an_error_not_a_panic() {
+        let f: SpecFile = serde_json::from_value(serde_json::json!({
+            "role": {"sub": {"run": "stream", "team": {
+                "role": {"w": {}}, "limits": {"depth": 4294967295u64}
+            }}}
+        }))
+        .unwrap();
+        let _ = resolve(&f);
+    }
+
+    #[test]
+    fn stuck_minutes_must_be_at_least_one() {
+        let f: SpecFile = serde_json::from_value(serde_json::json!({
+            "preset": "pool", "stuck_minutes": 0
+        }))
+        .unwrap();
+        let e = resolve(&f).unwrap_err();
+        assert!(e.iter().any(|m| m.contains("stuck_minutes")), "{e:?}");
     }
 }

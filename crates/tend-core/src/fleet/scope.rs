@@ -46,7 +46,7 @@ impl Rules {
     pub fn new(f: &RulesFile) -> Self {
         let globs = |v: &[String]| v.iter().filter_map(|g| Glob::new(g)).collect();
         Rules {
-            root: f.root.trim_end_matches('/').to_string(),
+            root: lexical(&f.root).trim_end_matches('/').to_string(),
             slot: f.slot.clone(),
             may_write: globs(&f.may_write),
             may_not_write: globs(&f.may_not_write),
@@ -79,6 +79,7 @@ impl Rules {
     /// Why this session may not edit `path`, if it may not.
     pub fn refuse(&self, path: &str) -> Option<String> {
         // `/wt/team-2/x` is not inside `/wt/team`.
+        let path = &lexical(path);
         let rel = path
             .strip_prefix(&self.root)
             .filter(|r| r.is_empty() || r.starts_with('/') || self.root.ends_with('/'))
@@ -100,6 +101,28 @@ impl Rules {
             }
         }
         None
+    }
+}
+
+/// `path` without `.`, empty, and `x/..` parts, so `src/../tests/a` is `tests/a`. Parts
+/// of a relative path that climb out stay.
+fn lexical(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for p in path.split('/') {
+        match p {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|l| *l != "..") => {
+                parts.pop();
+            }
+            ".." if path.starts_with('/') => {}
+            p => parts.push(p),
+        }
+    }
+    let body = parts.join("/");
+    if path.starts_with('/') {
+        format!("/{body}")
+    } else {
+        body
     }
 }
 
@@ -173,5 +196,21 @@ mod tests {
             .is_some_and(|w| w.contains("worker-2 claimed `src/api/**` for t-2")));
         assert!(r.refuse("/wt/team/src/db.rs").is_none());
         assert_eq!(r.claims.len(), 1, "not its own, not another worktree's");
+    }
+
+    #[test]
+    fn dots_and_doubled_slashes_do_not_hide_a_path() {
+        let r = rules(&[], &["tests/**"]);
+        for p in [
+            "/wt/team/src/../tests/a.py",
+            "/wt/team/./tests/a.py",
+            "/wt/team//tests/a.py",
+            "./tests/a.py",
+            "src/../tests/a.py",
+        ] {
+            assert!(r.refuse(p).is_some(), "{p}");
+        }
+        assert!(r.refuse("/wt/team/tests/../src/a.py").is_none());
+        assert!(r.refuse("/wt/team/../team-2/tests/a.py").is_none());
     }
 }

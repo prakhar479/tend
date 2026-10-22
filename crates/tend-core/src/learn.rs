@@ -22,6 +22,7 @@ const MAX_HUNK_LINES: usize = 40;
 /// A fix's change as shown: lines and characters, at most.
 const MAX_CHANGE_LINES: usize = 30;
 const MAX_CHANGE_CHARS: usize = 1500;
+const MAX_CHANGE_LINE_CHARS: usize = 200;
 
 /// A fix another session learned, as the daemon loads it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,7 +73,9 @@ fn partial(command: &str) -> bool {
     let words: Vec<&str> = command.split_whitespace().collect();
     words.iter().enumerate().any(|(i, &w)| {
         // `python -m pytest` names a module; pytest's own `-m` picks tests.
-        let interpreter_flag = w == "-m" && i > 0 && words[i - 1].starts_with("python");
+        // `python -m pytest` and `python -mpytest` name a module; pytest's own `-m`
+        // picks tests.
+        let interpreter_flag = w.starts_with("-m") && i > 0 && words[i - 1].starts_with("python");
         !interpreter_flag
             && (matches!(
                 w,
@@ -86,6 +89,11 @@ fn partial(command: &str) -> bool {
                     | "--fail-fast"
                     | "-run"
             ) || w.starts_with("--maxfail")
+                || w.starts_with("--deselect")
+                || (w.starts_with("-k") || w.starts_with("-m"))
+                    && !w.starts_with("--")
+                    && w.len() > 2
+                    && !interpreter_flag
                 || w.starts_with("--bail=")
                 || w.starts_with("-run="))
     })
@@ -151,6 +159,11 @@ fn render_change(hunks: &[Hunk]) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
+    // Redact before capping, so a cut cannot split a secret; then cap each line.
+    let lines: Vec<String> = crate::text::redact(&lines.join("\n"))
+        .lines()
+        .map(|l| crate::text::truncate_chars(l, MAX_CHANGE_LINE_CHARS))
+        .collect();
     let total = lines.len();
     let mut out = String::new();
     let mut shown = 0;
@@ -165,7 +178,7 @@ fn render_change(hunks: &[Hunk]) -> Option<String> {
     if shown < total {
         out.push_str(&format!("… ({} more lines)\n", total - shown));
     }
-    Some(crate::text::redact(out.trim_end()).into_owned())
+    Some(out.trim_end().to_string())
 }
 
 #[derive(Debug, Default)]
@@ -374,6 +387,23 @@ impl Learning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attached_selectors_are_partial_runs() {
+        assert!(!complete_run("pytest -kfoo"));
+        assert!(!complete_run("pytest -mslow"));
+        assert!(!complete_run("pytest --deselect tests/a.py::t"));
+        assert!(complete_run("pytest tests"));
+    }
+
+    #[test]
+    fn a_long_changed_line_still_shows_its_change() {
+        let long = "x".repeat(5000);
+        let h = Hunk::new("a.py".into(), "a\n", &format!("a\n{long}\n"));
+        let c = render_change(&[h]).unwrap();
+        assert!(c.contains("+xxx"), "{c}");
+        assert!(c.len() < MAX_CHANGE_CHARS + 100);
+    }
 
     #[test]
     fn rel_ignores_sibling_dir_with_shared_prefix() {

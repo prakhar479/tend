@@ -51,8 +51,9 @@ pub fn analyze(transcript: &Path) -> Result<Vec<Entry>> {
     let mut now = 0u64;
     let mut cwd = String::new();
     let mut seen = std::collections::HashSet::new();
-    for line in BufReader::new(f).lines().map_while(Result::ok) {
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+    // Bytes, not `lines()`: one line that is not UTF-8 must not end the analysis.
+    for line in BufReader::new(f).split(b'\n').map_while(Result::ok) {
+        let Ok(v) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
         if let Some(c) = v["cwd"].as_str() {
@@ -353,6 +354,17 @@ fn parse_rfc3339_ms(s: &str) -> Option<u64> {
     let (hms, frac) = time.split_once('.').unwrap_or((time, "0"));
     let mut t = hms.split(':').map(|x| x.parse::<i64>().ok());
     let (hh, mm, ss) = (t.next()??, t.next()??, t.next()??);
+    let ok = (0..=9999).contains(&y)
+        && (1..=12).contains(&m)
+        && (1..=31).contains(&day)
+        && (0..24).contains(&hh)
+        && (0..60).contains(&mm)
+        && (0..61).contains(&ss)
+        && !frac.is_empty()
+        && frac.bytes().all(|b| b.is_ascii_digit());
+    if !ok {
+        return None;
+    }
     let ms: i64 = format!("{frac:0<3}")[..3].parse().ok()?;
     // Days from civil date (Howard Hinnant's algorithm).
     let y = if m <= 2 { y - 1 } else { y };
@@ -435,6 +447,29 @@ mod tests {
         let _ = fs::remove_file(&path);
         let body = |s: &str| s.lines().skip(1).collect::<Vec<_>>().join("\n");
         assert_eq!(body(&a), body(&b));
+    }
+
+    /// One line that is not UTF-8 must not end the analysis (the report's usage count
+    /// already reads bytes).
+    #[test]
+    fn a_non_utf8_line_does_not_end_the_analysis() {
+        let dir = format!("{}/../../fixtures/transcripts", env!("CARGO_MANIFEST_DIR"));
+        let clean = analyze(Path::new(&format!("{dir}/loop_session.jsonl"))).unwrap();
+        let odd = analyze(Path::new(&format!("{dir}/non_utf8_line.jsonl"))).unwrap();
+        assert_eq!(clean.len(), odd.len());
+    }
+
+    /// A bad timestamp in a transcript is skipped, never a panic.
+    #[test]
+    fn odd_timestamps_do_not_panic() {
+        for s in [
+            "2026-10-19T08:35:44.éé9Z",
+            "2026-10-19T08:35:44.-1Z",
+            "99999999999999999-01-01T00:00:00Z",
+            "2026-13-45T99:99:99Z",
+        ] {
+            assert_eq!(parse_rfc3339_ms(s), None, "{s}");
+        }
     }
 
     #[test]

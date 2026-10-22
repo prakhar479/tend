@@ -30,10 +30,13 @@ pub struct Glob {
 impl Glob {
     pub fn new(pattern: &str) -> Option<Glob> {
         let p = pattern.trim().trim_start_matches("./");
+        // `dir/` means the directory: same as `dir`.
+        let anchored = p.trim_end_matches('/').contains('/');
+        let p = p.trim_end_matches('/');
         if p.is_empty() {
             return None;
         }
-        let mut re = String::from(if p.contains('/') { "^" } else { "^(?:.*/)?" });
+        let mut re = String::from(if anchored { "^" } else { "^(?:.*/)?" });
         let mut chars = p.trim_start_matches('/').chars().peekable();
         while let Some(c) = chars.next() {
             match c {
@@ -194,6 +197,15 @@ mod tests {
         assert!(g("tests/golden").matches("tests/golden/out.txt"));
         assert!(g("**/fixtures/**").matches("a/b/fixtures/c.json"));
         assert!(g("src/?.rs").matches("src/a.rs") && !g("src/?.rs").matches("src/ab.rs"));
+    }
+
+    #[test]
+    fn trailing_slash_means_the_directory() {
+        let (p, _) = parse("protected = [\"db/migrations/\"]", "/home/dev/shop");
+        assert!(p
+            .protected_by("/home/dev/shop/db/migrations/0001.sql")
+            .is_some());
+        assert!(p.protected_by("db/migrations/a/b.sql").is_some());
     }
 
     #[test]

@@ -103,6 +103,16 @@ fn reopen_loosens_shape_level() {
     assert_eq!(c.session().shape_level(OutputKind::Test), DEFAULT_LEVEL - 1);
 }
 
+/// The ledger names the output of a re-open by hash: the blob must be stored too.
+#[test]
+fn reopen_stores_the_output_blob() {
+    let mut c = ctl(Mode::Optimize);
+    c.handle(bash("pytest", PYTEST), 0);
+    let shown = "full output as `tend show` prints it, with a header\n";
+    let d = c.handle(bash("tend show o-1", shown), 1);
+    assert!(d.blobs.iter().any(|b| b.content == shown));
+}
+
 /// R1.3: the agent varies the pipe and flags; it is still the same test run.
 #[test]
 fn loops_and_reruns_use_normalized_commands() {
@@ -1573,4 +1583,33 @@ fn context_of_a_stopped_wrapped_run_is_recorded_as_not_delivered() {
     }
     let (steer, actions) = undelivered.expect("a steer");
     assert_eq!(actions, Some(vec![steer]));
+}
+
+#[test]
+fn removing_a_test_this_session_added_is_not_weakening() {
+    // Dogfood: a worker added a probe test with a shell write, then removed it.
+    let orig = "def test_a():\n    assert f() == 1\n";
+    let added = format!("{orig}\ndef test_probe():\n    assert g() == 2\n");
+    let mut c = ctl(Mode::Optimize);
+    let changed = |old: &str, new: &str| Event::FileChanged {
+        tool_use_id: "b".into(),
+        path: "/repo/tests/test_x.py".into(),
+        old_text: old.into(),
+        new_text: new.into(),
+    };
+    let warned = |d: &Decision| {
+        d.entries.iter().any(|e| {
+            matches!(
+                &e.body,
+                Body::Action {
+                    action: ActionKind::Guard { .. },
+                    ..
+                }
+            )
+        })
+    };
+    assert!(!warned(&c.handle(changed(orig, &added), 1)));
+    let d2 = c.handle(changed(&added, orig), 2);
+    assert!(!warned(&d2), "its own probe");
+    assert!(warned(&c.handle(changed(orig, ""), 3)), "an original test");
 }

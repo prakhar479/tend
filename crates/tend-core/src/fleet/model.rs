@@ -18,6 +18,10 @@ pub type SlotId = String;
 pub const MAX_RESTARTS: u32 = 3;
 /// First restart delay; it doubles each time.
 const BACKOFF_MS: u64 = 5_000;
+/// The delay after `n` earlier failures: doubles, up to 1024 times the first.
+fn backoff(n: u32) -> u64 {
+    BACKOFF_MS << n.min(10)
+}
 /// Messages per minute on one edge (sender → receiver), at most.
 pub const RATE_PER_MIN: usize = 10;
 /// A oneshot that asked a question waits this long for the answer (G2).
@@ -596,16 +600,23 @@ impl Model {
     fn new_slot(&mut self, leader: Option<&str>, role: &str) -> SlotId {
         let prefix = leader.map(|l| format!("{l}/")).unwrap_or_default();
         let key = format!("{prefix}{role}");
-        let n = self.counters.entry(key.clone()).or_insert(0);
-        *n += 1;
-        let id = format!("{key}-{n}");
+        // A terminal session may have been named `<key>-<n>`: skip taken ids.
+        let mut n = self.counters.get(&key).copied().unwrap_or(0);
+        let id = loop {
+            n += 1;
+            let id = format!("{key}-{n}");
+            if !self.slots.contains_key(&id) {
+                break id;
+            }
+        };
+        self.counters.insert(key, n);
         self.slots.insert(
             id.clone(),
             Slot {
                 id: id.clone(),
                 role: role.into(),
                 leader: leader.map(String::from),
-                n: *n,
+                n,
                 state: SlotState::Waiting,
                 session: None,
                 restarts: 0,
@@ -772,7 +783,7 @@ impl Model {
         } else if restarts > MAX_RESTARTS {
             (SlotState::Failed, None)
         } else {
-            let wait = BACKOFF_MS << (restarts - 1);
+            let wait = backoff(restarts - 1);
             (SlotState::Waiting, Some(cx.now + wait))
         };
         let restarted =
@@ -879,12 +890,12 @@ impl Model {
                     && s.busy
                     && !self.is_attached(s)
                     && cx.now.saturating_sub(s.last_seen_ms)
-                        >= stuck_ms(self, s) * (u64::from(s.stuck) + 1)
+                        >= stuck_ms(self, s).saturating_mul(u64::from(s.stuck) + 1)
             })
             .map(|s| (s.id.clone(), s.stuck + 1))
             .collect();
         for (id, step) in due {
-            let mins = (cx.now - self.slots[&id].last_seen_ms) / 60_000;
+            let mins = cx.now.saturating_sub(self.slots[&id].last_seen_ms) / 60_000;
             if let Some(s) = self.slots.get_mut(&id) {
                 s.stuck = step;
             }
@@ -1343,8 +1354,17 @@ impl Model {
             match state {
                 TaskState::Working | TaskState::Bound => {
                     if let Some(sid) = &slot {
+                        // A oneshot still waiting for room has nothing left to do.
+                        let oneshot = self
+                            .slots
+                            .get(sid)
+                            .and_then(|s| self.role_def(s))
+                            .is_some_and(|r| r.run == Run::Oneshot);
                         if let Some(s) = self.slots.get_mut(sid) {
                             s.task = None;
+                            if oneshot && s.state == SlotState::Waiting {
+                                s.state = SlotState::Stopped;
+                            }
                         }
                     }
                     let role = slot
@@ -1518,7 +1538,10 @@ impl Model {
 
     /// Tokens and cost the whole fleet used so far.
     pub fn spend(&self) -> (u64, f64) {
-        let tokens = self.slots.values().map(|s| s.tokens).sum();
+        let tokens = self
+            .slots
+            .values()
+            .fold(0u64, |a, s| a.saturating_add(s.tokens));
         let live: f64 = self.slots.values().map(|s| s.cost_usd).sum();
         (tokens, self.spent_usd + live)
     }
@@ -1531,8 +1554,11 @@ impl Model {
         let Some(s) = self.slots.get_mut(id) else {
             return;
         };
-        s.tokens += tokens;
-        s.cost_usd = cost_usd;
+        s.tokens = s.tokens.saturating_add(tokens);
+        // A report that comes after the session ended is already in `spent_usd`.
+        if s.live() {
+            s.cost_usd = cost_usd;
+        }
         let used = s.tokens;
         let budget = self
             .slots

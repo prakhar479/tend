@@ -96,6 +96,10 @@ pub fn session_dir(session_id: &str, cwd: &Path) -> Option<PathBuf> {
 /// The session directory for a status line's stdin JSON (`session_id`), if the plugin
 /// started one.
 pub fn existing_session_dir(session_id: &str) -> Option<PathBuf> {
+    // An id is a name in `by-session/`, never a path.
+    if session_id.is_empty() || session_id.contains(['/', '\\']) || session_id.starts_with('.') {
+        return None;
+    }
     let name = fs::read_to_string(paths::home().join("by-session").join(session_id)).ok()?;
     let dir = paths::sessions_dir().join(name.trim());
     dir.is_dir().then_some(dir)
@@ -113,4 +117,16 @@ fn start(dir: &Path, sock: &Path) -> bool {
     let mode = config::load().plugin_mode;
     launcher::start_daemon(&exe, dir, mode, None, Some(IDLE_EXIT_MINUTES)).is_ok()
         && launcher::wait_for(sock)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_session_id_is_never_a_path() {
+        for id in ["", "../x", "a/b", ".hidden"] {
+            assert!(existing_session_dir(id).is_none(), "{id}");
+        }
+    }
 }

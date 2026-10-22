@@ -1048,7 +1048,7 @@ impl Model {
             }
             return self.deliver_task(cx, task, &slot);
         }
-        let at_ms = cx.now + (BACKOFF_MS << attempts.saturating_sub(1));
+        let at_ms = cx.now + backoff(attempts.saturating_sub(1));
         if let Some(sid) = &t.slot {
             if let Some(s) = self.slots.get_mut(sid) {
                 if s.task.as_deref() == Some(task) {
@@ -1152,7 +1152,7 @@ impl Model {
             self.tell_creator(cx, &t.created_by, MsgKind::Report, &text);
             return;
         }
-        let at_ms = cx.now + (BACKOFF_MS << attempts.saturating_sub(1));
+        let at_ms = cx.now + backoff(attempts.saturating_sub(1));
         if let Some(x) = self.tasks.get_mut(&tid) {
             x.attempts = attempts;
             x.state = TaskState::Queued;

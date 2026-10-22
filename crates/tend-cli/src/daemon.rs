@@ -305,6 +305,11 @@ fn new_inbox_lines(path: &Path, offset: &mut u64) -> Vec<serde_json::Value> {
     let Ok(text) = fs::read_to_string(path) else {
         return Vec::new();
     };
+    // An inbox shorter than what was read was rewritten (a hub restart): read it
+    // again, or nothing more would ever arrive.
+    if *offset as usize > text.len() {
+        *offset = 0;
+    }
     let Some(new) = text.get(*offset as usize..) else {
         return Vec::new();
     };
@@ -763,5 +768,19 @@ mod tests {
         let (ds, r) = decide(None, &[u64::MAX / 4, u64::MAX / 4]);
         assert!(r.permission.is_some());
         assert!(!undelivered(&ds));
+    }
+
+    #[test]
+    fn an_inbox_that_got_shorter_is_read_again() {
+        let d = std::env::temp_dir().join(format!("tend-inbox-short-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let inbox = d.join("inbox.jsonl");
+        fs::write(&inbox, "{\"text\":\"a long first message\"}\n").unwrap();
+        let mut offset = 0;
+        assert_eq!(new_inbox_lines(&inbox, &mut offset).len(), 1);
+        fs::write(&inbox, "{\"text\":\"b\"}\n").unwrap();
+        assert_eq!(new_inbox_lines(&inbox, &mut offset).len(), 1, "not stalled");
+        let _ = fs::remove_dir_all(&d);
     }
 }

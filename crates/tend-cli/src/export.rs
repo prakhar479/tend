@@ -25,10 +25,14 @@ pub fn export(dir: &Path, outputs: bool) -> Result<String> {
         }
         t
     };
+    // Clean the values, not the JSON text: a short user name (`seq`) must not rename keys.
     let ledger: Vec<Value> = entries
         .iter()
-        .filter_map(|e| serde_json::to_string(e).ok())
-        .filter_map(|line| serde_json::from_str(&clean(&line)).ok())
+        .filter_map(|e| serde_json::to_value(e).ok())
+        .map(|mut v| {
+            clean_strings(&mut v, &clean);
+            v
+        })
         .collect();
     let mut blobs = serde_json::Map::new();
     if outputs {
@@ -48,4 +52,29 @@ pub fn export(dir: &Path, outputs: bool) -> Result<String> {
         "outputs": blobs,
     });
     Ok(serde_json::to_string_pretty(&bundle)?)
+}
+
+/// Apply `clean` to every string in `v`, keys left as they are.
+fn clean_strings(v: &mut Value, clean: &dyn Fn(&str) -> String) {
+    match v {
+        Value::String(s) => *s = clean(s),
+        Value::Array(a) => a.iter_mut().for_each(|x| clean_strings(x, clean)),
+        Value::Object(o) => o.values_mut().for_each(|x| clean_strings(x, clean)),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_user_name_that_is_also_a_key_does_not_rename_keys() {
+        let mut v = serde_json::json!({"seq": 1, "body": {"path": "/home/seq/x", "seq": "seq"}});
+        clean_strings(&mut v, &|t: &str| t.replace("seq", "user"));
+        assert_eq!(
+            v,
+            serde_json::json!({"seq": 1, "body": {"path": "/home/user/x", "seq": "user"}})
+        );
+    }
 }

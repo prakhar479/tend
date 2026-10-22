@@ -201,13 +201,14 @@ pub fn program_words(segment: &[String]) -> &[String] {
     loop {
         match w {
             [first, rest @ ..] if is_assignment(first) => w = rest,
-            [first, rest @ ..]
-                if matches!(
-                    first.as_str(),
-                    "env" | "time" | "nice" | "npx" | "bunx" | "pnpx"
-                ) =>
-            {
-                w = rest
+            [first, rest @ ..] if matches!(first.as_str(), "npx" | "bunx" | "pnpx") => w = rest,
+            [first, rest @ ..] if matches!(first.as_str(), "env" | "time" | "nice") => {
+                w = skip_flags(rest, &["-u", "-C", "-f", "-o", "-n", "--unset", "--chdir"])
+            }
+            // `timeout -k 5 --preserve-status 60 cmd`: options, then the duration.
+            [first, rest @ ..] if first == "timeout" => {
+                let r = skip_flags(rest, &["-k", "-s", "--kill-after", "--signal"]);
+                w = r.get(1..).unwrap_or(&[])
             }
             // `uv run --with X --frozen pytest`: options of `uv run` before the program.
             [a, b, rest @ ..] if a == "uv" && b == "run" => {
@@ -230,7 +231,6 @@ pub fn program_words(segment: &[String]) -> &[String] {
                 }
                 w = r
             }
-            [first, _, rest @ ..] if first == "timeout" => w = rest,
             [a, b, rest @ ..]
                 if matches!(
                     (a.as_str(), b.as_str()),
@@ -247,6 +247,22 @@ pub fn program_words(segment: &[String]) -> &[String] {
             _ => return w,
         }
     }
+}
+
+/// Skip leading options of a wrapper (`env -i`, `nice -n 5`); `with_value` ones take a word.
+fn skip_flags<'a>(mut w: &'a [String], with_value: &[&str]) -> &'a [String] {
+    while let Some(o) = w.first().filter(|o| o.starts_with('-') && o.len() > 1) {
+        if o == "--" {
+            return &w[1..];
+        }
+        let n = if with_value.contains(&o.as_str()) {
+            2
+        } else {
+            1
+        };
+        w = &w[n.min(w.len())..];
+    }
+    w
 }
 
 /// A leading `cd DIR && ` (one or more) of a command line: its length in bytes and the

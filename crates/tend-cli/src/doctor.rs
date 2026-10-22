@@ -135,13 +135,22 @@ pub fn run() -> (String, bool) {
     line(
         "info",
         format!(
-            "{} sessions ({live} live), {:.1} MB; `tend claude` deletes those older than keep_days = {}",
+            "{} sessions ({live} live), {:.1} MB; {}",
             all.len(),
             bytes as f64 / 1e6,
-            cfg.keep_days
+            retention(cfg.keep_days)
         ),
     );
     (out, healthy)
+}
+
+/// What `tend claude` does with old sessions. `keep_days = 0` keeps them all.
+fn retention(keep_days: u64) -> String {
+    if keep_days == 0 {
+        "`tend claude` keeps old sessions (keep_days = 0)".into()
+    } else {
+        format!("`tend claude` deletes those older than keep_days = {keep_days}")
+    }
 }
 
 fn find_on_path(name: &str) -> Option<PathBuf> {
@@ -168,4 +177,15 @@ fn dir_size(dir: &Path) -> u64 {
             Err(_) => 0,
         })
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keep_days_zero_is_not_described_as_deleting() {
+        assert!(!retention(0).contains("deletes"));
+        assert!(retention(30).contains("deletes those older than keep_days = 30"));
+    }
 }

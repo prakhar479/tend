@@ -520,6 +520,26 @@ What the run showed about tend:
 - Checked and fine: four workers in parallel worktrees with 3-way merges into the lead's worktree (no conflicts); the check gate; the merge plan (one worktree); the guard flagged a worker's test change in `scope.rs` (assertions 12 → 10), which the worker then reworked.
 - The audit was shallow (the workers say so): four minutes. A deeper round is next.
 
+### Dogfood D2 (2026-10-22): a deeper round
+
+Six Sonnet workers (parsers, shaping and guard, controller, fleet model, hub, cli), each told to read every function and try adversarial input. 7 min, 7.6M tokens, $3.52, no lost attempts. 22 defects fixed by the workers (reviewed, applied):
+
+- [x] Parsers: `timeout -k 5 60 pytest`, `env -i pytest`, `nice -n 10 pytest` were not test runs (wrapper options); `/usr/bin/test -f x` was a test script. Fixtures added.
+- [x] Policy: a directory glob with a trailing slash (`db/migrations/`) matched nothing.
+- [x] Controller and learning: a re-opened output's blob was not stored; `pytest -kfoo`, `-mslow`, `--deselect` counted as complete runs; one long changed line could fill a fix's whole change.
+- [x] Fleet model: scope checks were bypassed by `..`, `.`, and `//` in paths; a terminal session named `<role>-<n>` could be overwritten by a new slot; restart backoff overflowed; usage reported after a session ended was counted twice; a oneshot waiting for room kept waiting after a hub restart with no task; `stuck_minutes = 0` and a huge team depth (panic) are refused; peer-failure notices matched a path inside a longer name (`a.py` in `a.pyc`); `git --git-dir X commit` was not seen as a git change; a notice group could name a peer twice.
+- [x] Hub: a check that left a background process hung the check (and every later one behind the lock); an exact fleet id that starts a longer one was ambiguous.
+- [x] CLI: a non-ASCII or huge timestamp panicked `retro`; a non-UTF-8 transcript line ended `retro`'s analysis (fixture); `tend purge --older-than` with a huge number wrapped and could purge recent sessions; `tend doctor` said `keep_days = 0` deletes sessions (it keeps them all).
+- [x] Fixed after review: `python -mpytest` counted as a partial run (the attached-flag rule).
+
+Left by the workers, fixed after review: a status-line `session_id` was joined into a path unchecked; a control token file that existed kept its looser mode; `tend export` replaced the user name in raw JSON text (a user named `seq` renamed keys); a fleet inbox that got shorter stalled delivery.
+
+What the run showed about tend:
+- [x] **A race the e2e test hid with a sleep.** The hub delivered "t-1.1 is done" to the lead before moving the part's work into the lead's worktree; a lead that looked at once found nothing. Work now moves before the step's commands run; the test has no sleep, and four e2e suites in parallel pass (twice).
+- [x] **Guard false positives on shell writes.** Two workers (one in each round) were warned for deleting a probe test they had added themselves a few calls before. A shell write to a test file is now also judged against the file as the session first saw it; if that shows no weakening (and the path is not protected), it is not flagged.
+- Confirmed fixed from D1: no false worktree-overlap notices this round.
+- Left: the hub's tick loop stalls while the wall clock goes back; the guard's code stripping reads a Rust lifetime followed by a quote as a string.
+
 - [ ] **F6 Cross-provider.** After the Codex connector (S10, E12).
 
 ## Phase 2 — Optimize + Codex (not started)

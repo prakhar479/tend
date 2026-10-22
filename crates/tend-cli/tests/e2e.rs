@@ -2549,7 +2549,6 @@ fn fleet_brings_a_done_parts_work_up_to_its_lead() {
         r#"    *PLAN*)
       tend task add "PART one" >> "$D/lead.txt" 2>&1; result ;;
     *"is done ("*)
-      sleep 0.2
       { test -f part.txt && echo lifted || echo missing; } > "$D/lead-saw.txt"
       tend task done t-1 "whole done" >> "$D/lead.txt" 2>&1; result ;;
     *"Task t-1.1:"*)
