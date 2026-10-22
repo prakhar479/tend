@@ -364,6 +364,9 @@ enum TaskCmd {
         /// More detail for the session that does it.
         #[arg(long, default_value = "")]
         body: String,
+        /// Read the body from a file (`-`: stdin): no shell quoting to get wrong.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<PathBuf>,
         /// Tasks that must be done first, comma-separated (t-1,t-2).
         #[arg(long, value_delimiter = ',')]
         depends: Vec<String>,
@@ -387,7 +390,13 @@ enum TaskCmd {
     Blocked { task: String, reason: String },
     /// Send a task under review back to work, and say why (its creator or the user).
     Reject { task: String, reason: String },
-    /// The board.
+    /// Withdraw a task and its parts that are not done: a duplicate, a garbled body,
+    /// work done elsewhere (its creator, the creator of a task it is part of, or the
+    /// user). Tasks that wait for it are blocked.
+    Drop { task: String, reason: String },
+    /// One task in full: title, body, state, and outcome.
+    Show { task: String },
+    /// The board (one line per task; `tend task show` for the rest).
     List,
 }
 
@@ -833,13 +842,23 @@ fn run(cli: Cli) -> Result<i32> {
                 TaskCmd::Add {
                     title,
                     body,
+                    body_file,
                     depends,
                     scope,
                     role,
                     check,
                 } => hub::TaskVerb::Add {
                     title,
-                    body,
+                    body: match body_file {
+                        Some(p) if p.as_os_str() == "-" => {
+                            let mut b = String::new();
+                            std::io::Read::read_to_string(&mut std::io::stdin(), &mut b)?;
+                            b
+                        }
+                        Some(p) => std::fs::read_to_string(&p)
+                            .with_context(|| format!("read {}", p.display()))?,
+                        None => body,
+                    },
                     depends_on: depends,
                     scope,
                     role,
@@ -850,6 +869,8 @@ fn run(cli: Cli) -> Result<i32> {
                 TaskCmd::Done { task, summary } => hub::TaskVerb::Done { task, summary },
                 TaskCmd::Blocked { task, reason } => hub::TaskVerb::Blocked { task, reason },
                 TaskCmd::Reject { task, reason } => hub::TaskVerb::Reject { task, reason },
+                TaskCmd::Drop { task, reason } => hub::TaskVerb::Drop { task, reason },
+                TaskCmd::Show { task } => hub::TaskVerb::Show { task },
                 TaskCmd::List => hub::TaskVerb::List,
             };
             let text = hub::task(fleet.as_deref(), verb)?;

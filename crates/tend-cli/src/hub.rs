@@ -145,6 +145,13 @@ pub enum TaskVerb {
         task: String,
         reason: String,
     },
+    Drop {
+        task: String,
+        reason: String,
+    },
+    Show {
+        task: String,
+    },
     List,
 }
 
@@ -200,6 +207,15 @@ fn fit_sessions(spec: &Spec) -> Option<u32> {
 pub fn up(file: Option<&Path>, preset: Option<Preset>, mode: Mode) -> Result<String> {
     let (mut spec, f) = load_spec(file, preset)?;
     let mut notes = Vec::new();
+    let bare = spec::roles_without_mode(&spec);
+    if !bare.is_empty() {
+        let n = format!(
+            "No permission_mode for {}: their headless sessions cannot answer a permission prompt, so most edits and commands will be refused. Set `permission_mode` for each, or once at the top of the fleet file.",
+            bare.join(", ")
+        );
+        eprintln!("tend: {n}");
+        notes.push(n);
+    }
     if f.limits.as_ref().and_then(|l| l.sessions).is_none() {
         if let Some(fit) = fit_sessions(&spec) {
             if fit < spec.limits.sessions {
@@ -308,8 +324,9 @@ struct Hub {
     attached: std::collections::BTreeSet<String>,
     /// Each slot's last session id: a stream slot that starts again resumes it (G1).
     last_session: BTreeMap<String, String>,
-    /// Slots whose worktree already got its dependencies' work.
-    integrated: std::collections::BTreeSet<String>,
+    /// (slot, task): that task's work is already in the slot's worktree. Per task, not
+    /// per slot: a sub-lead's later task may depend on another area (dogfood D3).
+    integrated: std::collections::BTreeSet<(String, String)>,
     /// Done parts whose work went up to their parent's worktree.
     lifted: std::collections::BTreeSet<String>,
 }
@@ -381,7 +398,17 @@ pub fn run_hub(dir: &Path, resume: bool) -> Result<()> {
             .map(|t| t.id.clone())
             .collect();
         hub.lifted.extend(done);
-        hub.integrated.extend(hub.model.slots().keys().cloned());
+        let done: Vec<String> = hub
+            .model
+            .tasks()
+            .filter(|t| t.state == tend_core::fleet::model::TaskState::Done)
+            .map(|t| t.id.clone())
+            .collect();
+        let slots: Vec<String> = hub.model.slots().keys().cloned().collect();
+        for s in &slots {
+            hub.integrated
+                .extend(done.iter().map(|d| (s.clone(), d.clone())));
+        }
         // Sessions of the old hub may still finish a turn: stop them before new ones start.
         stop_old_sessions(dir);
         eprintln!("tend fleet hub {}: restarted", hub.meta.id);
@@ -610,6 +637,7 @@ impl Hub {
             }
             HubRequest::Task { verb, .. } => match verb {
                 TaskVerb::List => return render_tasks(&self.model),
+                TaskVerb::Show { task } => return render_task(&self.model, &task),
                 TaskVerb::Add {
                     title,
                     body,
@@ -631,6 +659,7 @@ impl Hub {
                 TaskVerb::Done { task, summary } => FleetEvent::TaskDone { by, task, summary },
                 TaskVerb::Blocked { task, reason } => FleetEvent::TaskBlocked { by, task, reason },
                 TaskVerb::Reject { task, reason } => FleetEvent::TaskReject { by, task, reason },
+                TaskVerb::Drop { task, reason } => FleetEvent::TaskDrop { by, task, reason },
             },
         };
         let recs = self.apply(event);
@@ -987,18 +1016,19 @@ impl Hub {
         Ok(path)
     }
 
-    /// A fresh worker's worktree starts at the fleet's base, without the work of the tasks
-    /// its task depends on: bring their changes in (tracked changes as a patch, new
-    /// files copied), once, before its first task. The note says what came in, or what
+    /// A worktree lacks the work of the tasks its task depends on (a fresh worker starts
+    /// at the fleet's base; a running sub-lead has only its own area): bring their
+    /// changes in (3-way merge, new files copied) before the task, each task's once. The note says what came in, or what
     /// could not. A judge's parts are not merged: it compares them.
     fn bring_in_dependencies(&mut self, slot: &str, text: &str) -> Option<String> {
         let tid = text.strip_prefix("Task ")?.split(':').next()?.to_string();
         let task = self.model.tasks().find(|t| t.id == tid)?.clone();
-        let fresh = self.model.slots().get(slot).is_some_and(|s| {
-            !self.integrated.contains(slot) && s.task.as_deref() == Some(tid.as_str())
-        });
-        self.integrated.insert(slot.to_string());
-        if !fresh || task.depends_on.is_empty() {
+        let holds = self
+            .model
+            .slots()
+            .get(slot)
+            .is_some_and(|s| s.task.as_deref() == Some(tid.as_str()));
+        if !holds || task.depends_on.is_empty() {
             return None;
         }
         if self.model.role_of(slot).map(|r| &r.workspace) != Some(&Workspace::WorktreePerWorker) {
@@ -1013,7 +1043,8 @@ impl Hub {
                 continue;
             }
             if let Some(dt) = self.model.tasks().find(|t| t.id == d) {
-                if dt.parent.as_deref() == Some(tid.as_str()) {
+                // Its own parts come up on their own; its own earlier work is there.
+                if dt.parent.as_deref() == Some(tid.as_str()) || dt.slot.as_deref() == Some(slot) {
                     continue;
                 }
                 stack.extend(dt.depends_on.clone());
@@ -1024,8 +1055,12 @@ impl Hub {
             .model
             .tasks()
             .filter(|t| want.contains(&t.id))
+            .filter(|t| !self.integrated.contains(&(slot.to_string(), t.id.clone())))
             .map(|t| t.id.clone())
             .collect();
+        for d in &order {
+            self.integrated.insert((slot.to_string(), d.clone()));
+        }
         let (mut brought, mut failed) = (Vec::new(), Vec::new());
         let mut conflicted: Vec<String> = Vec::new();
         for dep in order {
@@ -2175,7 +2210,8 @@ fn render_tasks(model: &Model) -> String {
     let width = tasks.iter().map(|t| t.id.len()).max().unwrap_or(3);
     for t in tasks {
         let state = format!("{:?}", t.state).to_lowercase();
-        let mut facts = vec![t.title.clone()];
+        // One line per task: a title can be a whole pasted brief.
+        let mut facts = vec![one_line(&t.title, 100)];
         if let Some(s) = &t.slot {
             facts.push(format!("on {s}"));
         } else if let Some(x) = &t.target {
@@ -2192,9 +2228,56 @@ fn render_tasks(model: &Model) -> String {
             ));
         }
         if let Some(o) = &t.outcome {
-            facts.push(format!("\"{}\"", tend_core::text::truncate_chars(o, 80)));
+            facts.push(format!("\"{}\"", one_line(o, 80)));
         }
         let _ = writeln!(out, "  {:<width$}  {state:<8}  {}", t.id, facts.join(" · "));
+    }
+    out
+}
+
+/// The first line of `text`, at most `max` characters; `…` when anything was left out.
+fn one_line(text: &str, max: usize) -> String {
+    let first = text.lines().next().unwrap_or("").trim_end();
+    let cut = tend_core::text::truncate_chars(first, max);
+    if cut.len() < text.trim_end().len() && !cut.ends_with('…') {
+        format!("{cut}…")
+    } else {
+        cut
+    }
+}
+
+/// `tend task show`: one task in full.
+fn render_task(model: &Model, id: &str) -> String {
+    let Some(t) = model.tasks().find(|t| t.id == id) else {
+        return format!("tend: refused. There is no task {id}.");
+    };
+    let mut out = format!(
+        "{} · {}\n{}\n",
+        t.id,
+        format!("{:?}", t.state).to_lowercase(),
+        t.title
+    );
+    if !t.body.is_empty() {
+        let _ = writeln!(out, "\n{}", t.body);
+    }
+    let mut facts = Vec::new();
+    if let Some(s) = &t.slot {
+        facts.push(format!("on {s}"));
+    }
+    if !t.depends_on.is_empty() {
+        facts.push(format!("after {}", t.depends_on.join(", ")));
+    }
+    if !t.scope.is_empty() {
+        facts.push(format!("scope {}", t.scope.join(", ")));
+    }
+    if let Some(c) = &t.check {
+        facts.push(format!("check `{c}`"));
+    }
+    if !facts.is_empty() {
+        let _ = writeln!(out, "\n{}", facts.join(" · "));
+    }
+    if let Some(o) = &t.outcome {
+        let _ = writeln!(out, "\nOutcome: {o}");
     }
     out
 }
@@ -2588,16 +2671,18 @@ pub fn report(spec: Option<&str>) -> Result<String> {
     let lost: u32 = tasks.iter().map(|t| t.attempts).sum();
     let _ = writeln!(
         out,
-        "Tasks: {} · done {} · failed {} · blocked {} · in review {} · other {} · attempts that did not count: {lost}",
+        "Tasks: {} · done {} · failed {} · blocked {} · dropped {} · in review {} · other {} · attempts that did not count: {lost}",
         tasks.len(),
         count(TaskState::Done),
         count(TaskState::Failed),
         count(TaskState::Blocked),
+        count(TaskState::Dropped),
         count(TaskState::Review),
         tasks.len()
             - count(TaskState::Done)
             - count(TaskState::Failed)
             - count(TaskState::Blocked)
+            - count(TaskState::Dropped)
             - count(TaskState::Review),
     );
     out.push_str(&render_tasks(&model).replacen("Tasks:\n", "", 1));

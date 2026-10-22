@@ -1201,6 +1201,65 @@ fn a_stream_role_with_no_session_starts_one_for_its_task() {
 }
 
 #[test]
+fn a_dropped_task_takes_its_open_parts_and_frees_its_parent() {
+    // Dogfood D3: a duplicate area could not be withdrawn, its workers finished a
+    // second review, and the lead's task could never be done.
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead",
+        "limits": {"sessions": 8, "depth": 2},
+        "role": {"sub": {"run": "stream", "replicas": "0..2", "team": {"preset": "lead"}}}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    r.ev(add(Actor::User, "WHOLE", &[], Some("lead")));
+    let c = r.ev(add(slot("lead-1"), "AREA", &[], Some("sub")));
+    r.start_all(&c);
+    let c = r.ev(add(slot("sub-1"), "PIECE", &[], None));
+    r.start_all(&c);
+    assert_eq!(task_state(&r, "t-1.1.1"), TaskState::Working);
+    r.ev(add(slot("lead-1"), "AFTER", &["t-1.1"], Some("sub")));
+    // Not the worker's to drop: it did not create it.
+    let c = r.ev(FleetEvent::TaskDrop {
+        by: slot("sub-1/worker-1"),
+        task: "t-1.1".into(),
+        reason: "x".into(),
+    });
+    assert!(refused(&c).is_some(), "{c:?}");
+    let c = r.ev(FleetEvent::TaskDrop {
+        by: slot("lead-1"),
+        task: "t-1.1".into(),
+        reason: "a duplicate".into(),
+    });
+    assert_eq!(answer(&c), "Dropped t-1.1 and 1 part that was not done.");
+    assert_eq!(task_state(&r, "t-1.1"), TaskState::Dropped);
+    assert_eq!(task_state(&r, "t-1.1.1"), TaskState::Dropped);
+    assert!(
+        c.iter()
+            .any(|c| matches!(c, Command::Stop { slot } if slot == "sub-1/worker-1")),
+        "the worker stops: {c:?}"
+    );
+    assert!(
+        delivered(&c)
+            .iter()
+            .any(|(to, t)| to == "sub-1" && t.contains("t-1.1 was dropped")),
+        "the sub-lead is told: {c:?}"
+    );
+    assert_eq!(
+        task_state(&r, "t-1.2"),
+        TaskState::Blocked,
+        "it waited for t-1.1"
+    );
+    // The parent is free to finish (t-1.2 is blocked, so drop it too).
+    r.ev(FleetEvent::TaskDrop {
+        by: slot("lead-1"),
+        task: "t-1.2".into(),
+        reason: "not needed".into(),
+    });
+    let c = r.ev(done("lead-1", "t-1"));
+    assert!(refused(&c).is_none(), "{c:?}");
+}
+
+#[test]
 fn replay_with_tasks_is_deterministic() {
     let mut r = Sim::new(spec(
         serde_json::json!({"preset": "lead", "limits": {"sessions": 3}}),

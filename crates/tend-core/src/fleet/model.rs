@@ -134,6 +134,12 @@ pub enum FleetEvent {
         task: String,
         reason: String,
     },
+    /// Withdraw a task and its open parts (`tend task drop`).
+    TaskDrop {
+        by: Actor,
+        task: String,
+        reason: String,
+    },
     /// The hub ran a task's check (F5b). `excerpt`: the failures, or the output's end.
     /// `flags`: what the audit of the task's diff found (experimental, opt-in).
     CheckResult {
@@ -461,6 +467,9 @@ impl Model {
             }
             FleetEvent::TaskBlocked { by, task, reason } => {
                 self.on_task_end(&mut cx, by, &task, Err(reason))
+            }
+            FleetEvent::TaskDrop { by, task, reason } => {
+                self.on_task_drop(&mut cx, by, &task, &reason)
             }
             FleetEvent::CheckResult {
                 task,

@@ -2540,6 +2540,92 @@ fn fleet_brings_dependencies_work_into_a_fresh_worktree() {
     );
 }
 
+/// Dogfood D3: a task body from a file (no shell quoting), the board in one line per
+/// task, `task show` in full, and `task drop` by the user.
+#[test]
+fn fleet_task_body_file_show_and_drop() {
+    use std::io::Write;
+    let (dir, repo, home) = fleet_repo("drop", &[("a.txt", "a\n")], "preset = \"pool\"\n");
+    let agent = fake_script(&dir, "fake-drop.sh", r#"    *) sleep 5; result ;;"#);
+    let tend = |args: &[&str]| tend_in(&repo, &home, &agent, args);
+    let _down = FleetDown(repo.clone(), home.clone(), agent.clone());
+    tend(&["fleet", "up", "fleet.toml"]);
+    let mut c = Command::new(bin())
+        .args([
+            "task",
+            "add",
+            "REVIEW\nline two of a long title",
+            "--body-file",
+            "-",
+        ])
+        .current_dir(&repo)
+        .env("TEND_HOME", &home)
+        .env("TEND_CLAUDE_BIN", &agent)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    c.stdin
+        .take()
+        .unwrap()
+        .write_all(b"A body with `backticks` and $(no expansion).\n")
+        .unwrap();
+    assert!(c.wait_with_output().unwrap().status.success());
+    let board = tend(&["task", "list"]);
+    assert!(
+        board.contains("REVIEW…") && !board.contains("line two"),
+        "{board}"
+    );
+    let shown = tend(&["task", "show", "t-1"]);
+    assert!(
+        shown.contains("line two") && shown.contains("`backticks` and $(no expansion)"),
+        "{shown}"
+    );
+    assert_eq!(
+        tend(&["task", "drop", "t-1", "not needed"]).trim(),
+        "Dropped t-1."
+    );
+    let board = tend(&["task", "list"]);
+    assert!(board.contains("t-1  dropped"), "{board}");
+}
+
+/// Dogfood D3: a running session's later task that depends on another session's task
+/// gets that work too (before, only a fresh worker's first task did).
+#[test]
+fn fleet_brings_dependency_work_to_a_running_session() {
+    let (dir, repo, home) = fleet_repo(
+        "deps-running",
+        &[("a.txt", "a\n")],
+        "preset = \"pool\"\n[role.worker]\nrun = \"stream\"\nreplicas = \"2..2\"\n",
+    );
+    let agent = fake_script(
+        &dir,
+        "fake-deps-running.sh",
+        r#"    *"Task t-1:"*)
+      echo changed > a.txt; echo new > part_a.txt
+      tend task done t-1 "made A" >> "$D/done.txt" 2>&1; sleep 4; result ;;
+    *"Task t-2:"*)
+      tend task done t-2 "made B" >> "$D/done.txt" 2>&1; result ;;
+    *"Task t-3:"*)
+      { test -f part_a.txt && grep -q changed a.txt && echo saw-a || echo missing-a; } > "$D/c-saw.txt"
+      tend task done t-3 "made C" >> "$D/done.txt" 2>&1; result ;;"#,
+    );
+    let tend = |args: &[&str]| tend_in(&repo, &home, &agent, args);
+    let _down = FleetDown(repo.clone(), home.clone(), agent.clone());
+    tend(&["fleet", "up", "fleet.toml"]);
+    tend(&["task", "add", "A"]);
+    tend(&["task", "add", "B"]);
+    board_until(&tend, &|b| b.matches(" done ").count() == 2);
+    // worker-1 is still in its turn: C goes to worker-2, which ran B, not A.
+    tend(&["task", "add", "C", "--depends", "t-1"]);
+    let board = board_until(&tend, &|b| b.matches(" done ").count() == 3);
+    assert!(board.contains("on worker-2 · after t-1"), "{board}");
+    assert_eq!(
+        fs::read_to_string(dir.join("c-saw.txt")).unwrap().trim(),
+        "saw-a"
+    );
+}
+
 /// Bench finding: a part that is done brings its work up into the worktree of the
 /// session that holds the parent task, so the lead can check the whole.
 #[test]

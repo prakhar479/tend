@@ -41,6 +41,9 @@ pub enum TaskState {
     Done,
     Blocked,
     Failed,
+    /// Its creator (or the user) withdrew it: a duplicate, a garbled body, work done
+    /// elsewhere. It does not hold up its parent; tasks that wait for it are blocked.
+    Dropped,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,9 +161,12 @@ impl Model {
         }
         // A task that ended badly never becomes done: waiting for it would never end.
         if let Some(d) = t.depends_on.iter().find(|d| {
-            self.tasks
-                .get(*d)
-                .is_some_and(|x| matches!(x.state, TaskState::Failed | TaskState::Blocked))
+            self.tasks.get(*d).is_some_and(|x| {
+                matches!(
+                    x.state,
+                    TaskState::Failed | TaskState::Blocked | TaskState::Dropped
+                )
+            })
         }) {
             let how = format!("{:?}", self.tasks[d].state).to_lowercase();
             return self.refuse(
@@ -538,7 +544,7 @@ impl Model {
         let over = |x: &Task| {
             matches!(
                 x.state,
-                TaskState::Done | TaskState::Failed | TaskState::Blocked
+                TaskState::Done | TaskState::Failed | TaskState::Blocked | TaskState::Dropped
             )
         };
         if !parts.iter().all(over) {
@@ -722,7 +728,7 @@ impl Model {
                 .tasks()
                 .find(|c| {
                     c.parent.as_deref() == Some(task)
-                        && c.state != TaskState::Done
+                        && !matches!(c.state, TaskState::Done | TaskState::Dropped)
                         && !(c.candidate
                             && matches!(c.state, TaskState::Failed | TaskState::Blocked))
                 })
@@ -848,7 +854,10 @@ impl Model {
             }
             self.release_if_idle(cx, &sid);
         }
-        if matches!(state, TaskState::Failed | TaskState::Blocked) {
+        if matches!(
+            state,
+            TaskState::Failed | TaskState::Blocked | TaskState::Dropped
+        ) {
             self.block_dependents(cx, task);
         }
         match state {
@@ -857,7 +866,10 @@ impl Model {
             _ => {}
         }
         // A candidate that ended any way may complete its best-of task's judging.
-        if matches!(state, TaskState::Failed | TaskState::Blocked) {
+        if matches!(
+            state,
+            TaskState::Failed | TaskState::Blocked | TaskState::Dropped
+        ) {
             let parent = self.tasks.get(task).and_then(|t| t.parent.clone());
             if let Some(p) = parent.filter(|p| self.tasks.get(p).is_some_and(|x| x.best_of)) {
                 self.judge_if_ready(cx, &p);
@@ -1108,6 +1120,88 @@ impl Model {
                 attempts + 1,
                 (at_ms - cx.now) / 1000
             ),
+        );
+    }
+
+    /// `tend task drop`: the user, the task's creator, or the creator of a task it is a
+    /// part of withdraws it, with its open parts. Sessions on them stop (a oneshot) or
+    /// are told (a stream session, which may hold other work).
+    pub(super) fn on_task_drop(&mut self, cx: &mut Cx, by: Actor, task: &str, reason: &str) {
+        let Some(t) = self.tasks.get(task).cloned() else {
+            return self.refuse(cx, &by, &format!("There is no task {task}."));
+        };
+        let mut may = by == Actor::User;
+        let mut cur = Some(t.clone());
+        while let (false, Some(c)) = (may, cur) {
+            may = c.created_by == by;
+            cur = c.parent.and_then(|p| self.tasks.get(&p).cloned());
+        }
+        if !may {
+            return self.refuse(
+                cx,
+                &by,
+                &format!(
+                    "Only {task}'s creator (or a task it is part of), or the user, can drop it."
+                ),
+            );
+        }
+        if matches!(t.state, TaskState::Done | TaskState::Dropped) {
+            let how = format!("{:?}", t.state).to_lowercase();
+            return self.refuse(cx, &by, &format!("{task} is already {how}."));
+        }
+        // The task, then its parts, deepest last: ids sort that way.
+        let mut ids: Vec<String> = self
+            .tasks()
+            .filter(|x| x.id == task || x.id.starts_with(&format!("{task}.")))
+            // A blocked or failed part is dropped too: that is what frees the parent.
+            .filter(|x| !matches!(x.state, TaskState::Done | TaskState::Dropped))
+            .map(|x| x.id.clone())
+            .collect();
+        ids.sort();
+        let note = format!("dropped: {reason}");
+        for id in &ids {
+            let slot = self.tasks.get(id).and_then(|x| x.slot.clone());
+            self.finish(cx, id, TaskState::Dropped, note.clone());
+            let Some(sid) = slot else { continue };
+            let Some(s) = self.slots.get(&sid) else {
+                continue;
+            };
+            if !s.live() {
+                continue;
+            }
+            let oneshot = self.role_def(s).is_some_and(|r| r.run == Run::Oneshot);
+            if oneshot {
+                self.cmd(
+                    cx,
+                    Command::Stop { slot: sid.clone() },
+                    &format!("{sid} was working on {id}, which was dropped."),
+                );
+            } else {
+                self.cmd(
+                    cx,
+                    Command::Deliver {
+                        to: Address::Slot { id: sid.clone() },
+                        from: Actor::Tend,
+                        kind: MsgKind::Notice,
+                        text: format!("{id} was dropped ({reason}). Stop work on it."),
+                    },
+                    &format!("{sid} held {id}, which was dropped."),
+                );
+            }
+        }
+        let parts = ids.len().saturating_sub(1);
+        let text = match parts {
+            0 => format!("Dropped {task}."),
+            1 => format!("Dropped {task} and 1 part that was not done."),
+            n => format!("Dropped {task} and {n} parts that were not done."),
+        };
+        self.cmd(
+            cx,
+            Command::Answer {
+                to: by,
+                text: text.clone(),
+            },
+            &text,
         );
     }
 

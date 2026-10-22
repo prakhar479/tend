@@ -112,6 +112,9 @@ pub struct SpecFile {
     pub max_rounds: Option<u32>,
     pub judge: Option<Judge>,
     pub stuck_minutes: Option<u64>,
+    /// The permission mode of every role that sets none (teams inherit it). A headless
+    /// session cannot answer a permission prompt.
+    pub permission_mode: Option<String>,
     #[serde(default)]
     pub role: BTreeMap<String, RoleFile>,
     #[serde(default)]
@@ -260,8 +263,8 @@ fn channel(from: &str, to: &str, kinds: &[MsgKind]) -> Channel {
 use MsgKind::*;
 use Verb::*;
 
-const LEAD_BRIEF: &str = "You lead a team of agents through tend. Split the work into tasks with `tend task add` (give each a `--check` that tests its part), give them out with `tend task assign`, and answer workers' questions. Each worker has its own worktree; tend brings a task's dependencies' work into it, and a finished part's work into yours. A task is done only when tend's check passes.";
-const SUB_LEAD_BRIEF: &str = "You lead a part of the work, with workers of your own. Give them tasks with `tend task add` and `tend task assign`, and report to your parent with `tend msg @parent`.";
+const LEAD_BRIEF: &str = "You lead a team of agents through tend. Split the work into tasks with `tend task add` (give each a `--check` that tests its part), give them out with `tend task assign`, and answer workers' questions. Each worker has its own worktree; tend brings a task's dependencies' work into it, and a finished part's work into yours. A task is done only when tend's check passes. Withdraw a duplicate or a wrong task with `tend task drop <id> \"why\"`; for a long body use `--body-file`.";
+const SUB_LEAD_BRIEF: &str = "You lead a part of the work, with workers of your own. Give them tasks with `tend task add` and `tend task assign`, and report to your parent with `tend msg @parent`. Your `tend task done` summary is your part's report: list every change your workers made, not a pointer to a message.";
 const WORKER_BRIEF: &str = "You are a worker in a tend fleet. Do the one task you were given, in this worktree. To ask your lead, run `tend msg @lead \"<question>\"` and end your turn: the answer comes as your next message. Finish with `tend task done <id> \"summary\"`, or `tend task blocked <id> \"reason\"`.";
 
 /// The roles and channels a preset starts from. Inside a team (`as_team`), the lead is
@@ -425,9 +428,29 @@ fn preset(p: Preset, as_team: bool) -> (BTreeMap<String, Role>, Vec<Channel>) {
 
 /// Fill a fleet file in from its preset and check it. Errors are short sentences, each
 /// naming the role or field.
+/// Headless roles (oneshot or stream) with no permission mode, as `role.a.team.role.b`:
+/// their sessions cannot answer a permission prompt, so most tool calls are refused
+/// (dogfood D3: three attempts lost this way).
+pub fn roles_without_mode(spec: &Spec) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, r) in &spec.roles {
+        if r.run != Run::Attached && r.permission_mode.is_none() {
+            out.push(format!("role.{name}"));
+        }
+        if let Some(t) = &r.team {
+            out.extend(
+                roles_without_mode(t)
+                    .into_iter()
+                    .map(|x| format!("role.{name}.team.{x}")),
+            );
+        }
+    }
+    out
+}
+
 pub fn resolve(file: &SpecFile) -> Result<Spec, Vec<String>> {
     let mut errors = Vec::new();
-    let spec = resolve_at(file, 1, None, None, false, "", &mut errors);
+    let spec = resolve_at(file, 1, None, None, None, false, "", &mut errors);
     if errors.is_empty() {
         Ok(spec)
     } else {
@@ -437,11 +460,13 @@ pub fn resolve(file: &SpecFile) -> Result<Spec, Vec<String>> {
 
 /// `level` is 1 at the top; `max_level` is the deepest level allowed, set at the top by
 /// `limits.depth` and only lowered by a team's own.
+#[allow(clippy::too_many_arguments)]
 fn resolve_at(
     file: &SpecFile,
     level: u32,
     max_level: Option<u32>,
     parent: Option<&Limits>,
+    parent_mode: Option<&str>,
     as_team: bool,
     at: &str,
     errors: &mut Vec<String>,
@@ -536,16 +561,26 @@ fn resolve_at(
                     level + 1
                 ));
             } else {
+                let mode = file.permission_mode.as_deref().or(parent_mode);
                 let child = resolve_at(
                     team,
                     level + 1,
                     Some(max_level),
                     Some(&limits),
+                    mode,
                     true,
                     &format!("{here}.team."),
                     errors,
                 );
                 r.team = Some(Box::new(child));
+            }
+        }
+    }
+    // Roles with no mode of their own take the fleet's (or the parent fleet's).
+    if let Some(mode) = file.permission_mode.as_deref().or(parent_mode) {
+        for r in roles.values_mut() {
+            if r.permission_mode.is_none() {
+                r.permission_mode = Some(mode.to_string());
             }
         }
     }
@@ -1213,5 +1248,37 @@ mod tests {
     fn a_preset_team_obeys_limits_depth() {
         let e = errors(serde_json::json!({"preset": "tree", "limits": {"depth": 1}}));
         assert!(e.iter().any(|m| m.contains("levels deep")), "{e:?}");
+    }
+
+    #[test]
+    fn roles_take_the_fleets_permission_mode_and_teams_inherit_it() {
+        let f: SpecFile = serde_json::from_value(serde_json::json!({
+            "preset": "lead",
+            "permission_mode": "acceptEdits",
+            "limits": {"depth": 2},
+            "role": {
+                "lead": {"permission_mode": "plan"},
+                "sub": {"run": "stream", "team": {"preset": "lead"}}
+            }
+        }))
+        .unwrap();
+        let s = resolve(&f).unwrap();
+        assert_eq!(s.roles["lead"].permission_mode.as_deref(), Some("plan"));
+        assert_eq!(
+            s.roles["worker"].permission_mode.as_deref(),
+            Some("acceptEdits")
+        );
+        let team = s.roles["sub"].team.as_ref().unwrap();
+        assert_eq!(
+            team.roles["worker"].permission_mode.as_deref(),
+            Some("acceptEdits")
+        );
+        assert!(roles_without_mode(&s).is_empty());
+        // Without one: the preset's worker is named.
+        let f: SpecFile = serde_json::from_value(serde_json::json!({
+            "preset": "lead", "role": {"lead": {"permission_mode": "auto"}}
+        }))
+        .unwrap();
+        assert_eq!(roles_without_mode(&resolve(&f).unwrap()), ["role.worker"]);
     }
 }

@@ -543,6 +543,20 @@ What the run showed about tend:
 - [x] **`tend fleet prune` knows taken work.** It kept all 12 worktrees of D1 and D2 because their changes were uncommitted or on `tend/` branches, though the user had applied them as patches. A worktree whose diff since the base reverses cleanly on the repo's index, and whose new files are at HEAD unchanged, is removed (`--force`), marked "its changes are in HEAD".
 - [x] **Dynamic depth.** A stream role (a sub-lead) with no free session now starts one for its task, up to its maximum, as oneshot roles always did. A fleet file can hold sub-lead roles with `replicas = "0..N"`; the lead decides at run time how many areas need one. Before, a task for such a role waited forever. (`peers` now grows to its maximum of 4 when every peer is busy.)
 
+### Dogfood D3 (2026-10-22): an Opus coordinator, sub-leads, dynamic depth
+
+Fleet file: an Opus `lead`; Sonnet `sub` roles (`run = "stream"`, `replicas = "0..4"`, started on demand) whose teams hold workers and an optional `deep` sub-lead with its own workers (depth 3); `make check` on every part; 10 sessions at most. The lead split tend into six areas (A–F); sub-leads split them into 22 worker tasks. 42 min, 33 sessions, 36 tasks, 25.8M tokens, $13.67. No `deep` sub-lead was used. The lead's report (every change, measured numbers, what is left open) was the source for commit 3227cbf: 62 bug fixes, 1 perf win (`tend report` on a 100k-entry ledger 0.48 s → 0.17 s), 5 improvements, reviewed and applied.
+
+What the run showed about tend, fixed:
+- [x] **No way to withdraw a task.** The lead garbled one task's body and added an area twice; it could only "block" them, a blocked task's sub-lead workers finished a duplicate review anyway, and the lead's own task could never be done. `tend task drop <id> "why"` (the task's creator, the creator of a task it is part of, or the user) drops it with its parts that are not done, stops oneshot sessions on them, tells stream sessions, frees the parent, and blocks tasks that wait for it. New task state `dropped` (additive).
+- [x] **Dependency work reached only a fresh worker's first task.** A running sub-lead given a task that depended on another area worked without that area's changes. The hub now brings in each dependency's work per (slot, task), for any task delivered to a worktree-per-worker slot. E2e: `fleet_brings_dependency_work_to_a_running_session`.
+- [x] **The `lead` preset's own `worker` role had no permission mode** in a file that set modes only for the team roles: its headless sessions could not edit or run anything and lost three attempts. A top-level `permission_mode` now applies to every role that sets none (teams inherit it), and `tend fleet up` warns about headless roles with none.
+- [x] **A shell-quoted body went wrong** (backticks ran inside double quotes). `tend task add --body-file <path|->`.
+- [x] **The board printed whole pasted briefs.** `tend task list` shows one line per task (`…` when cut); `tend task show <id>` prints one in full; `tend fleet report` counts dropped tasks.
+- [x] **Sub-lead summaries pointed to messages never sent.** The sub-lead brief says the done summary is the part's report; the lead brief names `tend task drop` and `--body-file`.
+
+Left open: the list under "Left open" in the D3 report (parsers: `>` inside quoted `-k`, CRLF, `xargs`; fleet core: `fleet_bypass` on `env grep -i`, dry-run git commands, `budget.attempts = 0`, stopping slots counted as active; hub: one connection at a time, send errors read as "not running", restart waits 5 s; hook path: no connect timeout in `ipc::send`, the inbox re-read on every hook; CLI: `retro` with a far-future timestamp). The `sessions` stale-socket test flake is still not reproduced (640 runs under load).
+
 - [ ] **F6 Cross-provider.** After the Codex connector (S10, E12).
 
 ## Phase 2 — Optimize + Codex (not started)
