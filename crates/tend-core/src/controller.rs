@@ -289,15 +289,15 @@ fn runs_tend_allow(command: &str) -> bool {
     })
 }
 
-/// A simple command runs `tend notes approve` or `tend notes drop`: the user's review
-/// of notes (F2, L4).
+/// A simple command runs `tend notes approve|drop` or `tend fixes forget`: the user's
+/// review of what sessions share (F2, L4).
 fn runs_tend_notes_review(command: &str) -> bool {
     shell::parse(command).segments.iter().any(|seg| {
         let w = shell::program_words(seg);
         w.len() >= 3
             && shell::program_name(&w[0]) == "tend"
-            && w[1] == "notes"
-            && matches!(w[2].as_str(), "approve" | "drop")
+            && (w[1] == "notes" && matches!(w[2].as_str(), "approve" | "drop")
+                || w[1] == "fixes" && w[2] == "forget")
     })
 }
 
@@ -332,6 +332,11 @@ struct Wrapped {
     /// A summary `tend run` was told to print. It is recorded once the tool result
     /// shows what the agent really saw (R0.2).
     pending: Option<PendingShape>,
+    /// Context decided while `tend run` reported the output (a steer, a recall): the
+    /// filter reply carries only the text to print, so it goes with the tool result.
+    context: Vec<String>,
+    /// The actions that context belongs to, for the ledger if it never goes out.
+    context_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -390,6 +395,12 @@ impl Controller {
     ) {
         self.learning.set_context(project, root, known);
         self.notes = notes;
+    }
+
+    /// Fixes other sessions learned after this one started (the daemon reads the
+    /// store's new lines).
+    pub fn add_known_fixes(&mut self, fixes: Vec<crate::learn::KnownFix>) {
+        self.learning.add_known(fixes);
     }
 
     /// Whether the learning setting lets this say something now.
@@ -598,6 +609,28 @@ impl Controller {
             Event::FileEdited { path, .. } | Event::FileChanged { path, .. } => Some(path.clone()),
             _ => None,
         };
+        // Learning (F2) keeps what an edit changed: proposed text joins a fix once the
+        // edit lands; a shell write's snapshot gives it directly.
+        match &event {
+            Event::EditProposed {
+                tool_use_id,
+                path,
+                old_text,
+                new_text,
+            } => self
+                .learning
+                .on_proposed(tool_use_id, path, old_text, new_text),
+            Event::FileEdited {
+                tool_use_id, path, ..
+            } => self.learning.on_edited(tool_use_id, path),
+            Event::FileChanged {
+                path,
+                old_text,
+                new_text,
+                ..
+            } => self.learning.on_changed(path, old_text, new_text),
+            _ => {}
+        }
         if let Event::ToolCompleted {
             output,
             failed: true,
@@ -710,7 +743,6 @@ impl Controller {
         }
         if let Some(path) = my_edit {
             self.fleet.on_my_edit(&path, now_ms);
-            self.learning.on_edit(&path);
         }
         if delivers {
             self.deliver_fleet(&mut d, now_ms);
@@ -817,8 +849,11 @@ impl Controller {
         }
         if filtered {
             // `tend run` already recorded the full output; this is what the agent saw.
-            if let Some(p) = wrapped.and_then(|w| w.pending) {
-                self.confirm_shape(d, now, ev, p, &output);
+            if let Some(w) = wrapped {
+                d.response.add_context.extend(w.context);
+                if let Some(p) = w.pending {
+                    self.confirm_shape(d, now, ev, p, &output);
+                }
             }
             d.blobs.push(Blob {
                 hash,
@@ -946,6 +981,7 @@ impl Controller {
                         test: f.failure.test,
                         command: f.command,
                         files: f.files,
+                        change: f.change,
                     },
                 );
             }
@@ -1130,6 +1166,17 @@ impl Controller {
             if !w.filtered {
                 self.no_wrap.insert(command_key(&w.command));
             }
+            if !w.context.is_empty() {
+                self.push(
+                    d,
+                    now,
+                    vec![ev],
+                    Body::Undelivered {
+                        actions: w.context_actions,
+                        reason: "No tool result arrived (the call was stopped), so the agent did not get this.".into(),
+                    },
+                );
+            }
             if let Some(p) = w.pending {
                 let reason = "No tool result arrived (the call was stopped), so the agent did not see this summary.";
                 self.record(
@@ -1206,6 +1253,19 @@ impl Controller {
         self.run_failed = None;
         if let Some(w) = self.wrapped.get_mut(tool_use_id) {
             w.pending = self.deferred.take();
+            w.context = std::mem::take(&mut d.response.add_context);
+            if !w.context.is_empty() {
+                w.context_actions = d
+                    .entries
+                    .iter()
+                    .filter_map(|e| match &e.body {
+                        Body::Action {
+                            id, applied: true, ..
+                        } => Some(id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+            }
         }
         (d, text)
     }
@@ -1278,7 +1338,7 @@ impl Controller {
         let message = if runs_tend_allow(&command) {
             "tend: only the user can allow a blocked edit. Ask the user to run `! tend allow`, then retry the edit.".to_string()
         } else if runs_tend_notes_review(&command) {
-            "tend: only the user approves or drops project notes. Your `tend note` waits for the user's review.".to_string()
+            "tend: only the user reviews project notes and learned fixes. Your `tend note` waits for the user's review.".to_string()
         } else {
             self.maybe_wrap(d, now, ev, tool_use_id, command, rewrite_ok);
             return;
@@ -1361,6 +1421,8 @@ impl Controller {
                     action_seq: seq,
                     filtered: false,
                     pending: None,
+                    context: Vec::new(),
+                    context_actions: Vec::new(),
                 },
             );
         }

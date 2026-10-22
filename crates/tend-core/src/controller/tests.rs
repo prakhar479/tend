@@ -813,6 +813,94 @@ fn a_fix_is_learned_across_spellings_of_one_run() {
 }
 
 #[test]
+fn a_learned_fix_carries_the_edit_that_landed() {
+    const FAILED: &str = "FAILED tests/test_fmt.py::test_small\n1 failed\n";
+    const PASSED: &str = "ok fmt test_small\n0 failed\n";
+    let mut c = ctl(Mode::Look);
+    c.set_learning("/repo", "/repo", vec![], vec![]);
+    c.handle(bash("python3 run_tests.py fmt", FAILED), 1);
+    c.handle(
+        Event::EditProposed {
+            tool_use_id: "e1".into(),
+            path: "/repo/kv/fmt.py".into(),
+            old_text: "    return '%.2f' % x".into(),
+            new_text: "    return '{:,.2f}'.format(x)".into(),
+        },
+        2,
+    );
+    c.handle(
+        Event::FileEdited {
+            tool_use_id: "e1".into(),
+            path: "/repo/kv/fmt.py".into(),
+            after_hash: Some("h".into()),
+        },
+        3,
+    );
+    let d = c.handle(bash("python3 run_tests.py fmt", PASSED), 4);
+    let change = d.entries.iter().find_map(|e| match &e.body {
+        Body::Learned { change, .. } => change.clone(),
+        _ => None,
+    });
+    assert_eq!(
+        change.as_deref(),
+        Some("--- kv/fmt.py\n-    return '%.2f' % x\n+    return '{:,.2f}'.format(x)")
+    );
+}
+
+#[test]
+fn context_from_a_wrapped_run_reaches_the_agent_with_its_tool_result() {
+    // Live (2026-10-22): a recall decided in `tend run`'s filter request was recorded
+    // as applied, but the filter reply carries only the text to print: the agent never
+    // got it. It goes out with the wrapped call's tool result.
+    const FAILED: &str = "FAILED tests/test_fmt.py::test_small\n1 failed\n";
+    let cfg = Config {
+        learn: crate::FleetSetting::On,
+        ..Config::default()
+    };
+    let mut c = Controller::new(cfg, Capabilities::CLAUDE_CODE, Mode::Optimize);
+    let sig = crate::perception::extract_failures(FAILED)[0]
+        .signature
+        .clone();
+    let known = crate::learn::KnownFix {
+        signature: sig,
+        message: String::new(),
+        test: Some("tests/test_fmt.py::test_small".into()),
+        command: "python3 run_tests.py fmt".into(),
+        files: vec!["kv/fmt.py".into()],
+        session: "other".into(),
+        project: "/repo".into(),
+        at_ms: 0,
+        change: Some("--- kv/fmt.py\n-a\n+b".into()),
+    };
+    c.set_learning("/repo", "/repo", vec![known], vec![]);
+    c.handle(requested("t1", "python3 run_tests.py fmt", true), 1);
+    let p = crate::prepare(FAILED, 0, c.config());
+    let (d, shown) = c.filter_prepared("t1", FAILED.into(), p, Some(1), 2);
+    assert!(
+        d.response.add_context.is_empty(),
+        "the filter reply cannot carry it"
+    );
+    let d = c.handle(
+        Event::ToolCompleted {
+            tool_use_id: "t1".into(),
+            tool: "Bash".into(),
+            input: json!({ "command": "'/bin/tend' run --id 't1' --sh 'python3 run_tests.py fmt'" }),
+            output: shown.unwrap_or_else(|| FAILED.into()),
+            failed: true,
+        },
+        3,
+    );
+    assert!(
+        d.response
+            .add_context
+            .iter()
+            .any(|t| t.contains("The change:\n--- kv/fmt.py")),
+        "{:?}",
+        d.response
+    );
+}
+
+#[test]
 fn loops_are_found_through_tend_run() {
     let mut c = ctl(Mode::Optimize);
     let mut steered = false;
@@ -1423,20 +1511,66 @@ fn a_fleet_role_may_not_write_its_denied_paths_through_the_shell() {
 }
 
 #[test]
-fn an_agent_may_not_review_project_notes() {
+fn an_agent_may_not_review_project_notes_or_forget_fixes() {
+    for cmd in ["tend notes approve n-3", "tend fixes forget --all"] {
+        let mut c = ctl(Mode::Optimize);
+        let d = c.handle(
+            Event::ToolRequested {
+                tool_use_id: "b".into(),
+                tool: "Bash".into(),
+                input: json!({ "command": cmd }),
+                rewrite_ok: false,
+            },
+            0,
+        );
+        assert!(
+            matches!(&d.response.permission, Some(Permission::Deny(m)) if m.contains("only the user reviews")),
+            "{cmd}: {:?}",
+            d.response
+        );
+    }
+}
+
+#[test]
+fn context_of_a_stopped_wrapped_run_is_recorded_as_not_delivered() {
     let mut c = ctl(Mode::Optimize);
-    let d = c.handle(
-        Event::ToolRequested {
-            tool_use_id: "b".into(),
-            tool: "Bash".into(),
-            input: json!({ "command": "tend notes approve n-3" }),
-            rewrite_ok: false,
-        },
-        0,
-    );
-    assert!(
-        matches!(&d.response.permission, Some(Permission::Deny(m)) if m.contains("only the user approves")),
-        "{:?}",
-        d.response
-    );
+    let mut undelivered = None;
+    for i in 0..4u64 {
+        if i > 0 {
+            c.handle(edited("src/app.py", &format!("h{i}")), i * 10);
+        }
+        let id = format!("t{i}");
+        c.handle(requested(&id, "pytest -v", true), i * 10 + 1);
+        let (d, _) = c.filter(&id, PYTEST.into(), i * 10 + 2);
+        let steer = d.entries.iter().find_map(|e| match &e.body {
+            Body::Action {
+                id,
+                action: ActionKind::Steer { .. },
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        });
+        if let Some(steer) = steer {
+            // No tool result: the turn ends.
+            let d = c.handle(Event::TurnEnded, i * 10 + 3);
+            let actions = d.entries.into_iter().find_map(|e| match e.body {
+                Body::Undelivered { actions, .. } => Some(actions),
+                _ => None,
+            });
+            undelivered = Some((steer, actions));
+            break;
+        }
+        c.handle(
+            Event::ToolCompleted {
+                tool_use_id: id.clone(),
+                tool: "Bash".into(),
+                input: json!({ "command": format!("'/bin/tend' run --id '{id}' --sh 'pytest -v'") }),
+                output: PYTEST.into(),
+                failed: true,
+            },
+            i * 10 + 3,
+        );
+    }
+    let (steer, actions) = undelivered.expect("a steer");
+    assert_eq!(actions, Some(vec![steer]));
 }

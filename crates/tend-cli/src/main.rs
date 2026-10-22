@@ -204,6 +204,15 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
+    /// Fixes sessions learned in this project (a failure, the change, the run that then
+    /// passed); `forget` drops them (yours to run).
+    Fixes {
+        /// forget
+        verb: Option<String>,
+        /// Every project's fixes.
+        #[arg(long)]
+        all: bool,
+    },
     /// Fleets of agents: `tend fleet up` runs one from a fleet file. Alone, it lists the
     /// fleets and the live tend sessions on this machine, grouped by repo.
     Fleet {
@@ -790,6 +799,14 @@ fn run(cli: Cli) -> Result<i32> {
                 _ => anyhow::bail!("use `tend notes approve <id>` or `tend notes drop <id>`"),
             };
             print!("{}", learnstore::notes(action, all)?);
+            Ok(0)
+        }
+        Cmd::Fixes { verb, all } => {
+            match verb.as_deref() {
+                None => print!("{}", learnstore::fixes(all)?),
+                Some("forget") => println!("{}", learnstore::forget(all)?),
+                Some(v) => anyhow::bail!("unknown `tend fixes {v}`; use `tend fixes forget`"),
+            }
             Ok(0)
         }
         Cmd::Inbox { fleet } => {

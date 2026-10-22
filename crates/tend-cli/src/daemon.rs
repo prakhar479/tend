@@ -41,6 +41,9 @@ struct State {
     /// This session's id and project, for the machine's learned fixes (F2).
     session_id: String,
     project: Option<String>,
+    /// How much of the machine's fix store this session has read, once it started:
+    /// fixes other sessions learn while it runs reach it (a fleet's workers).
+    fixes_seen: Option<u64>,
 }
 
 /// When the daemon last got a request (ms), for the idle exit.
@@ -102,6 +105,7 @@ pub fn run(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default(),
         project: None,
+        fixes_seen: None,
     }));
     eprintln!("tendd: listening on {} (mode {mode:?})", sock.display());
 
@@ -274,6 +278,16 @@ fn read_inbox(st: &mut State) -> Result<()> {
         st.store.persist(&d)?;
     }
     Ok(())
+}
+
+/// Fixes other sessions learned since the last hook (F2).
+fn refresh_fixes(st: &mut State) {
+    if let Some(seen) = &mut st.fixes_seen {
+        let new = crate::learnstore::new_fixes(seen, &st.session_id);
+        if !new.is_empty() {
+            st.controller.add_known_fixes(new);
+        }
+    }
 }
 
 /// Where an earlier daemon of this slot stopped reading its inbox (a restart, a
@@ -506,6 +520,7 @@ fn serve(
                     let prepared = tend_core::prepare(&output, level, &cfg);
                     let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
                     let st = &mut *st;
+                    refresh_fixes(st);
                     let (d, text) = st.controller.filter_prepared(
                         &tool_use_id,
                         output,
@@ -550,6 +565,7 @@ fn serve(
                     refresh_claims(st);
                 }
                 read_inbox(st)?;
+                refresh_fixes(st);
                 let (decisions, response) = decide_hook(
                     &mut st.controller,
                     st.connector.as_mut(),
@@ -576,6 +592,13 @@ fn serve(
                 }
                 if let Some(project) = &st.project {
                     crate::learnstore::save_fixes(&decisions, &st.session_id, project);
+                    // Read from the start once: what was added since the session's
+                    // start (a few lines) is checked against what it loaded.
+                    if st.fixes_seen.is_none()
+                        && st.controller.config().learn != tend_core::FleetSetting::Off
+                    {
+                        st.fixes_seen = Some(0);
+                    }
                 }
                 remember(st, &decisions)?;
                 if st.notify {

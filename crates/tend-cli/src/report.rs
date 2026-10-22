@@ -557,11 +557,13 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
                 test,
                 command,
                 files,
+                change,
                 ..
             } => learned.push(format!(
-                "`{}` fixed by changes to {} (`{command}` then passed)",
+                "`{}` fixed by changes to {} (`{command}` then passed){}",
                 truncate_chars(failure_name(message, test.as_deref()), 80),
-                files.join(", ")
+                files.join(", "),
+                change_start(change.as_deref())
             )),
             Body::ModeChanged { to, .. } => {
                 mode = format!("{to:?}").to_lowercase();
@@ -844,11 +846,13 @@ fn describe(e: &Entry) -> String {
             message,
             test,
             files,
+            change,
             ..
         } => format!(
-            "learned: `{}` fixed by changes to {}",
+            "learned: `{}` fixed by changes to {}{}",
             truncate_chars(failure_name(message, test.as_deref()), 80),
-            files.join(", ")
+            files.join(", "),
+            change_start(change.as_deref())
         ),
         Body::Event {
             event:
@@ -949,6 +953,14 @@ pub fn why(entries: &[Entry], id: &str) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+/// The first changed line of a learned fix, for one-line listings: `: +    return x`.
+fn change_start(change: Option<&str>) -> String {
+    change
+        .and_then(|c| c.lines().find(|l| !l.starts_with("--- ")))
+        .map(|l| format!(": {}", truncate_chars(l.trim_end(), 80)))
+        .unwrap_or_default()
 }
 
 /// A learned failure by its message, or its test when the runner gave no message.

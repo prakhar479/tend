@@ -94,6 +94,15 @@ def fleet(preset, task, check=None):
     wts = sorted(glob.glob(os.path.join(home, "fleets", "*", "worktrees", "*")))
     passing = [w for w in wts
                if subprocess.run(["python3", "run_tests.py"], cwd=w, capture_output=True).returncode == 0]
+    # What each worker said when it finished (run 3 says whether tend helped).
+    said = []
+    for led in glob.glob(os.path.join(home, "fleets", "*", "ledger.jsonl")):
+        if os.path.getmtime(led) < t0:
+            continue
+        for line in open(led):
+            ev = json.loads(line).get("body", {}).get("event", {})
+            if ev.get("type") == "task_done":
+                said.append(ev.get("summary", ""))
     t("fleet", "down")
     new = sessions() - before
     b = bodies(new)
@@ -104,7 +113,8 @@ def fleet(preset, task, check=None):
         "board": re.findall(r"^  (t-[\d.]+)\s+(\w+)", board, re.M),
         "sessions": len(new),
         "learned": [(s, x["message"][:60], x["command"], x["files"]) for s, x in b if x.get("kind") == "learned"],
-        "recalls": [(s, a["text"][:160]) for s, a in actions if a.get("type") == "recall"],
+        "recalls": [(s, a["text"]) for s, a in actions if a.get("type") == "recall"],
+        "said": said,
         "notes_given": sum(1 for _, a in actions if a.get("type") == "notes"),
         "worktrees_passing": [os.path.basename(w) for w in passing],
         "cost": (re.search(r"\$(\d+\.\d+)", report) or [None, None])[1],
@@ -120,11 +130,28 @@ print(t("notes", "approve", "n-1").strip())
 rows = []
 # Run 3 makes a second hit happen (an agent whose first try did not work), so the
 # recall is delivered; its transcript shows what the agent did with it.
-AGAIN = ("Make tests/test_fmt.py pass. Before you change anything, run `python3 run_tests.py fmt`, "
+AGAIN = ("Make tests/test_{m}.py pass. Before you change anything, run `python3 run_tests.py {m}`, "
          "then run it again as a separate command. In your `tend task done` summary, say in one "
-         "line whether tend told you anything useful.")
-for preset, task, check in (("lead", HARD_TASK + SPLIT, None), ("pool", HARD_TASK, None),
-                            ("pool", AGAIN, "python3 run_tests.py fmt")):
+         "line whether tend told you anything useful, and what.")
+
+
+def learned_module():
+    """A module whose fix run 1 learned (the runs vary), for run 3 to hit."""
+    try:
+        for line in open(os.path.join(home, "learn", "fixes.jsonl")):
+            word = json.loads(line)["command"].split()[-1]
+            if word in ("parse", "fmt", "stats", "report"):
+                return word
+    except OSError:
+        pass
+    return "fmt"
+
+
+for i, (preset, task, check) in enumerate((("lead", HARD_TASK + SPLIT, None), ("pool", HARD_TASK, None),
+                                           ("pool", AGAIN, "python3 run_tests.py {m}"))):
+    if i == 2:
+        m = learned_module()
+        task, check = task.format(m=m), check.format(m=m)
     print(f"\n== run {preset}", flush=True)
     row, board, report = fleet(preset, task, check)
     print(board)

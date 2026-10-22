@@ -2602,6 +2602,85 @@ fn a_fix_learned_in_one_session_is_recalled_in_another() {
     );
 }
 
+/// F2, with the change (owner, 2026-10-22): B is already running when A learns a fix.
+/// B's first hit of that failure gets the fix with A's change (same project), because
+/// its daemon reads the store's new lines.
+#[test]
+fn a_running_session_gets_a_fix_learned_after_it_started_with_its_change() {
+    let dir = tmp("learn-live-peer");
+    let home = dir.join("home");
+    let config = dir.join("config.toml");
+    fs::write(&config, "learn = on\nwrap_tests = false\n").unwrap();
+    let load = |name: &str| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(fixture(name)).unwrap()).unwrap()
+    };
+    let start = load("session_start.json");
+    let failure = load("post_tool_use_failure_bash.json");
+    let mut post_edit = load("post_tool_use_edit.json");
+    post_edit["tool_input"]["file_path"] = "/home/dev/shop/shop/orders.py".into();
+    post_edit["tool_input"]["old_string"] = "    return total".into();
+    post_edit["tool_input"]["new_string"] = "    return round(total, 2)".into();
+    let mut pre_edit = post_edit.clone();
+    pre_edit["hook_event_name"] = "PreToolUse".into();
+    pre_edit.as_object_mut().unwrap().remove("tool_response");
+    let mut pass = load("post_tool_use_bash.json");
+    pass["tool_input"]["command"] = failure["tool_input"]["command"].clone();
+    pass["tool_response"]["stdout"] = "tests/test_api.py ..                [100%]\n\n============================== 2 passed in 0.02s ===============================\n".into();
+
+    let (_b, sock_b, _) = start_fleet_daemon(&home, "1000000002-2", &config);
+    hook(&sock_b, "SessionStart", &start);
+    let (_a, sock_a, sess_a) = start_fleet_daemon(&home, "1000000001-1", &config);
+    hook(&sock_a, "SessionStart", &start);
+    hook(&sock_a, "PostToolUseFailure", &failure);
+    hook(&sock_a, "PreToolUse", &pre_edit);
+    hook(&sock_a, "PostToolUse", &post_edit);
+    hook(&sock_a, "PostToolUse", &pass);
+    let fixes = fs::read_to_string(home.join("learn/fixes.jsonl")).unwrap_or_default();
+    assert!(fixes.contains("round(total, 2)"), "{fixes}");
+    let report = tend(&["report", "--full"], &sess_a);
+    assert!(
+        report.contains("fixed by changes to shop/orders.py (`")
+            && report.contains(": -    return total"),
+        "{report}"
+    );
+
+    let first = hook(&sock_b, "PostToolUseFailure", &failure);
+    assert!(
+        first.contains("this failure was fixed before, in this project")
+            && first.contains("The change:")
+            && first.contains("--- shop/orders.py")
+            && first.contains("+    return round(total, 2)"),
+        "the first hit, with the change: {first}"
+    );
+
+    // The user sees and forgets what was learned; a session may not forget it.
+    let run = |args: &[&str], session: bool| {
+        let mut c = Command::new(bin());
+        c.args(args)
+            .current_dir(&dir)
+            .env("TEND_HOME", &home)
+            .env_remove("TEND_SESSION_DIR");
+        if session {
+            c.env("TEND_SESSION_DIR", home.join("sessions/1000000002-2"));
+        }
+        c.output().unwrap()
+    };
+    let list = String::from_utf8(run(&["fixes", "--all"], false).stdout).unwrap();
+    assert!(
+        list.contains("fixed by changes to shop/orders.py")
+            && list.contains("+    return round(total, 2)"),
+        "{list}"
+    );
+    assert!(!run(&["fixes", "forget", "--all"], true).status.success());
+    let forgot = String::from_utf8(run(&["fixes", "forget", "--all"], false).stdout).unwrap();
+    assert!(
+        forgot.contains("Forgot 2"),
+        "both failures of the run: {forgot}"
+    );
+    let list = String::from_utf8(run(&["fixes", "--all"], false).stdout).unwrap();
+    assert!(list.contains("No learned fixes"), "{list}");
+}
+
 /// F2 through `tend run` (live finding): most test runs are wrapped, so the pass is
 /// seen by the filter request, with the exit code `tend run` passes on. The fix it
 /// teaches must reach the machine store like one seen in a hook.

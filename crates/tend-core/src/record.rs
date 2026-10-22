@@ -95,6 +95,9 @@ pub enum Body {
         test: Option<String>,
         command: String,
         files: Vec<String>,
+        /// What the fix changed: a short, redacted diff of the edits that landed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<String>,
     },
 }
 

@@ -56,6 +56,40 @@ pub fn root_of(cwd: &Path) -> String {
         .to_string()
 }
 
+/// Other sessions' fixes added to the store past `offset` (bytes; it moves to the end
+/// of the last whole line). One `stat` when nothing was added. A store that got
+/// shorter was compacted: it is read again, and the caller skips fixes it knows.
+pub fn new_fixes(offset: &mut u64, except_session: &str) -> Vec<KnownFix> {
+    new_fixes_in(&dir(), offset, except_session)
+}
+
+fn new_fixes_in(dir: &Path, offset: &mut u64, except_session: &str) -> Vec<KnownFix> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = fs::File::open(dir.join("fixes.jsonl")) else {
+        return Vec::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if len == *offset {
+        return Vec::new();
+    }
+    if len < *offset {
+        *offset = 0;
+    }
+    let mut buf = Vec::new();
+    if f.seek(SeekFrom::Start(*offset)).is_err() || f.read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let Some(end) = buf.iter().rposition(|&b| b == b'\n') else {
+        return Vec::new();
+    };
+    *offset += end as u64 + 1;
+    buf[..end]
+        .split(|&b| b == b'\n')
+        .filter_map(|l| serde_json::from_slice::<KnownFix>(l).ok())
+        .filter(|f| f.session != except_session)
+        .collect()
+}
+
 /// Other sessions' fixes, newest last.
 pub fn load_fixes(except_session: &str) -> Vec<KnownFix> {
     load_fixes_in(&dir(), except_session)
@@ -89,6 +123,7 @@ fn save_fixes_in(dir: &Path, decisions: &[Decision], session: &str, project: &st
             test,
             command,
             files,
+            change,
         } = &e.body
         {
             let fix = KnownFix {
@@ -100,6 +135,7 @@ fn save_fixes_in(dir: &Path, decisions: &[Decision], session: &str, project: &st
                 session: session.to_string(),
                 project: project.to_string(),
                 at_ms: e.ts_ms,
+                change: change.clone(),
             };
             if let Ok(l) = serde_json::to_string(&fix) {
                 lines.push_str(&l);
@@ -110,6 +146,10 @@ fn save_fixes_in(dir: &Path, decisions: &[Decision], session: &str, project: &st
     if lines.is_empty() || paths::ensure_private_dir(dir).is_err() {
         return;
     }
+    // One writer at a time: compaction and `tend fixes forget` rewrite the file.
+    let Ok(_lock) = lock(dir, "fixes.lock") else {
+        return;
+    };
     let path = dir.join("fixes.jsonl");
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = f.write_all(lines.as_bytes());
@@ -125,6 +165,91 @@ fn save_fixes_in(dir: &Path, decisions: &[Decision], session: &str, project: &st
             }
         }
     }
+}
+
+/// `tend fixes [--all]`: learned fixes, newest first, with the start of each change.
+pub fn fixes(all: bool) -> Result<String> {
+    let project = project_of(&std::env::current_dir()?);
+    let mut fixes: Vec<KnownFix> = load_fixes_in(&dir(), "")
+        .into_iter()
+        .filter(|f| all || f.project == project)
+        .collect();
+    fixes.reverse();
+    let now = paths::now_ms();
+    let mut out = String::new();
+    for f in &fixes {
+        let what = match (&f.test, f.message.is_empty()) {
+            (Some(t), true) => t.clone(),
+            _ => f.message.clone(),
+        };
+        let ago = now.saturating_sub(f.at_ms) / 60_000;
+        let when = match ago {
+            0..=119 => format!("{ago} min ago"),
+            m if m < 48 * 60 => format!("{} h ago", m / 60),
+            m => format!("{} days ago", m / (24 * 60)),
+        };
+        let _ = writeln!(
+            out,
+            "{when}  {}",
+            tend_core::text::truncate_chars(&what, 100)
+        );
+        let _ = writeln!(
+            out,
+            "    fixed by changes to {}; `{}` then passed (session {})",
+            f.files.join(", "),
+            f.command,
+            f.session
+        );
+        if all {
+            let _ = writeln!(out, "    in {}", f.project);
+        }
+        for l in f.change.iter().flat_map(|c| c.lines()).take(4) {
+            let _ = writeln!(out, "      {l}");
+        }
+    }
+    if fixes.is_empty() {
+        out.push_str(if all {
+            "No learned fixes on this machine.\n"
+        } else {
+            "No learned fixes for this project.\n"
+        });
+    } else {
+        out.push_str(
+            "`tend fixes forget` drops this project's fixes (`--all`: every project's).\n",
+        );
+    }
+    Ok(out)
+}
+
+/// `tend fixes forget [--all]`: drop this project's learned fixes (or every one).
+/// The user's: refused in a tend session.
+pub fn forget(all: bool) -> Result<String> {
+    if std::env::var_os("TEND_SESSION_DIR").is_some() {
+        bail!("forgetting fixes is the user's; run it outside a tend session");
+    }
+    let project = project_of(&std::env::current_dir()?);
+    let dir = dir();
+    let _lock = lock(&dir, "fixes.lock")?;
+    let path = dir.join("fixes.jsonl");
+    let text = fs::read_to_string(&path).unwrap_or_default();
+    let (mut dropped, mut kept) = (0, String::new());
+    for line in text.lines() {
+        let theirs =
+            serde_json::from_str::<KnownFix>(line).is_ok_and(|f| all || f.project == project);
+        if theirs {
+            dropped += 1;
+        } else {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    let tmp = dir.join(format!("fixes.jsonl.{}", std::process::id()));
+    fs::write(&tmp, kept)?;
+    fs::rename(&tmp, &path)?;
+    Ok(format!(
+        "Forgot {dropped} learned fix(es){}.",
+        if all { "" } else { " of this project" }
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,15 +277,21 @@ fn load_notes() -> Vec<Note> {
 /// Hold the notes lock (an flock on `notes.lock`) while `f` reads and writes them: two
 /// sessions writing notes at once must not lose one.
 fn with_notes_lock<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _lock = lock(&dir(), "notes.lock")?;
+    f()
+}
+
+/// An flock on `<dir>/<name>`, held until the file is dropped.
+fn lock(dir: &Path, name: &str) -> Result<fs::File> {
     use std::os::unix::io::AsRawFd;
-    paths::ensure_private_dir(&dir())?;
+    paths::ensure_private_dir(dir)?;
     let lock = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir().join("notes.lock"))?;
+        .open(dir.join(name))?;
     // SAFETY: flock on an open file; the lock goes with the file when it is dropped.
     unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
-    f()
+    Ok(lock)
 }
 
 fn save_notes(notes: &[Note]) -> Result<()> {
@@ -301,6 +432,7 @@ mod tests {
                     test: None,
                     command: "pytest".into(),
                     files: vec!["a.py".into()],
+                    change: None,
                 },
             }],
             ..Decision::default()
@@ -334,6 +466,7 @@ mod tests {
                     test: None,
                     command: "pytest".into(),
                     files: vec!["a.py".into()],
+                    change: None,
                 },
             }],
             ..Decision::default()
@@ -388,6 +521,38 @@ mod tests {
         let plain = d.join("plain");
         fs::create_dir_all(&plain).unwrap();
         assert_eq!(project_of(&plain), root_of(&plain));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_running_session_reads_only_new_fixes() {
+        let d = std::env::temp_dir().join(format!("tend-learn-new-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let line = |s: &str, at: u64| {
+            format!(
+                "{{\"signature\":\"a\",\"message\":\"m\",\"command\":\"pytest\",\"files\":[],\"session\":\"{s}\",\"project\":\"/r\",\"at_ms\":{at}}}\n"
+            )
+        };
+        fs::write(d.join("fixes.jsonl"), line("a", 1)).unwrap();
+        let mut seen = 0;
+        assert_eq!(new_fixes_in(&d, &mut seen, "me").len(), 1);
+        assert!(new_fixes_in(&d, &mut seen, "me").is_empty(), "nothing new");
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(d.join("fixes.jsonl"))
+            .unwrap();
+        f.write_all((line("me", 2) + &line("b", 3)).as_bytes())
+            .unwrap();
+        let got = new_fixes_in(&d, &mut seen, "me");
+        assert_eq!(
+            got.iter().map(|f| f.at_ms).collect::<Vec<_>>(),
+            [3],
+            "not its own"
+        );
+        // Compacted (shorter): read again from the start.
+        fs::write(d.join("fixes.jsonl"), line("b", 3)).unwrap();
+        assert_eq!(new_fixes_in(&d, &mut seen, "me").len(), 1);
         let _ = fs::remove_dir_all(&d);
     }
 }

@@ -474,9 +474,22 @@ The first rounds learned nothing. Each cause, found and fixed in turn:
 Result (round 8): run 1 learned 2 fixes (parse, fmt) from 4 workers. Fixes are stored under the main checkout. Every session (7 of 7) got the approved note at start. Run 2's worker fixed everything at the first try: no second hit, so no recall, as designed. Run 3's worker hit the fmt failure twice and got: "this failure was fixed before, in this project, minutes ago: after changes to kv/fmt.py, `python3 run_tests.py fmt` passed." It fixed it; asked whether tend helped, it credited the note (run from the repo root), not the recall. Merging: the lead's worktree passed the whole check every round, with no conflicts.
 
 Findings, not built:
-- **A recall names files, not the change.** "After changes to kv/fmt.py" is little help to an agent that is stuck. Storing a short diff of the fix (from the session's Edit inputs, redacted like outputs) would make it useful; it grows the store and copies code across projects on the machine, so it is an owner decision.
+- **A recall names files, not the change.** Built since as L6–L7 (owner: the diff stays in its project).
 - **Recalls are rare with capable agents.** Haiku fixed every part at the first try; only a forced second hit gave a recall. The second-hit rule keeps noise low, and the cases it serves (a stuck agent) did not come up in this bench.
 - An agent's run of two tests in one command (`t; echo; t`) is one hit: one output.
+
+### Learning L, part 2: fixes that help (planned and built 2026-10-22)
+
+Owner: a learned fix keeps a short redacted diff, shown only in its project; recall on the first hit when this project has a fix with a diff for that failure, else on the second.
+
+- [x] **L6 Keep the change.** `EditProposed` text joins a fix once its `FileEdited` lands (a denied edit never does); a snapshotted shell write (`FileChanged`) gives its changed lines; other shell writes name the file only. `learned` entries and `fixes.jsonl` lines gain an optional `change` (additive, format 1): `--- path` then `-`/`+` lines, at most 30 lines and 1,500 chars, `text::redact`ed.
+- [x] **L7 Recall it.** First hit for a same-project fix with a change; second hit otherwise. The recall shows the change and says it is another session's, to check before use. Another project's fix never shows its change.
+- [x] **L8 Running sessions learn too.** Each hook (and `tend run` filter) checks the store's length and reads only new lines (`learnstore::new_fixes`; a compacted store is read again; known fixes are skipped). A sibling fleet worker gets a fix minutes after it is learned.
+- [x] **L9 The user's control.** `tend fixes [--all]` lists fixes with the start of each change; `tend fixes forget [--all]` drops them, refused in a session and denied to the agent in PreToolUse. Writes to the store hold `learn/fixes.lock`.
+- [x] Report and `tend why` show the first changed line of a learned fix.
+- [x] **Found live: context from a wrapped run never reached the agent.** Recalls and loop steers decided in `tend run`'s filter request were recorded as applied, but the filter reply carries only the text to print. They now go out with the wrapped call's tool result; if the call is stopped first, the ledger records them as not delivered. This affected every steer on a wrapped test run since D4.
+
+Live (round 11, Haiku, `scripts/learn_live.py`): run 1 learned 4 fixes. The lead got a recall with the diff of a fix its own worker had learned minutes before (L8). Runs 2 and 3 got the parse recall with its diff on the first hit. Run 3's worker: "tend was useful: the hook note named the exact one-line change from another session, which I checked against the docstring and test before applying." It finished in 0.2 min (earlier rounds: 0.3–0.4).
 
 - [ ] **F6 Cross-provider.** After the Codex connector (S10, E12).
 
