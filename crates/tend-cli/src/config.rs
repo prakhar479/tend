@@ -14,6 +14,7 @@
 //! notify = false             # desktop notification on a loop or a blocked edit
 //! wrap_tests = true          # optimize: run tests through `tend run` (costs ~1-2 s each in auto mode)
 //! fleet = look               # other tend sessions here: off, look (record), on (also tell the agent)
+//! learn = look               # recall fixes other sessions learned, and project notes: off, look, on
 //! ```
 
 use std::env;
@@ -59,7 +60,7 @@ pub fn load() -> Config {
     c
 }
 
-const KEYS: [&str; 11] = [
+const KEYS: [&str; 12] = [
     "shape_threshold_tokens",
     "max_summary_ratio",
     "loop_threshold",
@@ -71,6 +72,7 @@ const KEYS: [&str; 11] = [
     "notify",
     "wrap_tests",
     "fleet",
+    "learn",
 ];
 
 fn parse(text: &str) -> (Config, Vec<String>) {
@@ -132,6 +134,14 @@ fn apply(c: &mut Config, line: &str, seen: &mut std::collections::BTreeSet<Strin
         }
         "fleet" => {
             c.fleet = match value {
+                "off" => FleetSetting::Off,
+                "look" => FleetSetting::Look,
+                "on" => FleetSetting::On,
+                v => bail!("{key} must be off, look, or on, got {v}"),
+            }
+        }
+        "learn" => {
+            c.learn = match value {
                 "off" => FleetSetting::Off,
                 "look" => FleetSetting::Look,
                 "on" => FleetSetting::On,

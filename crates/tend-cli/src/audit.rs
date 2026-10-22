@@ -42,7 +42,10 @@ pub fn repo_root(dir: &Path) -> Result<PathBuf> {
 /// (ignored ones left out). Uses a copy of the index, so the user's index, branch, and
 /// files are untouched; only new blob objects are written.
 pub fn worktree_tree(root: &Path, scratch: &Path) -> Result<String> {
-    let index = scratch.join(format!("audit-index-{}", std::process::id()));
+    // One index per call: the hub snapshots worktrees from more than one thread.
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let index = scratch.join(format!("audit-index-{}-{n}", std::process::id()));
     let real = PathBuf::from(git(root, &["rev-parse", "--git-path", "index"], None)?.trim());
     let real = if real.is_absolute() {
         real
@@ -51,6 +54,14 @@ pub fn worktree_tree(root: &Path, scratch: &Path) -> Result<String> {
     };
     if real.exists() {
         std::fs::copy(&real, &index).context("copy the git index")?;
+        // Keep the index's time: git re-reads files changed in the same second as the
+        // index was written only while the index is not newer than them. A copy made
+        // now would hide such a change (same size, same second).
+        if let Ok(m) = std::fs::metadata(&real).and_then(|m| m.modified()) {
+            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&index) {
+                let _ = f.set_modified(m);
+            }
+        }
     }
     let tree = git(root, &["add", "-A"], Some(&index))
         .and_then(|_| git(root, &["write-tree"], Some(&index)));
@@ -258,4 +269,57 @@ pub fn render_markdown(r: &Report, title: &str) -> String {
         r.dependencies.iter().map(|d| format!("`{d}`")).collect(),
     );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A change of the same size in the same second as the commit must show in the
+    /// snapshot (the copied index once hid it, M1).
+    #[test]
+    fn a_same_size_change_right_after_a_commit_is_seen() {
+        let d = std::env::temp_dir().join(format!("tend-snap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(&d)
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "commit.gpgsign=false"
+                ])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        std::fs::write(d.join("f.txt"), "a\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let head = git_out_for_test(&d);
+        std::fs::write(d.join("f.txt"), "A\n").unwrap();
+        let scratch = d.join(".scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let tree = worktree_tree(&d, &scratch).unwrap();
+        assert_ne!(tree, head, "the change to f.txt is in the snapshot");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn git_out_for_test(d: &Path) -> String {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .args(["rev-parse", "HEAD^{tree}"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
 }

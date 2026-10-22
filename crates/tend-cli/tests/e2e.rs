@@ -2550,3 +2550,157 @@ fn fleet_brings_a_done_parts_work_up_to_its_lead() {
         "lifted"
     );
 }
+
+/// F2: session A fails a test run, edits, and passes it: a learned fix in the machine's
+/// store. Session B in the same project hits the same failure twice: the second time
+/// it is told how A fixed it.
+#[test]
+fn a_fix_learned_in_one_session_is_recalled_in_another() {
+    let dir = tmp("learn");
+    let home = dir.join("home");
+    let config = dir.join("config.toml");
+    fs::write(&config, "learn = on\nwrap_tests = false\n").unwrap();
+    let load = |name: &str| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(fixture(name)).unwrap()).unwrap()
+    };
+    let start = load("session_start.json");
+    let failure = load("post_tool_use_failure_bash.json");
+    let mut edit = load("post_tool_use_edit.json");
+    edit["tool_input"]["file_path"] = "/home/dev/shop/shop/orders.py".into();
+    let mut pass = load("post_tool_use_bash.json");
+    pass["tool_input"]["command"] = failure["tool_input"]["command"].clone();
+    pass["tool_response"]["stdout"] = "tests/test_api.py ..                [100%]\n\n============================== 2 passed in 0.02s ===============================\n".into();
+
+    let (_a, sock_a, sess_a) = start_fleet_daemon(&home, "1000000001-1", &config);
+    hook(&sock_a, "SessionStart", &start);
+    hook(&sock_a, "PostToolUseFailure", &failure);
+    hook(&sock_a, "PostToolUse", &edit);
+    hook(&sock_a, "PostToolUse", &pass);
+    let fixes = fs::read_to_string(home.join("learn/fixes.jsonl")).unwrap_or_default();
+    assert!(
+        fixes.contains("\"session\":\"1000000001-1\"") && fixes.contains("shop/orders.py"),
+        "{fixes}"
+    );
+    let report = tend(&["report", "--full"], &sess_a);
+    assert!(
+        report.contains("Learned fixes:") && report.contains("fixed by changes to shop/orders.py"),
+        "{report}"
+    );
+
+    let (_b, sock_b, _) = start_fleet_daemon(&home, "1000000002-2", &config);
+    hook(&sock_b, "SessionStart", &start);
+    let first = hook(&sock_b, "PostToolUseFailure", &failure);
+    assert!(
+        !first.contains("fixed before"),
+        "the first hit says nothing: {first}"
+    );
+    let second = hook(&sock_b, "PostToolUseFailure", &failure);
+    assert!(
+        second.contains("this failure was fixed before, in this project")
+            && second.contains("shop/orders.py"),
+        "{second}"
+    );
+}
+
+/// F2 notes: the user's note is kept, an agent's waits for review; approved notes reach
+/// a new session of the project at its start.
+#[test]
+fn project_notes_reach_new_sessions_once_approved() {
+    let dir = tmp("notes");
+    let project = dir.join("proj");
+    fs::create_dir_all(&project).unwrap();
+    let home = dir.join("home");
+    let config = dir.join("config.toml");
+    fs::write(&config, "learn = on\n").unwrap();
+    let run = |args: &[&str], agent: bool| {
+        let mut c = Command::new(bin());
+        c.args(args)
+            .current_dir(&project)
+            .env("TEND_HOME", &home)
+            .env_remove("TEND_SESSION_DIR");
+        if agent {
+            c.env("TEND_SESSION_DIR", dir.join("sessions/agent-1"));
+        }
+        let o = c.output().unwrap();
+        assert!(
+            o.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8(o.stdout).unwrap()
+    };
+    assert!(run(&["note", "integration tests need DB_URL"], false).contains("Kept n-1"));
+    assert!(run(&["note", "the cache dir is ./tmp"], true).contains("for the user's review"));
+    let list = run(&["notes"], false);
+    assert!(
+        list.contains("n-1  approved") && list.contains("n-2  pending"),
+        "{list}"
+    );
+    run(&["notes", "approve", "n-2"], false);
+
+    let (_d, sock, _) = start_fleet_daemon(&home, "1000000001-1", &config);
+    let mut start: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("session_start.json")).unwrap()).unwrap();
+    start["cwd"] = project.display().to_string().into();
+    let out = hook(&sock, "SessionStart", &start);
+    assert!(
+        out.contains("notes for this project, kept by the user")
+            && out.contains("DB_URL")
+            && out.contains("./tmp"),
+        "{out}"
+    );
+}
+
+/// M1: two parts change adjacent lines of one file (a patch would not apply: each one's
+/// context is the other's change); the dependent task's worktree gets both, merged.
+/// When they change the same line, it gets the conflict and is told where.
+#[test]
+fn fleet_merges_parts_work_three_ways() {
+    for (second, want_conflict) in [("3s/.*/C/", false), ("1s/.*/Z/", true)] {
+        let (dir, repo, home) = fleet_repo(
+            if want_conflict {
+                "merge-conflict"
+            } else {
+                "merge-clean"
+            },
+            &[("f.txt", "a\nb\nc\n")],
+            "preset = \"pool\"\n",
+        );
+        let agent = fake_script(
+            &dir,
+            "fake-merge.sh",
+            &format!(
+                r#"    *"Task t-1:"*)
+      sed -i '1s/.*/A/' f.txt; tend task done t-1 one >> "$D/done.txt" 2>&1; result ;;
+    *"Task t-2:"*)
+      sed -i '{second}' f.txt; tend task done t-2 two >> "$D/done.txt" 2>&1; result ;;
+    *"Task t-3:"*)
+      cp f.txt "$D/seen.txt"; echo "$line" > "$D/told.txt"
+      tend task done t-3 three >> "$D/done.txt" 2>&1; result ;;"#
+            ),
+        );
+        let tend = |args: &[&str]| tend_in(&repo, &home, &agent, args);
+        let _down = FleetDown(repo.clone(), home.clone(), agent.clone());
+        tend(&["fleet", "up", "fleet.toml"]);
+        tend(&["task", "add", "one"]);
+        tend(&["task", "add", "two"]);
+        board_until(&tend, &|b| b.matches(" done ").count() == 2);
+        tend(&["task", "add", "three", "--depends", "t-1,t-2"]);
+        board_until(&tend, &|b| b.matches(" done ").count() == 3);
+        let seen = fs::read_to_string(dir.join("seen.txt")).unwrap();
+        let told = fs::read_to_string(dir.join("told.txt")).unwrap();
+        if want_conflict {
+            assert!(
+                seen.contains("<<<<<<<") && seen.contains('Z') && seen.contains('A'),
+                "{seen}"
+            );
+            assert!(told.contains("conflicted in f.txt"), "{told}");
+        } else {
+            assert_eq!(seen, "A\nb\nC\n");
+            assert!(
+                told.contains("brought the work of t-1 (worker-1), t-2 (worker-2)"),
+                "{told}"
+            );
+        }
+    }
+}

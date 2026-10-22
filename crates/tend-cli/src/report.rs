@@ -408,6 +408,9 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
     let mut workspace: Option<(String, String)> = None;
     let mut peers: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut fleet = Vec::new();
+    // Shared learning (F2): fixes this session learned, and recalls it made.
+    let mut learned = Vec::new();
+    let mut recalled = Vec::new();
 
     let overrides: HashSet<u64> = entries
         .iter()
@@ -518,6 +521,13 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
                         SteerTrigger::Cycle { .. } => cycles.push(format!("{st} {text}")),
                     }
                 }
+                ActionKind::Recall { text, .. } | ActionKind::Notes { text, .. } => {
+                    recalled.push(format!(
+                        "{} {}",
+                        status(*applied, "told", "would tell"),
+                        text.trim_start_matches("tend: ")
+                    ))
+                }
                 ActionKind::Fleet { text, .. } => fleet.push(format!(
                     "{} {}",
                     status(*applied, "told", "would tell"),
@@ -542,6 +552,16 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
                 }
             },
             Body::Adaptation { reason, .. } => adaptations.push(reason.clone()),
+            Body::Learned {
+                message,
+                command,
+                files,
+                ..
+            } => learned.push(format!(
+                "`{}` fixed by changes to {} (`{command}` then passed)",
+                truncate_chars(message, 80),
+                files.join(", ")
+            )),
             Body::ModeChanged { to, .. } => {
                 mode = format!("{to:?}").to_lowercase();
                 modes.push(mode.clone());
@@ -608,6 +628,7 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
         ("Edit cycles", &cycles),
         ("Test guard", &guards),
         ("Fleet notices", &fleet),
+        ("Recalled", &recalled),
     ];
     if !full {
         let mut parts: Vec<String> = attention
@@ -724,7 +745,11 @@ pub fn render(label: &str, entries: &[Entry], live: bool, full: bool) -> String 
     if full || reopens > 0 {
         let _ = writeln!(out, "Re-opens: {reopens}");
     }
-    let mut rest = vec![("Adaptations", &adaptations), ("Mode changes", &modes)];
+    let mut rest = vec![
+        ("Learned fixes", &learned),
+        ("Adaptations", &adaptations),
+        ("Mode changes", &modes),
+    ];
     if full {
         rest.splice(0..0, attention);
     }
@@ -770,6 +795,8 @@ fn describe(e: &Entry) -> String {
                 ActionKind::Wrap { .. } => "wrap",
                 ActionKind::Retry { .. } => "retry",
                 ActionKind::Fleet { .. } => "fleet",
+                ActionKind::Recall { .. } => "recall",
+                ActionKind::Notes { .. } => "notes",
             };
             let state = match (applied, unsupported) {
                 (true, _) => "applied",
@@ -812,6 +839,11 @@ fn describe(e: &Entry) -> String {
         Body::Config { overrides } => format!("config {overrides:?}"),
         Body::Format { version } => format!("ledger format {version}"),
         Body::Override { action } => format!("user allowed {action} once"),
+        Body::Learned { message, files, .. } => format!(
+            "learned: `{}` fixed by changes to {}",
+            truncate_chars(message, 80),
+            files.join(", ")
+        ),
         Body::Event {
             event:
                 Event::Peer {

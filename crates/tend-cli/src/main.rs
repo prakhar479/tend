@@ -15,6 +15,7 @@ mod fleet;
 mod hub;
 mod ipc;
 mod launcher;
+mod learnstore;
 mod paths;
 mod plugin;
 mod report;
@@ -178,6 +179,18 @@ enum Cmd {
     Inbox {
         #[arg(long)]
         fleet: Option<String>,
+    },
+    /// Keep a note for this project: what sessions should know (`tend notes` lists them).
+    /// A note an agent writes waits for your review.
+    Note { text: String },
+    /// This project's notes; `approve <id>` or `drop <id>` reviews one (yours to run).
+    Notes {
+        /// approve or drop
+        verb: Option<String>,
+        id: Option<String>,
+        /// Every project's notes.
+        #[arg(long)]
+        all: bool,
     },
     /// Fleets of agents: `tend fleet up` runs one from a fleet file. Alone, it lists the
     /// fleets and the live tend sessions on this machine, grouped by repo.
@@ -753,6 +766,19 @@ fn run(cli: Cli) -> Result<i32> {
             } else {
                 0
             })
+        }
+        Cmd::Note { text } => {
+            println!("{}", learnstore::note(&text)?);
+            Ok(0)
+        }
+        Cmd::Notes { verb, id, all } => {
+            let action = match (verb.as_deref(), id.as_deref()) {
+                (None, _) => None,
+                (Some(v @ ("approve" | "drop")), Some(id)) => Some((v, id)),
+                _ => anyhow::bail!("use `tend notes approve <id>` or `tend notes drop <id>`"),
+            };
+            print!("{}", learnstore::notes(action, all)?);
+            Ok(0)
         }
         Cmd::Inbox { fleet } => {
             println!("{}", hub::show_inbox(fleet.as_deref())?.trim_end());

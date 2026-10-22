@@ -56,6 +56,8 @@ tend fleet merge --yes               # commit finished worktrees to their branch
 tend msg @lead "is the schema final?"  # a message in the fleet (to user, @role, or a session)
 tend inbox                           # the fleet's messages to you (or, in a fleet session, to it)
 tend claude --tend-fleet --tend-name rev   # join a fleet from this terminal, as its attached role
+tend note "integration tests need DB_URL"  # a note for this project's sessions (an agent's waits for you)
+tend notes                           # this project's notes; `tend notes approve n-2` reviews one
 tend show o-3                        # full original of a summarized output
 tend why a-2                         # cause chain of an action
 tend mode optimize                   # change the mode of the live session
@@ -100,7 +102,12 @@ plugin_mode = look              # mode of sessions the Claude Code plugin starts
 notify = false                  # desktop notification when tend steers a loop or blocks an edit
 wrap_tests = true               # optimize: run tests through `tend run`; each costs ~1-2 s in auto mode
 fleet = look                    # other tend sessions here: off, look (record only), on (also tell the agent)
+learn = look                    # recall fixes other sessions learned, and project notes: off, look, on
 ```
+
+### Learning
+
+tend remembers fixes across sessions on this machine. When a test or build failure goes away after edits, the session keeps a learned fix (the failure, the command, the files changed) in `~/.local/share/tend/learn/fixes.jsonl`. The second time another session hits the same failure, tend tells it where and how it was fixed, this project's fix first. Notes (`tend note`) are what you want every session of a project to know; an agent may write one, but only you approve it. With `learn = on` (optimize mode) the agent gets both; with `look`, the default, they are only recorded.
 
 ### Fleet
 

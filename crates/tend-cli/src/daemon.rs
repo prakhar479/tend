@@ -38,6 +38,9 @@ struct State {
     claims: Option<(PathBuf, Option<std::time::SystemTime>)>,
     /// This session's fleet inbox, and how much of it was read (F4).
     inbox: Option<(PathBuf, u64)>,
+    /// This session's id and project, for the machine's learned fixes (F2).
+    session_id: String,
+    project: Option<String>,
 }
 
 /// When the daemon last got a request (ms), for the idle exit.
@@ -93,6 +96,11 @@ pub fn run(
             .as_ref()
             .and_then(|r| r.inbox.clone())
             .map(|p| (PathBuf::from(p), 0)),
+        session_id: dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        project: None,
     }));
     eprintln!("tendd: listening on {} (mode {mode:?})", sock.display());
 
@@ -354,6 +362,7 @@ fn decide_hook(
     payload: &serde_json::Value,
     deadline_ms: Option<u64>,
     clock: &mut dyn FnMut() -> u64,
+    session_id: &str,
 ) -> (Vec<tend_core::Decision>, Response) {
     let late = |t: u64| deadline_ms.is_some_and(|d| t + REPLY_MARGIN_MS > d);
     let now = clock();
@@ -368,6 +377,15 @@ fn decide_hook(
             }
             controller.set_policy(policy.clone());
             connector.set_policy(&policy);
+            // Shared learning (F2): other sessions' fixes and this project's notes.
+            if controller.config().learn != tend_core::FleetSetting::Off {
+                let project = crate::learnstore::project_of(Path::new(cwd));
+                controller.set_learning(
+                    &project,
+                    crate::learnstore::load_fixes(session_id),
+                    crate::learnstore::approved_notes(&project),
+                );
+            }
         }
         decisions.push(if unanswered {
             controller.handle_unanswered(ev, now)
@@ -506,9 +524,25 @@ fn serve(
                     &payload,
                     deadline_ms,
                     &mut now_ms,
+                    &st.session_id.clone(),
                 );
                 for d in &decisions {
                     st.store.persist(d)?;
+                }
+                if st.project.is_none() {
+                    st.project =
+                        decisions
+                            .iter()
+                            .flat_map(|d| &d.entries)
+                            .find_map(|e| match &e.body {
+                                tend_core::Body::Event {
+                                    event: tend_core::Event::SessionStarted { cwd, .. },
+                                } => Some(crate::learnstore::project_of(Path::new(cwd))),
+                                _ => None,
+                            });
+                }
+                if let Some(project) = &st.project {
+                    crate::learnstore::save_fixes(&decisions, &st.session_id, project);
                 }
                 remember(st, &decisions)?;
                 if st.notify {
@@ -588,6 +622,7 @@ mod tests {
             &weakening_edit(),
             deadline,
             &mut clock,
+            "test",
         )
     }
 

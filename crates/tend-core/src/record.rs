@@ -87,6 +87,15 @@ pub enum Body {
     Config {
         overrides: BTreeMap<String, String>,
     },
+    /// A failure went away after edits: a fix this session learned (F2, L1).
+    Learned {
+        signature: String,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        test: Option<String>,
+        command: String,
+        files: Vec<String>,
+    },
 }
 
 /// Read actions that an `undelivered` entry names as not applied, with a note in the
@@ -196,6 +205,17 @@ pub enum ActionKind {
     /// A command the agent may not run (it would lift a guard).
     BlockCommand {
         command: String,
+    },
+    /// Tell the agent how another session fixed the failure it hits again (F2, L3).
+    Recall {
+        signature: String,
+        session: String,
+        text: String,
+    },
+    /// The project's notes, kept by the user, at session start (F2, L5).
+    Notes {
+        count: usize,
+        text: String,
     },
     /// Tell the agent what another tend session did that affects it (F1).
     Fleet {

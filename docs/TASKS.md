@@ -305,7 +305,8 @@ Owner decisions 2026-10-21: awareness and learning first; spawning is a core fea
   - **`fleet = off | look | on`** (default `look`: record only). Notices are recorded at this session's next hook (`fleet` action, causes = the peer's entry here + this hook's event); delivered only with `on` in optimize mode, at most 3 per hook and 40 per session. Peer events do not advance the active clock (loop time).
   - A liveness probe no longer counts as daemon activity, so peers cannot keep a plugin daemon from its idle exit.
   - Live check (Claude Code 2.1.306, Haiku, two headless sessions in one checkout): B's edit reached A after A's wait step, and A quoted the notice and handled the change. Shim p95 2.9 ms.
-- [ ] **F2 Shared learning.** Signature memory (`<home>/fleet/signatures.jsonl`) delivered on a second hit or a loop start; `tend note` with a review queue and `tend notes --promote`. Gate: one real hit where the delivered fix was right.
+- [x] **F2 Shared learning.** Signature memory (`<home>/fleet/signatures.jsonl`) delivered on a second hit or a loop start; `tend note` with a review queue and `tend notes --promote`. Gate: one real hit where the delivered fix was right.
+  Done 2026-10-22 as L1–L5 (below).
 - [x] **F-S1 Spike: stream mode.** Long-lived `claude -p --input-format stream-json --output-format stream-json` under tend's settings: do hooks fire, can a turn be sent when idle, how does interrupt work, does `--resume --fork-session` work headless?
   Note: all four confirmed; see Spike results. Rerun with `scripts/spike_stream.py`.
 - [x] **F-S2 Spike: concurrency.** 4 stream sessions at once: rate and usage limits, hub CPU.
@@ -420,6 +421,21 @@ Checked and fine: shim p95 1.5 ms; fuzz targets build; look mode returns no resp
   - The hub now records each task's starting tree always (not only with `experimental_audit`), so a task's own changes are known; the audit still runs only when it is on.
   - The merge plan leaves out parts whose work is in their lead's worktree; the lead's brief tells it to give each part a `--check`, and that tend moves the work.
 - Result after the fixes (Haiku, `lead`, `--split`): done in 0.5 min, 5 tasks, no lost attempts, the whole check passes in the lead's worktree, $0.02; the merge plan is the lead's worktree alone.
+
+### Learning L and merging M (planned 2026-10-22; owner chose F2 shared learning and merge-aware integration)
+
+- [x] **M1 Merge-aware integration.** Move a task's work with a 3-way merge of trees (its starting tree, its worktree now, the target now) via `git merge-tree --write-tree --merge-base` on commit objects only (no ref moves). A fresh worker gets conflicts as markers with the file list; a lead's worktree never gets markers (the lead is told which files conflict and where the part's work is). Older git: the patch, as before.
+  Done 2026-10-22. `move_work` snapshots three trees (the task's starting tree, its worktree, the target), makes commit objects with tend's own identity (no refs), runs `git merge-tree --write-tree --merge-base`, and applies the target-to-merged diff. A fresh worker gets conflicts as markers and their file names; a lead's worktree is never given markers: the lead gets a notice (and the inbox a line) naming the files and where the part's work is. Exit codes other than 0 and 1 (older git) fall back to the patch. Test: two parts changing adjacent lines of one file (a patch fails: each one's context is the other's change) merge; the same line gives the dependent worker the conflict. **Found on the way:** the worktree snapshot (also used by the session audit, E2) copied the git index, and the copy's fresh time made git trust its cached stat for a file changed in the same second at the same size: the change was missing from the snapshot. The copy now keeps the index's time; a regression test covers it. Live (Haiku, split hard task): done, 5 tasks, no lost attempts, the whole check passing in the lead's worktree.
+- [x] **L1 Learn fixes (core).** A command's failing run, edits, then a passing run of the same command: each failure that went away is a `learned` ledger entry (signature, message, test, command, files changed in between).
+  Done 2026-10-22. `tend-core/src/learn.rs`; a `learned` ledger entry when a failure seen in a test or build run is gone from a later run of the same command (a pass known to exit 0, or a failing run whose failures the parsers read) after edits; the files are those changed in between, relative to the project root. A wrapped run (exit code unknown) never counts as a pass.
+- [x] **L2 Machine store.** The daemon appends learned fixes to `<home>/learn/fixes.jsonl`; a session starts with the other sessions' fixes.
+  Done 2026-10-22. `<home>/learn/fixes.jsonl` (session, project, time); a session starts with the newest 2000 of other sessions' fixes. Fails open.
+- [x] **L3 Recall.** On the second hit of a failure another session fixed, tell the agent where and how (same project first), once per failure; `learn = off | look | on` (default `look`, like `fleet`).
+  Done 2026-10-22. On the second hit of a failure another session fixed, a `recall` action: "this failure was fixed before, in this project, 3 min ago: after changes to …, `pytest` passed" (this project's fix first, then the newest), once per failure, at most 10 per session. `learn = look` (default) records it; `on` says it in optimize mode. Tested across two daemons.
+- [x] **L4 Notes.** `tend note "…"` (from a user: kept; from an agent: pending), `tend notes [approve|drop n-N]`; an agent may not approve or drop (PreToolUse deny).
+  Done 2026-10-22. `tend note "…"` (kept when the user writes it; pending when written from an agent's shell, `TEND_SESSION_DIR` set), `tend notes [--all]`, `tend notes approve|drop n-N`. PreToolUse denies the agent's own `tend notes approve|drop` (like `tend allow`).
+- [x] **L5 Notes at start.** Approved notes of the project go to every new session at SessionStart (fleet workers too).
+  Done 2026-10-22. A `notes` action at SessionStart with the project's approved notes (fleet workers are tend sessions, so they get them too); `learn = on` and optimize mode put them in context.
 
 - [ ] **F6 Cross-provider.** After the Codex connector (S10, E12).
 

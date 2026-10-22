@@ -1351,3 +1351,22 @@ fn a_fleet_role_may_not_write_its_denied_paths_through_the_shell() {
         "reading is fine"
     );
 }
+
+#[test]
+fn an_agent_may_not_review_project_notes() {
+    let mut c = ctl(Mode::Optimize);
+    let d = c.handle(
+        Event::ToolRequested {
+            tool_use_id: "b".into(),
+            tool: "Bash".into(),
+            input: json!({ "command": "tend notes approve n-3" }),
+            rewrite_ok: false,
+        },
+        0,
+    );
+    assert!(
+        matches!(&d.response.permission, Some(Permission::Deny(m)) if m.contains("only the user approves")),
+        "{:?}",
+        d.response
+    );
+}

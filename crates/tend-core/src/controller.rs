@@ -51,6 +51,9 @@ pub struct Config {
     pub wrap_tests: bool,
     /// Awareness of other tend sessions on this machine (F1).
     pub fleet: FleetSetting,
+    /// Shared learning (F2): recall other sessions' fixes and the project's notes.
+    /// off: none; look: record what would be said; on: say it (optimize mode).
+    pub learn: FleetSetting,
 }
 
 /// `fleet` config: off (no watching), look (record notices only, the default), or on
@@ -86,6 +89,7 @@ impl Default for Config {
             notify: false,
             wrap_tests: true,
             fleet: FleetSetting::Look,
+            learn: FleetSetting::Look,
         }
     }
 }
@@ -97,6 +101,7 @@ impl Config {
             ("idle_gap_minutes", self.idle_gap_minutes.to_string()),
             ("experimental_audit", self.experimental_audit.to_string()),
             ("fleet", self.fleet.name().to_string()),
+            ("learn", self.learn.name().to_string()),
             ("keep_days", self.keep_days.to_string()),
             ("notify", self.notify.to_string()),
             ("wrap_tests", self.wrap_tests.to_string()),
@@ -220,6 +225,12 @@ pub struct Controller {
     in_fleet: bool,
     /// Its role's write scope and others' claims (F5c).
     fleet_rules: Option<crate::fleet::scope::Rules>,
+    /// Shared learning (F2).
+    learning: crate::learn::Learning,
+    /// The project's notes, for the session start.
+    notes: Vec<String>,
+    /// The Bash run being observed exited non-zero; None: not known (a wrapped run).
+    run_failed: Option<bool>,
 }
 
 /// The costly, pure part of handling an output: hash, failures, and summary.
@@ -275,6 +286,18 @@ fn runs_tend_allow(command: &str) -> bool {
     shell::parse(command).segments.iter().any(|seg| {
         let w = shell::program_words(seg);
         w.len() >= 2 && shell::program_name(&w[0]) == "tend" && w[1] == "allow"
+    })
+}
+
+/// A simple command runs `tend notes approve` or `tend notes drop`: the user's review
+/// of notes (F2, L4).
+fn runs_tend_notes_review(command: &str) -> bool {
+    shell::parse(command).segments.iter().any(|seg| {
+        let w = shell::program_words(seg);
+        w.len() >= 3
+            && shell::program_name(&w[0]) == "tend"
+            && w[1] == "notes"
+            && matches!(w[2].as_str(), "approve" | "drop")
     })
 }
 
@@ -350,7 +373,29 @@ impl Controller {
             fleet: crate::fleet::Fleet::default(),
             in_fleet: false,
             fleet_rules: None,
+            learning: crate::learn::Learning::default(),
+            notes: Vec::new(),
+            run_failed: None,
         }
+    }
+
+    /// Shared learning (F2): the project root, other sessions' fixes, and the
+    /// project's approved notes. The daemon calls it before the session starts.
+    pub fn set_learning(
+        &mut self,
+        project: &str,
+        known: Vec<crate::learn::KnownFix>,
+        notes: Vec<String>,
+    ) {
+        self.learning.set_context(project, known);
+        self.notes = notes;
+    }
+
+    /// Whether the learning setting lets this say something now.
+    fn learn_applies(&self) -> bool {
+        self.session.mode == Mode::Optimize
+            && self.caps.inject_context
+            && self.cfg.learn == FleetSetting::On
     }
 
     /// The fleet role's write scope (F5c), from the hub.
@@ -583,6 +628,32 @@ impl Controller {
                 if !overrides.is_empty() {
                     self.push(&mut d, now_ms, vec![ev], Body::Config { overrides });
                 }
+                // The project's notes, kept by the user (F2, L5).
+                if !self.notes.is_empty() && self.cfg.learn != FleetSetting::Off {
+                    let lines: Vec<String> = self.notes.iter().map(|n| format!("- {n}")).collect();
+                    let text = format!(
+                        "tend: notes for this project, kept by the user:\n{}",
+                        lines.join("\n")
+                    );
+                    let applied = self.learn_applies();
+                    let action = ActionKind::Notes {
+                        count: self.notes.len(),
+                        text: text.clone(),
+                    };
+                    let reason = format!("The project has {} approved note(s).", self.notes.len());
+                    self.record(
+                        &mut d,
+                        now_ms,
+                        vec![ev],
+                        action,
+                        reason,
+                        applied,
+                        !self.caps.inject_context,
+                    );
+                    if applied {
+                        d.response.add_context.push(text);
+                    }
+                }
             }
             Event::ToolRequested { .. } => self.on_tool_requested(&mut d, event, now_ms),
             Event::ConversationChanged { .. } => {
@@ -638,6 +709,7 @@ impl Controller {
         }
         if let Some(path) = my_edit {
             self.fleet.on_my_edit(&path, now_ms);
+            self.learning.on_edit(&path);
         }
         if delivers {
             self.deliver_fleet(&mut d, now_ms);
@@ -773,7 +845,10 @@ impl Controller {
         let runs = matches!(info.kind, OutputKind::Test | OutputKind::Build);
         let level = self.session.shape_level(info.kind);
         let p = prepare_for(&output, Some(hash), level, &self.cfg, runs);
-        if let Some(text) = self.observe(d, now, ev, &command, info.kind, output, p, mode) {
+        self.run_failed = Some(failed);
+        let shown = self.observe(d, now, ev, &command, info.kind, output, p, mode);
+        self.run_failed = None;
+        if let Some(text) = shown {
             d.response.replace_output = Some(text);
         }
     }
@@ -848,6 +923,52 @@ impl Controller {
                 self.failure_values.remove(command);
             } else if self.failure_values.len() < 64 || self.failure_values.contains_key(command) {
                 self.failure_values.insert(command.to_string(), pairs);
+            }
+        }
+        // Shared learning (F2): fixes learned here, and fixes others learned.
+        if matches!(kind, OutputKind::Test | OutputKind::Build)
+            && self.cfg.learn != FleetSetting::Off
+        {
+            let passed = self.run_failed == Some(false);
+            for f in self.learning.on_run(command, &failures, passed) {
+                self.push(
+                    d,
+                    now,
+                    vec![out],
+                    Body::Learned {
+                        signature: f.failure.signature,
+                        message: f.failure.message,
+                        test: f.failure.test,
+                        command: f.command,
+                        files: f.files,
+                    },
+                );
+            }
+            if let Some((failure, fix)) = self.learning.recall(&failures) {
+                let text = self.learning.recall_text(&fix, now);
+                let applied = self.learn_applies();
+                let reason = format!(
+                    "Session {} fixed `{}` before.",
+                    fix.session,
+                    crate::text::truncate_chars(&failure.message, 80)
+                );
+                let action = ActionKind::Recall {
+                    signature: failure.signature,
+                    session: fix.session,
+                    text: text.clone(),
+                };
+                self.record(
+                    d,
+                    now,
+                    vec![out],
+                    action,
+                    reason,
+                    applied,
+                    !self.caps.inject_context,
+                );
+                if applied {
+                    d.response.add_context.push(text);
+                }
             }
         }
         let mut looped: Vec<(String, String, u64, u64)> = Vec::new();
@@ -1145,11 +1266,14 @@ impl Controller {
             }
             return;
         }
-        if !runs_tend_allow(&command) {
+        let message = if runs_tend_allow(&command) {
+            "tend: only the user can allow a blocked edit. Ask the user to run `! tend allow`, then retry the edit.".to_string()
+        } else if runs_tend_notes_review(&command) {
+            "tend: only the user approves or drops project notes. Your `tend note` waits for the user's review.".to_string()
+        } else {
             self.maybe_wrap(d, now, ev, tool_use_id, command, rewrite_ok);
             return;
-        }
-        let message = "tend: only the user can allow a blocked edit. Ask the user to run `! tend allow`, then retry the edit.".to_string();
+        };
         let action = ActionKind::BlockCommand { command };
         if self.act(d, now, ev, action, message.clone()) {
             d.response.permission = Some(Permission::Deny(message));
@@ -1520,7 +1644,10 @@ impl Controller {
             ActionKind::Wrap { .. } => self.caps.rewrite_input,
             ActionKind::Retry { .. } => self.caps.retry_denied,
             ActionKind::Shape { .. } => self.caps.replace_output,
-            ActionKind::Steer { .. } | ActionKind::Fleet { .. } => self.caps.inject_context,
+            ActionKind::Steer { .. }
+            | ActionKind::Fleet { .. }
+            | ActionKind::Recall { .. }
+            | ActionKind::Notes { .. } => self.caps.inject_context,
             ActionKind::Guard { decision, .. } => match decision {
                 GuardDecision::Ask => self.caps.ask,
                 GuardDecision::Deny => self.caps.deny,

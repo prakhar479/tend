@@ -993,10 +993,15 @@ impl Hub {
             .map(|t| t.id.clone())
             .collect();
         let (mut brought, mut failed) = (Vec::new(), Vec::new());
+        let mut conflicted: Vec<String> = Vec::new();
         for dep in order {
-            match self.move_work(&dep, &target) {
-                Ok(true) => brought.push(dep),
-                Ok(false) => {}
+            match self.move_work(&dep, &target, false) {
+                Ok(m) if m.conflicts.is_empty() && m.moved => brought.push(dep),
+                Ok(m) if m.moved => {
+                    conflicted.extend(m.conflicts.iter().cloned());
+                    brought.push(dep);
+                }
+                Ok(_) => {}
                 Err(e) => failed.push(format!("{dep}: {e}")),
             }
         }
@@ -1018,6 +1023,14 @@ impl Hub {
                 who.join(", ")
             ));
         }
+        if !conflicted.is_empty() {
+            conflicted.sort();
+            conflicted.dedup();
+            note.push(format!(
+                "Their changes conflicted in {}: resolve the conflict markers there first.",
+                conflicted.join(", ")
+            ));
+        }
         if !failed.is_empty() {
             note.push(format!("tend could not bring in: {}.", failed.join("; ")));
         }
@@ -1025,10 +1038,12 @@ impl Hub {
         (!note.is_empty()).then(|| note.join("\n"))
     }
 
-    /// Apply task `tid`'s own work to the worktree `target`: the diff of its worktree from
-    /// the tree it started at (so work it was given is not applied twice), and the new
-    /// files that diff does not carry. Ok(false): nothing to move.
-    fn move_work(&self, tid: &str, target: &Path) -> std::result::Result<bool, String> {
+    /// Move task `tid`'s own work into the worktree `target`, by a 3-way merge of trees:
+    /// the tree the task started at, its worktree now, and the target now. Commit
+    /// objects only, no ref moves. `up` (into a lead's worktree): a conflict is an error,
+    /// nothing is written; else the merge is written with conflict markers, and the
+    /// files are named. Without `git merge-tree --write-tree` (git < 2.40), a patch.
+    fn move_work(&self, tid: &str, target: &Path, up: bool) -> std::result::Result<Moved, String> {
         let task = self
             .model
             .tasks()
@@ -1040,30 +1055,137 @@ impl Hub {
             .and_then(|s| self.worktrees.get(s).cloned().or_else(|| self.slot_dir(s)))
             .ok_or("its worktree is gone")?;
         if src == target {
-            return Ok(false);
+            return Ok(Moved::default());
         }
-        let from = match self.bases.get(tid) {
+        let scratch = self.dir.join("scratch");
+        let _ = paths::ensure_private_dir(&scratch);
+        let snap =
+            |wt: &Path| crate::audit::worktree_tree(wt, &scratch).map_err(|e| format!("{e:#}"));
+        let base = match self.bases.get(tid) {
             Some((_, tree)) => tree.clone(),
-            None => self
-                .meta
-                .base
-                .clone()
-                .ok_or("the fleet has no base commit")?,
+            None => {
+                let c = self
+                    .meta
+                    .base
+                    .clone()
+                    .ok_or("the fleet has no base commit")?;
+                git_out(&src, &["rev-parse", &format!("{c}^{{tree}}")]).ok_or("no base tree")?
+            }
         };
+        let (from, into) = (snap(&src)?, snap(target)?);
+        if from == base {
+            return Ok(Moved::default());
+        }
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(target)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "tend")
+                .env("GIT_AUTHOR_EMAIL", "tend@localhost")
+                .env("GIT_COMMITTER_NAME", "tend")
+                .env("GIT_COMMITTER_EMAIL", "tend@localhost")
+                .stdin(Stdio::null())
+                .output()
+        };
+        let commit = |tree: &str, parent: Option<&str>| -> std::result::Result<String, String> {
+            let mut args = vec!["commit-tree", tree, "-m", "tend"];
+            if let Some(p) = parent {
+                args.extend(["-p", p]);
+            }
+            let o = git(&args).map_err(|e| e.to_string())?;
+            o.status
+                .success()
+                .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .ok_or_else(|| String::from_utf8_lossy(&o.stderr).trim().to_string())
+        };
+        let b = commit(&base, None)?;
+        let (theirs, ours) = (commit(&from, Some(&b))?, commit(&into, Some(&b))?);
+        let mb = format!("--merge-base={b}");
+        let merged = git(&[
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            &mb,
+            &ours,
+            &theirs,
+        ])
+        .map_err(|e| e.to_string())?;
+        let code = merged.status.code();
+        if !matches!(code, Some(0) | Some(1)) {
+            // No usable merge-tree: the patch, as before.
+            return self
+                .move_work_by_patch(&src, &base, target)
+                .map(|moved| Moved {
+                    moved,
+                    conflicts: vec![],
+                });
+        }
+        let text = String::from_utf8_lossy(&merged.stdout).to_string();
+        let mut lines = text.lines();
+        let tree = lines.next().unwrap_or("").trim().to_string();
+        let conflicts: Vec<String> = if code == Some(1) {
+            let mut c: Vec<String> = lines
+                .take_while(|l| !l.is_empty())
+                .map(String::from)
+                .collect();
+            c.sort();
+            c.dedup();
+            c
+        } else {
+            vec![]
+        };
+        if up && !conflicts.is_empty() {
+            return Err(format!(
+                "it conflicts with your changes in {} (its work is in {})",
+                conflicts.join(", "),
+                src.display()
+            ));
+        }
+        if tree == into {
+            return Ok(Moved::default());
+        }
+        let diff = git(&["diff", "--binary", &into, &tree]).map_err(|e| e.to_string())?;
+        let mut apply = Command::new("git")
+            .arg("-C")
+            .arg(target)
+            .args(["apply", "--whitespace=nowarn", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        if let Some(mut i) = apply.stdin.take() {
+            let _ = i.write_all(&diff.stdout);
+        }
+        let out = apply.wait_with_output().map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .next()
+                .unwrap_or("git apply failed")
+                .to_string());
+        }
+        Ok(Moved {
+            moved: true,
+            conflicts,
+        })
+    }
+
+    /// The patch way (older git): the diff from `base`, and new files copied.
+    fn move_work_by_patch(
+        &self,
+        src: &Path,
+        base: &str,
+        target: &Path,
+    ) -> std::result::Result<bool, String> {
         let diff = Command::new("git")
             .arg("-C")
-            .arg(&src)
-            .args(["diff", "--binary", &from])
+            .arg(src)
+            .args(["diff", "--binary", base])
             .stdin(Stdio::null())
             .output()
             .map_err(|e| e.to_string())?;
-        if !diff.status.success() {
-            return Err(String::from_utf8_lossy(&diff.stderr)
-                .lines()
-                .next()
-                .unwrap_or("git diff failed")
-                .to_string());
-        }
         let mut moved = false;
         if !diff.stdout.is_empty() {
             let mut apply = Command::new("git")
@@ -1080,19 +1202,15 @@ impl Hub {
             }
             let out = apply.wait_with_output().map_err(|e| e.to_string())?;
             if !out.status.success() {
-                return Err(format!(
-                    "{} (its work is in {})",
-                    String::from_utf8_lossy(&out.stderr)
-                        .lines()
-                        .next()
-                        .unwrap_or("git apply failed"),
-                    src.display()
-                ));
+                return Err(String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .next()
+                    .unwrap_or("git apply failed")
+                    .to_string());
             }
             moved = true;
         }
-        let new =
-            git_out(&src, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+        let new = git_out(src, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
         for f in new.lines() {
             let to = target.join(f);
             if to.exists() {
@@ -1130,13 +1248,23 @@ impl Hub {
                 continue;
             };
             let holder = p.slot.clone().unwrap_or_default();
-            match self.move_work(&tid, &target) {
-                Ok(true) => eprintln!("tend fleet hub: {tid}'s work is in {holder}'s worktree now"),
-                Ok(false) => {}
-                Err(e) => inbox(
-                    &self.dir,
-                    &format!("tend could not bring {tid}'s work into {holder}'s worktree: {e}"),
-                ),
+            match self.move_work(&tid, &target, true) {
+                Ok(m) if m.moved => {
+                    eprintln!("tend fleet hub: {tid}'s work is in {holder}'s worktree now")
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    // The lead hears it: its whole check cannot pass without this part.
+                    let text = format!(
+                        "tend could not bring {tid}'s work into your worktree: {e}. Merge it by hand, then go on."
+                    );
+                    let line = serde_json::json!({
+                        "type": "user",
+                        "message": {"role": "user", "content": format!("[tend fleet: notice from tend]\n{text}")},
+                    });
+                    self.write_line(&holder, &line);
+                    inbox(&self.dir, &format!("{holder}: {text}"));
+                }
             }
         }
     }
@@ -2450,6 +2578,14 @@ fn merge_plan(dir: &Path, meta: &Meta, model: &Model, yes: bool) -> Result<Strin
         }
     }
     Ok(out)
+}
+
+/// What moving a task's work did: whether anything changed, and the files left with
+/// conflict markers.
+#[derive(Debug, Default)]
+struct Moved {
+    moved: bool,
+    conflicts: Vec<String>,
 }
 
 /// One worktree in the merge plan.
