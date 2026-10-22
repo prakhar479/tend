@@ -2426,3 +2426,66 @@ fn fleet_restart_resumes_stream_sessions_after_the_hub_dies() {
     );
     assert!(!s.contains("restarts"), "a restart is not a crash: {s}");
 }
+
+/// Review R: `tend fleet down` lets go of a session in the user's terminal; it never
+/// signals it.
+#[test]
+fn fleet_down_leaves_a_terminal_session_running() {
+    let (dir, repo, home) = fleet_repo(
+        "detach",
+        &[("a.txt", "a\n")],
+        "preset = \"lead\"\n\n[role.reviewer]\nrun = \"attached\"\n",
+    );
+    let lead = fake_stream_agent(&dir);
+    let terminal = dir.join("fake-terminal.sh");
+    fs::write(
+        &terminal,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = --version ] && echo '2.1.304 (Claude Code)' && exit 0\n\
+             touch '{d}/joined'\n\
+             i=0; while [ ! -f '{d}/go' ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done\n\
+             echo alive > '{d}/alive'\n",
+            d = dir.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&terminal, fs::Permissions::from_mode(0o755)).unwrap();
+    let tend = |args: &[&str]| tend_in(&repo, &home, &lead, args);
+    let _down = FleetDown(repo.clone(), home.clone(), lead.clone());
+    tend(&["fleet", "up", "fleet.toml"]);
+    let mut child = Command::new(bin())
+        .args(["claude", "--tend-fleet", "--tend-name", "rev"])
+        .current_dir(&repo)
+        .env("TEND_HOME", &home)
+        .env("TEND_CLAUDE_BIN", &terminal)
+        .env("TEND_CONFIG", dir.join("no-config.toml"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    for _ in 0..100 {
+        if dir.join("joined").exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let down = tend(&["fleet", "down"]);
+    assert!(down.contains("The fleet is down."), "{down}");
+    fs::write(dir.join("go"), "").unwrap();
+    let status = child.wait().unwrap();
+    assert!(
+        status.success(),
+        "the terminal session was not killed: {status:?}"
+    );
+    assert!(dir.join("alive").exists());
+    let fleet_dir = fs::read_dir(home.join("fleets"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let inbox = fs::read_to_string(fleet_dir.join("inbox.jsonl")).unwrap();
+    assert!(
+        inbox.contains("rev left the fleet; its terminal session goes on"),
+        "{inbox}"
+    );
+}

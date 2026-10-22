@@ -804,6 +804,9 @@ impl Model {
             }
             self.release_if_idle(cx, &sid);
         }
+        if matches!(state, TaskState::Failed | TaskState::Blocked) {
+            self.block_dependents(cx, task);
+        }
         match state {
             TaskState::Done => self.after_done(cx, task),
             TaskState::Blocked => self.after_blocked(cx, task),
@@ -814,6 +817,26 @@ impl Model {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Tasks waiting on one that failed or is blocked would wait forever: they are
+    /// blocked too, and their creator hears why. (A best-of task judges its parts.)
+    fn block_dependents(&mut self, cx: &mut Cx, task: &str) {
+        let waiting: Vec<(String, Actor)> = self
+            .tasks()
+            .filter(|t| !t.best_of && t.depends_on.iter().any(|d| d == task))
+            .filter(|t| matches!(t.state, TaskState::Open | TaskState::Queued))
+            .map(|t| (t.id.clone(), t.created_by.clone()))
+            .collect();
+        let state = self.tasks.get(task).map_or(TaskState::Failed, |t| t.state);
+        let how = format!("{:?}", state).to_lowercase();
+        for (id, creator) in waiting {
+            let why = format!("it depends on {task}, which {how}");
+            self.finish(cx, &id, TaskState::Blocked, why.clone());
+            let text =
+                format!("{id} is blocked: {why}. Fix {task} and add {id} again, or drop it.");
+            self.tell_creator(cx, &creator, MsgKind::Question, &text);
         }
     }
 
@@ -1099,6 +1122,7 @@ impl Model {
             }
             let text = format!("{tid} failed: its session {how}, attempt {attempts} of {budget}.");
             self.tell_creator(cx, &t.created_by, MsgKind::Report, &text);
+            self.block_dependents(cx, &tid);
             return;
         }
         let at_ms = cx.now + (BACKOFF_MS << (attempts - 1));

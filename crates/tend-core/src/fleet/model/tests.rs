@@ -2015,3 +2015,56 @@ fn best_of_by_user_asks_the_user() {
     });
     assert_eq!(task(&r, "t-1.1").picked, Some(true));
 }
+
+// --- Review fixes ----------------------------------------------------------------------
+
+#[test]
+fn a_terminal_session_is_never_taken_for_stuck_or_over_budget() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead", "stuck_minutes": 1,
+        "role": {"reviewer": {"run": "attached", "budget": {"wall": "5m"}}}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    r.ev(FleetEvent::Attached {
+        role: "reviewer".into(),
+        name: Some("rev".into()),
+        session: "p".into(),
+    });
+    r.ev(add(slot("lead-1"), "look", &[], Some("reviewer")));
+    for m in [2, 4, 8, 30] {
+        let c = r.at(m * 60_000, FleetEvent::Tick);
+        assert!(
+            !c.iter().any(|c| matches!(c, Command::Stop { slot } | Command::Interrupt { slot } if slot == "rev")),
+            "{m} min: {c:?}"
+        );
+    }
+}
+
+#[test]
+fn tasks_that_depend_on_a_failed_one_are_blocked_not_left_waiting() {
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead", "role": {"worker": {"budget": {"attempts": 1}}}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    r.start_all(&up);
+    let c = r.ev(add(slot("lead-1"), "a", &[], None));
+    r.start_all(&c);
+    r.ev(add(slot("lead-1"), "b", &["t-1"], None));
+    r.ev(add(slot("lead-1"), "c", &["t-2"], None));
+    let c = r.ev(FleetEvent::Exited {
+        slot: "worker-1".into(),
+        code: Some(1),
+    });
+    assert_eq!(task_state(&r, "t-1"), TaskState::Failed);
+    assert_eq!(task_state(&r, "t-2"), TaskState::Blocked);
+    assert_eq!(
+        task_state(&r, "t-3"),
+        TaskState::Blocked,
+        "and what waits on it"
+    );
+    assert!(
+        told_lead(&c, "t-2 is blocked: it depends on t-1, which failed"),
+        "{c:?}"
+    );
+}

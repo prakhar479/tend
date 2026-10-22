@@ -397,6 +397,18 @@ Owner decisions 2026-10-21: awareness and learning first; spawning is a core fea
 
   Reading: every flow ran to its end. The pipeline handed plan → implement → verify; the review ended with the reviewer approving; best-of judged by rule and picked `t-1.1` (all three diffs were the same size). The task was too small to test delegation: the `lead` and `specialists` leads fixed it themselves (allowed; one task), and the plan stage made the fix. **Found and fixed:** the merge plan read a team worktree (`team-review`, `team-pipeline`) as "not finished", because it looked for a slot of that name; it now counts the tasks of every slot whose role works in the team. A harder seeded task (several files, a real split) is the next bench to write.
 
+### Review R (2026-10-22, after G10)
+
+A review pass over the fleet code (the three review agents hit the account's session limit, so it was done by hand). Fixed:
+
+- [x] **`tend fleet down` (or `stop`) killed a session that joined from the user's terminal**: it sent SIGTERM to the user's `tend claude`, and SIGKILL after 30 s. Now the fleet lets go of it (its slot ends; the inbox says so) and the terminal session goes on.
+- [x] **Stuck detection and wall-time budgets applied to terminal sessions.** They send the hub no activity, so a task delivered to one made it "stuck" after 10 minutes, then interrupted and stopped. They are skipped now: they are the user's.
+- [x] **Tasks that depend on a failed or blocked task waited forever**, so the fleet never finished. They are blocked now, with the reason, and their creator is asked (`t-2 is blocked: it depends on t-1, which failed`), down the chain.
+- [x] **The hub wrote to a session's stdin on its main loop**: a session that stopped reading would fill the pipe and freeze the hub. Each session has its own writer thread now.
+- [x] Polish: the merge commit of a team worktree lists all its tasks' summaries; costs under a cent show as `<$0.01`; the README says token budgets count cache reads; CLAUDE.md lists the fleet files.
+
+Checked and fine: shim p95 1.5 ms; fuzz targets build; look mode returns no response for the new denies and notices (they go through `act`); refusals exit 1.
+
 - [ ] **F6 Cross-provider.** After the Codex connector (S10, E12).
 
 ## Phase 2 — Optimize + Codex (not started)

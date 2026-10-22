@@ -378,6 +378,12 @@ impl Model {
         &self.spec
     }
 
+    /// The slot is a session in the user's terminal (F4): tend never interrupts or
+    /// stops it on its own.
+    fn is_attached(&self, s: &Slot) -> bool {
+        self.role_def(s).is_some_and(|r| r.run == Run::Attached)
+    }
+
     /// The role a slot runs (its write scope, for the hub).
     pub fn role_of(&self, slot: &str) -> Option<&Role> {
         self.role_def(self.slots.get(slot)?)
@@ -817,6 +823,7 @@ impl Model {
             .slots
             .values()
             .filter(|s| s.state == SlotState::Running && !s.stopping)
+            .filter(|s| !self.is_attached(s))
             .filter_map(|s| {
                 let wall = self.role_def(s)?.budget.wall_ms?;
                 (cx.now.saturating_sub(s.started_ms) > wall).then(|| (s.id.clone(), wall))
@@ -861,8 +868,10 @@ impl Model {
             .slots
             .values()
             .filter(|s| {
+                // A terminal session sends the hub no activity: it is the user's.
                 s.state == SlotState::Running
                     && s.busy
+                    && !self.is_attached(s)
                     && cx.now.saturating_sub(s.last_seen_ms)
                         >= stuck_ms(self, s) * (u64::from(s.stuck) + 1)
             })

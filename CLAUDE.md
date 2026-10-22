@@ -2,7 +2,7 @@
 
 tend is a local supervisor for command-line coding agents.
 Design: `docs/tend-reference.md`. Work items: `docs/TASKS.md`.
-Current scope: Phase 0 spikes and Phase 1 (look mode, Claude Code only).
+Current scope: look and optimize modes for Claude Code, and fleets of sessions (docs/fleet-*.md). Codex waits for S10.
 
 ## Rules
 
@@ -38,6 +38,10 @@ crates/tend-core/src/        pure logic, no I/O
   guard.rs                     test-weakening rules
   broker.rs                    question catalog, rule answers, Decider trait
   controller.rs                sense → judge → decide → act → record
+  fleet/awareness.rs           F1: what other sessions did that matters here
+  fleet/spec.rs                fleet files: roles, channels, limits, presets
+  fleet/model.rs, model/tasks.rs  fleet state machine: slots, tasks, checks, messages
+  fleet/scope.rs               a fleet role's write scope and others' claims
 crates/tend-cli/src/         binary `tend`: all I/O
   main.rs                      CLI
   launcher.rs                  `tend claude`: daemon + agent with hooks
@@ -51,6 +55,8 @@ crates/tend-cli/src/         binary `tend`: all I/O
   config.rs                    ~/.config/tend/config.toml → Config
   sessions.rs                  prune old sessions, remove stale sockets
   paths.rs                     session dirs, socket path, Claude projects dir
+  fleet.rs                     F1 watcher (tails peers' ledgers), `tend fleet` view
+  hub.rs                       fleet hub: runs a fleet file; `tend fleet/task/msg/inbox`
 crates/tend-cli/tests/e2e.rs launcher → daemon → shim with a fake agent
 fixtures/                      outputs, hook payloads, transcripts
 ```

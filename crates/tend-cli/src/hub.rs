@@ -18,7 +18,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -275,7 +275,9 @@ enum Msg {
 
 struct Proc {
     pid: i32,
-    stdin: Option<ChildStdin>,
+    /// Lines for the session's stdin, written by its own thread: a session that stops
+    /// reading must never block the hub. Dropping it closes the stdin.
+    stdin: Option<Sender<String>>,
     turns: u32,
     exited: Arc<AtomicBool>,
     worktree: PathBuf,
@@ -686,6 +688,15 @@ impl Hub {
                     });
                 }
             },
+            // A terminal session is the user's: the fleet lets go of it, it goes on alone.
+            Cmd::Stop { slot } if self.attached.contains(slot) => {
+                self.attached.remove(slot);
+                inbox(&self.dir, &format!("{slot} left the fleet; its terminal session goes on without it."));
+                self.queue.push_back(FleetEvent::Exited {
+                    slot: slot.clone(),
+                    code: Some(0),
+                });
+            }
             Cmd::Stop { slot } => {
                 if let Some(p) = self.procs.get_mut(slot) {
                     // A stream session ends cleanly when its stdin closes (F-S1).
@@ -765,17 +776,12 @@ impl Hub {
         }
     }
 
-    /// Write one JSON line to a slot's stdin. False if it has none.
+    /// Queue one JSON line for a slot's stdin. False if it has none.
     fn write_line(&mut self, slot: &str, v: &serde_json::Value) -> bool {
-        let Some(stdin) = self.procs.get_mut(slot).and_then(|p| p.stdin.as_mut()) else {
+        let Some(stdin) = self.procs.get(slot).and_then(|p| p.stdin.as_ref()) else {
             return false;
         };
-        let mut line = v.to_string();
-        line.push('\n');
-        stdin
-            .write_all(line.as_bytes())
-            .and_then(|_| stdin.flush())
-            .is_ok()
+        stdin.send(v.to_string()).is_ok()
     }
 
     fn spawn(
@@ -843,7 +849,23 @@ impl Hub {
             .spawn()
             .context("start tend claude")?;
         let pid = child.id() as i32;
-        let stdin = child.stdin.take();
+        // Its own writer: a full pipe blocks this thread, not the hub.
+        let stdin = child.stdin.take().map(|mut pipe| {
+            let (tx, rx) = mpsc::channel::<String>();
+            thread::spawn(move || {
+                for mut line in rx {
+                    line.push('\n');
+                    if pipe
+                        .write_all(line.as_bytes())
+                        .and_then(|_| pipe.flush())
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+            tx
+        });
         let stdout = child.stdout.take();
         let exited = Arc::new(AtomicBool::new(false));
         if let Some(out) = stdout {
@@ -1615,8 +1637,9 @@ fn render_status(meta: &Meta, model: &Model, procs: &BTreeMap<String, Proc>, up:
     let (tokens, cost) = model.spend();
     let _ = writeln!(
         out,
-        "Spent: {} tokens · ${cost:.2}{}",
+        "Spent: {} tokens · {}{}",
         crate::report::k(tokens),
+        dollars(cost),
         if model.paused() {
             " · paused (`tend fleet resume`)"
         } else {
@@ -1624,6 +1647,15 @@ fn render_status(meta: &Meta, model: &Model, procs: &BTreeMap<String, Proc>, up:
         }
     );
     out
+}
+
+/// A cost in dollars; under a cent is not shown as $0.00.
+fn dollars(cost: f64) -> String {
+    if cost > 0.0 && cost < 0.01 {
+        "<$0.01".into()
+    } else {
+        format!("${cost:.2}")
+    }
 }
 
 /// The task board, in the order tasks were added.
@@ -1954,9 +1986,10 @@ pub fn report(spec: Option<&str>) -> Result<String> {
     let (tokens, cost) = model.spend();
     let _ = writeln!(
         out,
-        "Sessions: {} · restarts {restarts} · {} tokens · ${cost:.2}",
+        "Sessions: {} · restarts {restarts} · {} tokens · {}",
         model.slots().len(),
-        crate::report::k(tokens)
+        crate::report::k(tokens),
+        dollars(cost)
     );
     for (id, s) in model.slots() {
         let _ = writeln!(
@@ -2039,12 +2072,14 @@ fn merge_plan(dir: &Path, meta: &Meta, model: &Model, yes: bool) -> Result<Strin
             .iter()
             .map(|t| format!("{} {}", t.id, format!("{:?}", t.state).to_lowercase()))
             .collect();
+        let tasks = mine.iter().map(|t| t.id.clone()).collect();
         rows.push(MergeRow {
             first,
             name,
             wt,
             files,
             labels,
+            tasks,
             finished,
         });
     }
@@ -2122,6 +2157,7 @@ fn merge_plan(dir: &Path, meta: &Meta, model: &Model, yes: bool) -> Result<Strin
         name,
         wt,
         labels,
+        tasks,
         finished,
         ..
     } in &rows
@@ -2134,7 +2170,7 @@ fn merge_plan(dir: &Path, meta: &Meta, model: &Model, yes: bool) -> Result<Strin
         if dirty {
             let summary: Vec<String> = model
                 .tasks()
-                .filter(|t| t.slot.as_deref() == Some(name.as_str()))
+                .filter(|t| tasks.contains(&t.id))
                 .map(|t| {
                     format!(
                         "{}: {}",
@@ -2198,6 +2234,8 @@ struct MergeRow {
     wt: PathBuf,
     files: Vec<String>,
     labels: Vec<String>,
+    /// Its tasks' ids (a team worktree has several slots' tasks).
+    tasks: Vec<String>,
     /// Every task of its slot is done.
     finished: bool,
 }
