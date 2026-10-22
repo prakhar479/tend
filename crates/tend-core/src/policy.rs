@@ -244,4 +244,20 @@ broken = [1, 2]
         assert!(p.audit_ignores("vendor/lib/x.go"));
         assert!(parse("", "/").0.is_empty());
     }
+
+    #[test]
+    fn a_glob_inside_a_directory_matches_the_file_there() {
+        // polaris: `benchmarks/*preregistration*.md`.
+        let (p, w) = parse(
+            "protected = [\"benchmarks/*preregistration*.md\"]",
+            "/home/dev/polaris",
+        );
+        assert!(w.is_empty(), "{w:?}");
+        assert!(p
+            .protected_by("/home/dev/polaris/benchmarks/dartsim_preregistration.md")
+            .is_some());
+        assert!(p
+            .protected_by("/home/dev/polaris/benchmarks/sub/x_preregistration.md")
+            .is_none());
+    }
 }

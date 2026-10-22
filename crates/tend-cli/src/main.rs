@@ -822,7 +822,8 @@ fn run(cli: Cli) -> Result<i32> {
                 (Some(v @ ("approve" | "drop")), Some(id)) => Some((v, id)),
                 _ => anyhow::bail!("use `tend notes approve <id>` or `tend notes drop <id>`"),
             };
-            print!("{}", learnstore::notes(action, all)?);
+            let text = learnstore::notes(action, all)?;
+            println!("{}", text.trim_end());
             Ok(0)
         }
         Cmd::Fixes { verb, all } => {
