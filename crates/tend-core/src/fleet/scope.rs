@@ -78,8 +78,10 @@ impl Rules {
 
     /// Why this session may not edit `path`, if it may not.
     pub fn refuse(&self, path: &str) -> Option<String> {
+        // `/wt/team-2/x` is not inside `/wt/team`.
         let rel = path
             .strip_prefix(&self.root)
+            .filter(|r| r.is_empty() || r.starts_with('/') || self.root.ends_with('/'))
             .map(|r| r.trim_start_matches('/'))
             .unwrap_or(path);
         if let Some(g) = self.may_not_write.iter().find(|g| g.matches(rel)) {
@@ -128,6 +130,14 @@ mod tests {
             .refuse("/wt/team/src/api.py")
             .is_some_and(|w| w.contains("may write only tests/**")));
         assert!(r.refuse("/wt/team/tests/a/b.py").is_none());
+    }
+
+    #[test]
+    fn a_sibling_dir_is_not_inside_the_root() {
+        // `/wt/team-2` shares a prefix with `/wt/team`: its files are not `-2/…`.
+        let r = rules(&[], &["-2/**"]);
+        assert!(r.refuse("/wt/team-2/src/a.py").is_none());
+        assert!(r.refuse("/wt/team/-2/a.py").is_some());
     }
 
     #[test]

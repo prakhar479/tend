@@ -491,6 +491,35 @@ Owner: a learned fix keeps a short redacted diff, shown only in its project; rec
 
 Live (round 11, Haiku, `scripts/learn_live.py`): run 1 learned 4 fixes. The lead got a recall with the diff of a fix its own worker had learned minutes before (L8). Runs 2 and 3 got the parse recall with its diff on the first hit. Run 3's worker: "tend was useful: the hook note named the exact one-line change from another session, which I checked against the docstring and test before applying." It finished in 0.2 min (earlier rounds: 0.3–0.4).
 
+### Dogfood D1 (2026-10-22): a fleet hunts bugs in tend
+
+`tend fleet up` on this repo: `lead` preset, Sonnet, four workers (core-learn, core-fleet, hub, cli), each with `--check "make check"`, optimize mode. 4 min, 2.9M tokens, $1.34. Two things at once: the workers' findings in tend's code, and what the run showed about tend.
+
+Found before the run: a fleet worker's `make check` failed 10 fleet e2e tests, because the tests inherited its `TEND_FLEET_SLOT` and a slot refuses fleet control. The e2e tests now clear every inherited `TEND_*` (commit eaa9a2b).
+
+Fixed by the workers (reviewed, applied):
+- [x] `learn.rs`: a sibling directory with a shared prefix (`/repo2`) read as inside the root (`/repo`).
+- [x] `loops.rs`: carried failures were sorted by time only; ties kept HashMap order (rule 6).
+- [x] `spec.rs`: a huge `stuck_minutes` or duration overflowed and panicked; now refused.
+- [x] `hub.rs`: a check printing over 4 MiB blocked or was killed by SIGPIPE; the rest is drained. A session's non-UTF-8 output line stopped the reader, so turn ends were lost.
+- [x] `store.rs`: a ledger line torn inside a multi-byte character hid the whole ledger.
+
+Left by the workers, fixed after review:
+- [x] `hub.rs` Leave: any session could end another's terminal slot. Only the slot itself or the user may.
+- [x] `hub.rs` `limit_of`: any short result mentioning "usage limit" paused the fleet. It must say the limit was reached.
+- [x] `fleet.rs`: a peer ledger line longer than one read (8 MiB) stalled that tail forever.
+- [x] `report.rs`: transcript usage stopped counting at a non-UTF-8 line.
+- [x] `store.rs` `read_blob`: a hash is hex, never a path.
+- [x] `scope.rs`: the same sibling-prefix slip as `learn.rs`.
+- Left as is: the hub serves one connection at a time (a slow client delays others up to 2 s); a daemon whose ledger write fails sends no reply (fails open).
+
+What the run showed about tend:
+- [x] **False worktree-overlap notices.** A worker was told its files would conflict with edits the user's session made hours earlier, already committed in the worker's base: a peer's ledger is read from its start. Edits from before this session started no longer count as overlap.
+- [x] **Flaky checks cost attempts.** Two of four workers lost an attempt to tests that failed only under load: an e2e test read the hub's 10 s "busy" reply as a failure (the client now waits 30 s), and `sessions::stale_socket_is_removed_live_one_is_kept` failed once (not reproduced in 15 full runs and 40 parallel runs; open).
+- [x] **A misleading reason.** A `for` loop around `cargo test` was "not wrapped: a rewrite could add a permission prompt" under `bypassPermissions`; the connector's flag also covers background runs and runners it cannot find, and the reason now says so.
+- Checked and fine: four workers in parallel worktrees with 3-way merges into the lead's worktree (no conflicts); the check gate; the merge plan (one worktree); the guard flagged a worker's test change in `scope.rs` (assertions 12 → 10), which the worker then reworked.
+- The audit was shallow (the workers say so): four minutes. A deeper round is next.
+
 - [ ] **F6 Cross-provider.** After the Codex connector (S10, E12).
 
 ## Phase 2 — Optimize + Codex (not started)

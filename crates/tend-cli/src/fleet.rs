@@ -166,6 +166,11 @@ fn read_new(dir: &Path, session: &str, tail: &mut Tail, my_common: &str, out: &m
     }
     // Only whole lines: the daemon may be writing the last one.
     let Some(end) = buf.iter().rposition(|&b| b == b'\n') else {
+        // One line longer than a whole read would hold the tail here forever: skip
+        // what was read; the rest of that line does not parse and is skipped too.
+        if buf.len() as u64 == MAX_READ_BYTES {
+            tail.offset += MAX_READ_BYTES;
+        }
         return;
     };
     tail.offset += end as u64 + 1;
@@ -482,5 +487,20 @@ mod tests {
         std::fs::write(d.join("ledger.jsonl"), "y\n").unwrap();
         read_new(&d, "s", &mut tail, "", &mut out);
         assert_eq!(tail.offset, 2, "the shorter file was read from 0");
+    }
+
+    #[test]
+    fn a_line_longer_than_a_read_does_not_stall_the_tail() {
+        let d = tmp("longline");
+        let mut text = "x".repeat(MAX_READ_BYTES as usize + 10);
+        text.push('\n');
+        text.push_str("y\n");
+        std::fs::write(d.join("ledger.jsonl"), &text).unwrap();
+        let mut tail = Tail::default();
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            read_new(&d, "s", &mut tail, "", &mut out);
+        }
+        assert_eq!(tail.offset, text.len() as u64, "read past the long line");
     }
 }

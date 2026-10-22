@@ -590,7 +590,10 @@ fn resolve_at(
         limits,
         max_rounds: file.max_rounds.unwrap_or(3),
         judge: file.judge.unwrap_or(Judge::Rule),
-        stuck_ms: file.stuck_minutes.unwrap_or(DEFAULT_STUCK_MINUTES) * 60_000,
+        stuck_ms: file
+            .stuck_minutes
+            .unwrap_or(DEFAULT_STUCK_MINUTES)
+            .saturating_mul(60_000),
     }
 }
 
@@ -784,7 +787,7 @@ pub fn tokens(a: &Amount) -> Option<u64> {
 /// `"90s"`, `"45m"`, `"2h"`, or a number of minutes.
 pub fn duration_ms(a: &Amount) -> Option<u64> {
     match a {
-        Amount::Int(m) => Some(m * 60_000),
+        Amount::Int(m) => m.checked_mul(60_000),
         Amount::Text(t) => {
             let t = t.trim();
             let (num, mul) = match t.chars().last()? {
@@ -793,7 +796,7 @@ pub fn duration_ms(a: &Amount) -> Option<u64> {
                 'h' => (&t[..t.len() - 1], 3_600_000),
                 _ => (t, 60_000),
             };
-            Some(num.trim().parse::<u64>().ok()? * mul)
+            num.trim().parse::<u64>().ok()?.checked_mul(mul)
         }
     }
 }
@@ -1142,5 +1145,15 @@ mod tests {
         assert_eq!(duration_ms(&Amount::Int(5)), Some(300_000));
         assert_eq!(replicas(&Amount::Text("1..4".into())), Some((1, 4)));
         assert_eq!(replicas(&Amount::Int(3)), Some((3, 3)));
+    }
+
+    #[test]
+    fn huge_durations_are_refused_not_overflowed() {
+        assert_eq!(duration_ms(&Amount::Int(u64::MAX)), None);
+        assert_eq!(
+            duration_ms(&Amount::Text("18446744073709551615h".into())),
+            None
+        );
+        assert_eq!(duration_ms(&Amount::Text("2h".into())), Some(7_200_000));
     }
 }

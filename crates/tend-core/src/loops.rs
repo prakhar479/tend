@@ -115,7 +115,9 @@ impl LoopDetector {
                 })
                 .map(|(_, st)| st)
                 .collect();
-            carried.sort_by_key(|st| st.first_ms);
+            carried.sort_by(|a, b| {
+                (a.first_ms, &a.failure.signature).cmp(&(b.first_ms, &b.failure.signature))
+            });
             seen.extend(carried.into_iter().map(|st| st.failure.clone()));
         } else {
             self.sigs
@@ -180,6 +182,24 @@ impl LoopDetector {
 mod tests {
     use super::*;
     use crate::perception::signature_of;
+
+    #[test]
+    fn carried_failures_order_is_deterministic() {
+        for _ in 0..20 {
+            let mut d = LoopDetector::new(3);
+            let fs: Vec<Failure> = (0..8).map(|i| fail(&format!("m{i}"))).collect();
+            d.on_run("pytest", &fs, 5);
+            let out = d.on_run("pytest", &[summary("1 failed")], 6);
+            let mut want: Vec<String> = fs.iter().map(|f| f.signature.clone()).collect();
+            want.sort();
+            let got: Vec<String> = out
+                .iter()
+                .take(8)
+                .map(|o| o.failure.signature.clone())
+                .collect();
+            assert_eq!(got, want);
+        }
+    }
 
     fn fail(msg: &str) -> Failure {
         Failure {

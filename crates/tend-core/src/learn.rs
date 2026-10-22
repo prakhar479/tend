@@ -245,7 +245,10 @@ impl Learning {
 
     fn rel(&self, path: &str) -> String {
         match path.strip_prefix(&self.root) {
-            Some(r) if !self.root.is_empty() => r.trim_start_matches('/').to_string(),
+            // `/repo2/x` is not inside `/repo`.
+            Some(r) if !self.root.is_empty() && (r.is_empty() || r.starts_with('/')) => {
+                r.trim_start_matches('/').to_string()
+            }
             _ => path.to_string(),
         }
     }
@@ -371,6 +374,14 @@ impl Learning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rel_ignores_sibling_dir_with_shared_prefix() {
+        let mut l = Learning::default();
+        l.set_context("/p", "/work/repo", vec![]);
+        assert_eq!(l.rel("/work/repo/src/a.py"), "src/a.py");
+        assert_eq!(l.rel("/work/repo2/a.py"), "/work/repo2/a.py");
+    }
 
     fn fail(sig: &str) -> Failure {
         Failure {

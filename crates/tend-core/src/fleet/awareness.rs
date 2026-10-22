@@ -88,6 +88,9 @@ struct PeerEdit {
 pub struct Fleet {
     /// This session's worktree top and common git dir.
     me: Option<(String, String)>,
+    /// When this session learned its workspace (it started). A peer's edits from
+    /// before then are in the base a worktree starts from, or long settled.
+    since_ms: Option<u64>,
     peers: BTreeMap<String, Peer>,
     /// Repo-relative paths this conversation edited, with the time of the last edit.
     my_edits: BTreeMap<String, u64>,
@@ -100,8 +103,9 @@ pub struct Fleet {
 }
 
 impl Fleet {
-    pub fn set_workspace(&mut self, top: &str, common: &str) {
+    pub fn set_workspace(&mut self, top: &str, common: &str, now: u64) {
         self.me = Some((top.to_string(), common.to_string()));
+        self.since_ms.get_or_insert(now);
     }
 
     pub fn relation(&self, peer: &str) -> Relation {
@@ -169,6 +173,12 @@ impl Fleet {
         let rel = rel.to_string();
         let rel_kind = self.relation(session);
         if rel_kind == Relation::Other {
+            return;
+        }
+        // A peer's ledger is read from its start: an edit in another worktree from
+        // before this session started is in the base it started from (a fleet worker
+        // branches from the commit that holds it), not a coming conflict.
+        if rel_kind == Relation::Worktree && self.since_ms.is_some_and(|t| at_ms < t) {
             return;
         }
         self.peer_edits.insert(
@@ -538,7 +548,7 @@ mod tests {
 
     fn fleet_with(peer_top: &str) -> Fleet {
         let mut f = Fleet::default();
-        f.set_workspace(TOP, COMMON);
+        f.set_workspace(TOP, COMMON, 0);
         f.on_peer(
             "p1",
             "claude",
@@ -606,6 +616,30 @@ mod tests {
     }
 
     #[test]
+    fn a_peers_edits_from_before_this_session_are_not_an_overlap() {
+        // Live (dogfood fleet): a worker was told its files would conflict with edits
+        // the user's session made hours before, already committed in the worker's base.
+        let mut f = Fleet::default();
+        f.set_workspace(TOP, COMMON, 100);
+        f.on_peer(
+            "p1",
+            "claude",
+            0,
+            &PeerActivity::Joined {
+                cwd: "/wt/b".into(),
+                top: "/wt/b".into(),
+                common: COMMON.into(),
+            },
+            1,
+        );
+        edited(&mut f, "/wt/b/src/api.rs", 50, 5);
+        f.on_my_edit("/repo/src/api.rs", 200);
+        assert!(flat(&mut f).is_empty());
+        edited(&mut f, "/wt/b/src/api.rs", 250, 6);
+        assert_eq!(kinds(&mut f), [NoticeKind::WorktreeOverlap]);
+    }
+
+    #[test]
     fn worktree_overlap_either_order() {
         // Peer first, then me.
         let mut f = fleet_with("/wt/b");
@@ -631,7 +665,7 @@ mod tests {
     #[test]
     fn other_repos_and_paths_outside_the_checkout_are_ignored() {
         let mut f = Fleet::default();
-        f.set_workspace(TOP, COMMON);
+        f.set_workspace(TOP, COMMON, 0);
         f.on_peer(
             "p1",
             "claude",
@@ -754,7 +788,7 @@ mod tests {
     #[test]
     fn notices_about_one_file_make_one_message() {
         let mut f = Fleet::default();
-        f.set_workspace(TOP, COMMON);
+        f.set_workspace(TOP, COMMON, 0);
         f.on_my_edit("/repo/shared.txt", 1);
         for i in 1..=7u64 {
             let s = format!("p{i}");

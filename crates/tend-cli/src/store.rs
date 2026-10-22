@@ -88,8 +88,9 @@ pub fn read_entries(dir: &Path) -> Result<Vec<Entry>> {
     let path = dir.join("ledger.jsonl");
     let f = File::open(&path).with_context(|| format!("open {}", path.display()))?;
     let mut out = Vec::new();
-    for (n, line) in BufReader::new(f).lines().enumerate() {
-        let line = line?;
+    for (n, line) in BufReader::new(f).split(b'\n').enumerate() {
+        // A torn last line can end inside a multi-byte character: skip it, not the ledger.
+        let line = String::from_utf8_lossy(&line?).into_owned();
         if line.trim().is_empty() {
             continue;
         }
@@ -152,6 +153,10 @@ pub fn read_flags(dir: &Path) -> Vec<Flag> {
 }
 
 pub fn read_blob(dir: &Path, hash: &str) -> Result<String> {
+    // A blob name is a sha256 in hex: never a path (`../x`).
+    if hash.is_empty() || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!("not a blob hash: {hash}");
+    }
     let p = dir.join("blobs").join(hash);
     fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))
 }
@@ -167,6 +172,16 @@ mod tests {
         let entry = r#"{"seq":1,"ts_ms":0,"body":{"kind":"event","event":{"type":"turn_ended"}}}"#;
         fs::write(d.join("ledger.jsonl"), format!("{first}\n{entry}\n")).unwrap();
         d
+    }
+
+    /// R0.6: a line torn inside a multi-byte character does not hide the rest.
+    #[test]
+    fn torn_utf8_line_is_skipped() {
+        let d = ledger("utf8", "{\"seq\":0}");
+        let mut b = fs::read(d.join("ledger.jsonl")).unwrap();
+        b.extend_from_slice(b"{\"x\":\"\xe2\x82");
+        fs::write(d.join("ledger.jsonl"), b).unwrap();
+        assert_eq!(read_entries(&d).unwrap().len(), 1);
     }
 
     /// E8: a secret in an output never reaches the disk; the hash still names it.
@@ -244,5 +259,12 @@ mod tests {
         assert!(err.contains("ledger format 99"), "{err}");
         assert!(err.contains("Upgrade tend"), "{err}");
         let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_blob_name_is_never_a_path() {
+        let d = ledger("blobpath", "{\"seq\":0}");
+        assert!(read_blob(&d, "../ledger.jsonl").is_err());
+        assert!(read_blob(&d, "").is_err());
     }
 }

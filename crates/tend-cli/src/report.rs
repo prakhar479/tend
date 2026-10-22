@@ -59,7 +59,13 @@ pub fn find_transcript(path: &Path) -> std::path::PathBuf {
 
 pub fn usage_from_transcript(path: &Path) -> Option<Usage> {
     let f = File::open(path).ok()?;
-    usage_from_lines(BufReader::new(f).lines().map_while(Result::ok))
+    // Bytes, not `lines()`: one line that is not UTF-8 must not end the count.
+    usage_from_lines(
+        BufReader::new(f)
+            .split(b'\n')
+            .map_while(Result::ok)
+            .map(|l| String::from_utf8_lossy(&l).into_owned()),
+    )
 }
 
 /// One API message can appear on several transcript lines (one per content block).
@@ -1244,5 +1250,24 @@ mod tests {
             }
         );
         assert_eq!(u.prompt_total(), 2005);
+    }
+
+    #[test]
+    fn transcript_usage_counts_past_a_line_that_is_not_utf8() {
+        let d = std::env::temp_dir().join(format!("tend-usage-utf8-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("t.jsonl");
+        let line = |id: &str| {
+            format!(
+                "{{\"message\":{{\"id\":\"{id}\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":2}}}}}}\n"
+            )
+        };
+        let mut b = line("a").into_bytes();
+        b.extend_from_slice(b"\xff\xfe not text\n");
+        b.extend(line("b").into_bytes());
+        std::fs::write(&p, b).unwrap();
+        let u = usage_from_transcript(&p).unwrap();
+        assert_eq!(u.output, 4, "both messages: {u:?}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -555,6 +555,11 @@ impl Hub {
                 cwd,
             } => return self.join(role, name, pid, cwd),
             HubRequest::Leave { slot } => {
+                // A session may end only its own watch (dogfood review): the user's
+                // launcher, or the slot's own process tree.
+                if matches!(&by, Actor::Slot { id } if *id != slot) {
+                    return format!("tend: refused. Only {slot} or the user can end its slot.");
+                }
                 if !self.attached.remove(&slot) {
                     return format!("tend: refused. {slot} did not join from a terminal.");
                 }
@@ -1560,8 +1565,12 @@ fn run_with_timeout(dir: &Path, command: &str, timeout: Duration) -> (Option<i32
     let out = child.stdout.take();
     let reader = thread::spawn(move || {
         let mut buf = Vec::new();
-        if let Some(out) = out {
-            let _ = out.take(CHECK_OUTPUT_BYTES as u64).read_to_end(&mut buf);
+        if let Some(mut out) = out {
+            let _ = (&mut out)
+                .take(CHECK_OUTPUT_BYTES as u64)
+                .read_to_end(&mut buf);
+            // Past the cap: keep reading, so the check is not blocked or killed by SIGPIPE.
+            let _ = std::io::copy(&mut out, &mut std::io::sink());
         }
         String::from_utf8_lossy(&buf).to_string()
     });
@@ -1663,17 +1672,25 @@ fn audit_flags(root: &Path, from: &str, scratch: &Path) -> Vec<String> {
 /// Copy a slot's output to its log, and tell the hub about activity and turn ends.
 fn read_output(out: impl Read, mut log: File, slot: &str, tx: &Sender<Msg>) {
     let mut last = 0;
-    for line in BufReader::new(out).lines() {
-        let Ok(line) = line else { break };
+    let mut reader = BufReader::new(out);
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        // Bytes, not `lines()`: a line that is not UTF-8 must not end the reading.
+        if !matches!(reader.read_until(b'\n', &mut raw), Ok(n) if n > 0) {
+            break;
+        }
+        let line = String::from_utf8_lossy(&raw);
+        let line = line.trim_end_matches(['\n', '\r']);
         let _ = writeln!(log, "{line}");
-        let kind = serde_json::from_str::<serde_json::Value>(&line)
+        let kind = serde_json::from_str::<serde_json::Value>(line)
             .ok()
             .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from));
         let sent = if kind.as_deref() == Some("result") {
-            if let Some(e) = usage_of(&line, slot) {
+            if let Some(e) = usage_of(line, slot) {
                 let _ = tx.send(Msg::Event(e));
             }
-            if let Some(e) = limit_of(&line, slot) {
+            if let Some(e) = limit_of(line, slot) {
                 let _ = tx.send(Msg::Event(e));
             }
             tx.send(Msg::TurnEnded(slot.to_string()))
@@ -1846,12 +1863,15 @@ fn limit_of(line: &str, slot: &str) -> Option<FleetEvent> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     let text = v.get("result").and_then(|r| r.as_str()).unwrap_or("");
     let lower = text.to_lowercase();
-    let hit = v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false) || lower.len() < 300;
-    (hit && (lower.contains("usage limit") || lower.contains("session limit"))).then(|| {
-        FleetEvent::UsageLimit {
-            slot: slot.to_string(),
-            text: text.to_string(),
-        }
+    let is_error = v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+    let named = lower.contains("usage limit") || lower.contains("session limit");
+    // Not an error: only a short line that says the limit was hit ("…usage limit
+    // reached", "You've hit your session limit"), not an answer that mentions one.
+    let reached = lower.contains("limit reached") || lower.contains("hit your");
+    let hit = named && (is_error || (lower.len() < 300 && reached));
+    hit.then(|| FleetEvent::UsageLimit {
+        slot: slot.to_string(),
+        text: text.to_string(),
     })
 }
 
@@ -1919,10 +1939,15 @@ fn inbox(dir: &Path, text: &str) {
 
 // --- The client side ---------------------------------------------------------------
 
+/// How long a client waits for the hub. It serves one request at a time and moves
+/// work with git; on a loaded machine (four workers running `make check`) 10 s was
+/// not enough, and a test read "busy" as a failure (dogfood fleet, 2026-10-22).
+const REPLY_WAIT: Duration = Duration::from_secs(30);
+
 /// Send a request to a fleet's hub; its reply message.
 pub fn send(dir: &Path, req: &HubRequest) -> Result<String> {
     let mut stream = UnixStream::connect(socket_path(dir))?;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_read_timeout(Some(REPLY_WAIT))?;
     let mut line = serde_json::to_string(req)?;
     line.push('\n');
     stream.write_all(line.as_bytes())?;
@@ -1933,7 +1958,7 @@ pub fn send(dir: &Path, req: &HubRequest) -> Result<String> {
             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
         ) {
             // Not "down": the hub got it and is busy. Repeating it could do it twice.
-            return Ok("tend: the hub is busy and did not answer in 10 s; your request may still apply. Check with `tend task list` or `tend fleet status` before you repeat it.".into());
+            return Ok("tend: the hub is busy and did not answer in 30 s; your request may still apply. Check with `tend task list` or `tend fleet status` before you repeat it.".into());
         }
         return Err(e.into());
     }
@@ -2951,6 +2976,36 @@ mod tests {
             "the API has a usage limit; ".repeat(20)
         );
         assert!(limit_of(&talk, "w-1").is_none());
+        // A short answer that mentions a limit is not one either (dogfood review).
+        let short =
+            r#"{"type":"result","result":"Done. Note: the API has a usage limit of 100/min."}"#;
+        assert!(limit_of(short, "w-1").is_none());
+        let reached = r#"{"type":"result","result":"You've hit your session limit · resets 4pm"}"#;
+        assert!(limit_of(reached, "w-1").is_some());
+    }
+
+    #[test]
+    fn a_check_with_a_lot_of_output_still_finishes() {
+        let d = std::env::temp_dir();
+        let (code, out) = run_with_timeout(
+            &d,
+            "head -c 6000000 /dev/zero | tr '\\0' x; echo done",
+            Duration::from_secs(20),
+        );
+        assert_eq!(code, Some(0), "{}", out.len());
+    }
+
+    #[test]
+    fn output_that_is_not_utf8_does_not_stop_the_reader() {
+        let d = std::env::temp_dir().join(format!("tend-readout-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let log = File::create(d.join("o.jsonl")).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut input = b"\xff\xfe junk\n".to_vec();
+        input.extend(br#"{"type":"result","result":"ok"}"#);
+        input.push(b'\n');
+        read_output(&input[..], log, "w-1", &tx);
+        assert!(rx.try_iter().any(|m| matches!(m, Msg::TurnEnded(_))));
     }
 
     #[test]

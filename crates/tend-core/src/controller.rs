@@ -712,7 +712,7 @@ impl Controller {
                 self.fleet.on_message(&from, &kind, &text, ev, now_ms);
             }
             Event::Workspace { top, common } => {
-                self.fleet.set_workspace(&top, &common);
+                self.fleet.set_workspace(&top, &common, now_ms);
                 let event = Event::Workspace { top, common };
                 self.push(&mut d, now_ms, vec![], Body::Event { event });
             }
@@ -1403,7 +1403,9 @@ impl Controller {
         let reason = if rewrite_ok {
             "Test command wrapped in `tend run`, so its output can be summarized even when it fails.".to_string()
         } else {
-            "Not wrapped: a rewrite could add a permission prompt in this permission mode."
+            // The connector's `rewrite_ok` covers all three (live: a `for` loop around
+            // cargo test was blamed on the permission mode).
+            "Not wrapped: a rewrite was not safe here. The permission mode can prompt, the call runs in the background, or tend could not find the runner."
                 .to_string()
         };
         let action = ActionKind::Wrap {
