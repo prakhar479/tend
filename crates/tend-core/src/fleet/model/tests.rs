@@ -1146,14 +1146,58 @@ fn stream_roles_take_tasks_when_idle() {
     let c3 = r.ev(add(Actor::User, "three", &[], None));
     assert_eq!(tasks_to(&c), [("peer-1".into(), "t-1".into())]);
     assert_eq!(tasks_to(&c2), [("peer-2".into(), "t-2".into())]);
-    assert!(tasks_to(&c3).is_empty(), "both peers are busy");
+    // Both are busy: a third peer starts, up to the role's maximum (4).
+    assert_eq!(spawned(&c3), ["peer-3"]);
+    r.start_all(&c3);
+    let c4 = r.ev(add(Actor::User, "four", &[], None));
+    r.start_all(&c4);
+    let c5 = r.ev(add(Actor::User, "five", &[], None));
+    assert!(
+        spawned(&c5).is_empty() && tasks_to(&c5).is_empty(),
+        "at the maximum"
+    );
     // peer-1 finishes and ends its turn: it takes the next one.
     r.ev(done("peer-1", "t-1"));
     let c = r.ev(FleetEvent::Activity {
         slot: "peer-1".into(),
         turn_ended: true,
     });
-    assert_eq!(tasks_to(&c), [("peer-1".into(), "t-3".into())]);
+    assert_eq!(tasks_to(&c), [("peer-1".into(), "t-5".into())]);
+}
+
+#[test]
+fn a_stream_role_with_no_session_starts_one_for_its_task() {
+    // Dynamic depth: sub-leads start only when the lead gives one a task, and each
+    // can then split its part for its own workers.
+    let mut r = Sim::new(spec(serde_json::json!({
+        "preset": "lead",
+        "limits": {"sessions": 8, "depth": 2},
+        "role": {"sub": {"run": "stream", "replicas": "0..2", "team": {"preset": "lead"}}}
+    })));
+    let up = r.ev(FleetEvent::Up);
+    assert_eq!(spawned(&up), ["lead-1"], "no sub-lead until there is work");
+    r.start_all(&up);
+    let c = r.ev(add(Actor::User, "WHOLE", &[], Some("lead")));
+    assert_eq!(tasks_to(&c), [("lead-1".into(), "t-1".into())]);
+    let c = r.ev(add(slot("lead-1"), "AREA", &[], Some("sub")));
+    assert_eq!(spawned(&c), ["sub-1"]);
+    let c2 = r.ev(add(slot("lead-1"), "AREA 2", &[], Some("sub")));
+    assert_eq!(spawned(&c2), ["sub-2"]);
+    let c3 = r.ev(add(slot("lead-1"), "AREA 3", &[], Some("sub")));
+    assert!(spawned(&c3).is_empty(), "at the role's maximum: {c3:?}");
+    // The first sub-lead starts, gets its task, and splits it for its own worker.
+    let mut started = Vec::new();
+    for cmd in &c {
+        if let Command::Spawn { slot, .. } = cmd {
+            started.extend(r.ev(FleetEvent::Started {
+                slot: slot.clone(),
+                session: format!("s-{slot}"),
+            }));
+        }
+    }
+    assert_eq!(tasks_to(&started), [("sub-1".into(), "t-1.1".into())]);
+    let c = r.ev(add(slot("sub-1"), "PIECE", &[], None));
+    assert_eq!(spawned(&c), ["sub-1/worker-1"]);
 }
 
 #[test]

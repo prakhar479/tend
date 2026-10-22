@@ -540,6 +540,9 @@ What the run showed about tend:
 - Confirmed fixed from D1: no false worktree-overlap notices this round.
 - Left: the hub's tick loop stalls while the wall clock goes back; the guard's code stripping reads a Rust lifetime followed by a quote as a string.
 
+- [x] **`tend fleet prune` knows taken work.** It kept all 12 worktrees of D1 and D2 because their changes were uncommitted or on `tend/` branches, though the user had applied them as patches. A worktree whose diff since the base reverses cleanly on the repo's index, and whose new files are at HEAD unchanged, is removed (`--force`), marked "its changes are in HEAD".
+- [x] **Dynamic depth.** A stream role (a sub-lead) with no free session now starts one for its task, up to its maximum, as oneshot roles always did. A fleet file can hold sub-lead roles with `replicas = "0..N"`; the lead decides at run time how many areas need one. Before, a task for such a role waited forever. (`peers` now grows to its maximum of 4 when every peer is busy.)
+
 - [ ] **F6 Cross-provider.** After the Codex connector (S10, E12).
 
 ## Phase 2 — Optimize + Codex (not started)

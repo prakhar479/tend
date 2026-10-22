@@ -1261,15 +1261,19 @@ impl Model {
                 self.deliver_task(cx, &tid, &sid);
                 continue;
             }
-            if def.run != Run::Oneshot {
+            // A stream role below its maximum starts a session for the task (a sub-lead
+            // the lead brings in when its work needs one: depth decided at run time).
+            // An attached role is the user's to start.
+            if def.run == Run::Attached {
                 continue;
             }
+            let oneshot = def.run == Run::Oneshot;
             // A oneshot that already had its task is finishing: it does not count.
             let active = self
                 .slots
                 .values()
                 .filter(|s| s.role == role && s.leader == t.board && s.active())
-                .filter(|s| !(s.had_task && s.task.is_none()))
+                .filter(|s| !(oneshot && s.had_task && s.task.is_none()))
                 .count() as u32;
             if active >= def.max {
                 continue;

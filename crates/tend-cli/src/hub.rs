@@ -2336,6 +2336,76 @@ pub fn unread_for_session(inbox: &Path, entries: &[tend_core::Entry]) -> usize {
 
 /// `tend fleet prune`: worktrees of fleets that are down, with no uncommitted changes
 /// and no commits beyond the fleet's base. Lists them; removes them with `yes`.
+/// Whether everything `wt` changed since `base` is already in `repo`'s HEAD: its diff
+/// (commits and uncommitted edits) reverses cleanly on the index, and each new file
+/// is at HEAD with the same content. Nothing is changed.
+fn changes_in_head(repo: &Path, wt: &Path, base: &str) -> bool {
+    let Ok(diff) = Command::new("git")
+        .arg("-C")
+        .arg(wt)
+        .args([
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-color",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            base,
+        ])
+        .stdin(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    if !diff.status.success() {
+        return false;
+    }
+    if !diff.stdout.is_empty() {
+        let applies = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["apply", "--check", "-R", "--cached", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .and_then(|mut c| {
+                if let Some(mut i) = c.stdin.take() {
+                    i.write_all(&diff.stdout)?;
+                }
+                c.wait()
+            })
+            .is_ok_and(|s| s.success());
+        if !applies {
+            return false;
+        }
+    }
+    let new = git_out(
+        wt,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+        ],
+    )
+    .unwrap_or_default();
+    new.lines().filter(|l| !l.is_empty()).all(|f| {
+        let at_head = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["show", &format!("HEAD:{f}")])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| o.stdout);
+        at_head.is_some_and(|h| fs::read(wt.join(f)).is_ok_and(|w| w == h))
+    })
+}
+
 pub fn prune(yes: bool) -> Result<String> {
     let mut out = String::new();
     let (mut removed, mut kept) = (0, 0);
@@ -2370,12 +2440,21 @@ pub fn prune(yes: bool) -> Result<String> {
             // Its branch, or a detached HEAD in it, past the base: unmerged commits.
             let ahead =
                 count(format!("{base}..{branch}"), repo).max(count(format!("{base}..HEAD"), &wt));
-            let why = if dirty {
+            // Work the user already took (a patch applied, a merge) is not lost.
+            let taken = (dirty || ahead > 0) && changes_in_head(repo, &wt, base);
+            let why = if taken {
+                None
+            } else if dirty {
                 Some("it has uncommitted changes".to_string())
             } else if ahead > 0 {
                 Some(format!("{branch} has {ahead} commit(s) not in the base"))
             } else {
                 None
+            };
+            let note = if taken {
+                " (its changes are in HEAD)"
+            } else {
+                ""
             };
             match why {
                 Some(w) => {
@@ -2387,6 +2466,7 @@ pub fn prune(yes: bool) -> Result<String> {
                         .arg("-C")
                         .arg(repo)
                         .args(["worktree", "remove"])
+                        .args(taken.then_some("--force"))
                         .arg(&wt)
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
@@ -2395,7 +2475,7 @@ pub fn prune(yes: bool) -> Result<String> {
                     if ok {
                         let _ = git_out(repo, &["branch", "-D", &branch]);
                         removed += 1;
-                        let _ = writeln!(out, "removed {}", wt.display());
+                        let _ = writeln!(out, "removed {}{note}", wt.display());
                     } else {
                         kept += 1;
                         let _ =
@@ -2404,7 +2484,7 @@ pub fn prune(yes: bool) -> Result<String> {
                 }
                 None => {
                     removed += 1;
-                    let _ = writeln!(out, "would remove {}", wt.display());
+                    let _ = writeln!(out, "would remove {}{note}", wt.display());
                 }
             }
         }
@@ -3119,6 +3199,53 @@ tokens   = "20M"
         let e = load_spec(Some(&f), None).unwrap_err().to_string();
         assert!(e.contains("rolez"), "{e}");
         assert!(load_spec(None, None).is_err(), "nothing to run");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_worktree_whose_changes_are_in_head_is_taken() {
+        let d = std::env::temp_dir().join(format!("tend-taken-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        let repo = d.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let git = |at: &Path, args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(at)
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "commit.gpgsign=false"
+                ])
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success());
+        };
+        fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "base"]);
+        let base = git_out(&repo, &["rev-parse", "HEAD"]).unwrap();
+        git(&repo, &["worktree", "add", "-q", "../wt"]);
+        let wt = d.join("wt");
+        fs::write(wt.join("a.txt"), "a\nb\n").unwrap();
+        fs::write(wt.join("new.txt"), "n\n").unwrap();
+        assert!(!changes_in_head(&repo, &wt, &base), "not taken yet");
+        // The user takes it as a patch, and commits.
+        fs::write(repo.join("a.txt"), "a\nb\n").unwrap();
+        fs::write(repo.join("new.txt"), "n\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "taken"]);
+        assert!(changes_in_head(&repo, &wt, &base));
+        // One more change in the worktree: not taken.
+        fs::write(wt.join("a.txt"), "a\nb\nc\n").unwrap();
+        assert!(!changes_in_head(&repo, &wt, &base));
         let _ = fs::remove_dir_all(&d);
     }
 }
