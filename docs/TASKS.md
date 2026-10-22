@@ -2,6 +2,15 @@
 
 Status key: `[ ]` open · `[x]` done. Work top to bottom. One task at a time.
 
+## Current state (2026-10-22)
+
+The sections below are the history, in order. This is where things stand.
+
+- **Built:** look and optimize mode for Claude Code (summaries, test guard, loop steers, Bash-write guard, wrap through `tend run`); the plugin; reports, `why`, `flag`, `review`, `retro`; repo policy (`.tend.toml`); the experimental audit; fleet awareness (F1); shared learning with diffs and project notes (F2, L1–L9); fleets with hub, tasks, checks, merges, hierarchy and on-demand sub-leads (F3–F5, G1–G10, M1); `tend task drop/show`.
+- **Checked:** `make check` (256 core, 112 cli unit, 49 e2e tests); conformance on Claude Code 2.1.308 (9/9); fuzz targets guard, output, shell (5 min each, no crash); shim p95 ~1.5 ms; three dogfood fleet rounds over the whole repo (D1–D3, about 90 fixes).
+- **Next (owner's call):** a week of real use in optimize mode on other projects (N16 / R2.4), then a fleet on a project that is not tend. Open decisions: agent-supplied `--check` runs outside the agent's permissions (Review 2); whether fleet becomes the lead feature.
+- **Open, small:** the D3 report's "left open" list (Dogfood D3 below); the `sessions` stale-socket test flake (not reproduced); macOS (N15); Codex (S10, F6) needs a Codex CLI.
+
 ## Phase 0 — Spikes (validate assumptions)
 
 Goal: replace every `[Verify]` in the code with a tested fact. Record each result under "Spike results".

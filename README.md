@@ -6,7 +6,7 @@ Design: [`docs/tend-reference.md`](docs/tend-reference.md). Work items: [`docs/T
 
 ## Status
 
-Prototype. Claude Code only (tested with 2.1.303 and 2.1.304). Look mode, the default, records only. Optimize mode summarizes test, build, and install output, guards test edits, and steers loops. Linux and WSL are tested; macOS is not yet (N15). Windows is not supported.
+Prototype. Claude Code only (conformance checked on 2.1.303, 2.1.304, and 2.1.308; `tend doctor` says whether yours is). Look mode, the default, records only. Optimize mode summarizes test, build, and install output, guards test edits, steers loops, and recalls fixes other sessions learned. Fleets (`tend fleet up`) run teams of headless sessions with a task board, checks, and worktrees. Linux and WSL are tested; macOS is not yet (N15). Windows is not supported.
 
 ## Install
 
