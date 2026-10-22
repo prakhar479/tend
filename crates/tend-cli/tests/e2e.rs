@@ -9,7 +9,22 @@ use std::thread;
 use std::time::Duration;
 
 fn bin() -> &'static str {
+    hermetic();
     env!("CARGO_BIN_EXE_tend")
+}
+
+/// The tests set every `TEND_*` they need. One inherited from the shell that runs them
+/// (a tend session, a fleet worker running `make check`) would change what they test:
+/// a fleet slot refuses fleet control. Cleared once, before a test reads the env.
+fn hermetic() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        for (k, _) in std::env::vars_os() {
+            if k.to_string_lossy().starts_with("TEND_") {
+                std::env::remove_var(k);
+            }
+        }
+    });
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -19,6 +34,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn tmp(name: &str) -> PathBuf {
+    hermetic();
     let d = std::env::temp_dir().join(format!("tend-e2e-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
